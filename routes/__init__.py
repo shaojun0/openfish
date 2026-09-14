@@ -7,6 +7,7 @@ Layout
 ``/api/v1/*``         JSON contract consumed by the Vue SPA and by API-key clients
 ``/simple/*``         PEP 503 / PEP 691 — consumed by pip, uv, twine
 ``/python-builds/*``  uv CPython mirror
+``/openapi.json``     OpenAPI 3.1 description; ``/docs`` and ``/llms.txt`` alongside
 ``/auth/*``           OAuth2 login flow
 ``/*``                the SPA shell (see ``routes/spa.py``)
 """
@@ -25,6 +26,7 @@ def register_all(app):
     from routes.admin import admin_bp
     from routes.python_build import python_build_bp
     from routes.session import session_bp
+    from routes.discovery import discovery_bp
     from routes.spa import spa_bp
 
     prefix = settings.server.route_prefix
@@ -44,6 +46,10 @@ def register_all(app):
     app.register_blueprint(pypi_bp, url_prefix=prefix)
     app.register_blueprint(python_build_bp, url_prefix=prefix)
     app.register_blueprint(auth_router, url_prefix=prefix)
+
+    # ── API discovery: /openapi.json, /docs, /llms.txt, /.well-known/... ──
+    # Anonymous by design: these publish the contract, never registry data.
+    app.register_blueprint(discovery_bp, url_prefix=prefix)
 
     # ── JSON API consumed by the SPA ────────────────────────────────
     app.register_blueprint(session_bp, url_prefix=api)

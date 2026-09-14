@@ -13,6 +13,7 @@ from auth.decorators import require_permission
 from auth.guards import AUTH_METHODS
 from auth.permissions import Permission, get_permissions, has_permission
 from config import settings
+from openapi import api_operation, array_of, errors, ok
 
 session_bp = Blueprint("session", __name__)
 
@@ -37,6 +38,20 @@ def identify() -> tuple[dict | None, str | None]:
 
 
 @session_bp.route("/session")
+@api_operation(
+    summary="Describe the calling identity",
+    description=(
+        "Returns the authenticated subject, its role, and the exact permission "
+        "strings it holds. Always answers HTTP 200: an anonymous caller gets "
+        "`authenticated: false` rather than a 401, so a client can render a "
+        "signed-out state without treating it as an error.\n\n"
+        "**Start here.** The `permissions` array tells you which of the other "
+        "endpoints the configured credential may call."
+    ),
+    tags=["Session"],
+    security=[],
+    responses={"200": ok("The calling identity", "SessionInfo")},
+)
 def whoami():
     user, method = identify()
     role = user.get("role", "anonymous") if user else "anonymous"
@@ -57,6 +72,20 @@ def whoami():
 
 @session_bp.route("/packages")
 @require_permission(Permission.PACKAGE_READ)
+@api_operation(
+    summary="List packages",
+    description=(
+        "Every package in the registry with its file count, total size and "
+        "per-package download/upload counters. Sorted by activity, most active "
+        "first. Use the trailing `/simple/` endpoints to enumerate the actual "
+        "files of one package."
+    ),
+    tags=["Packages"],
+    responses={
+        "200": ok("Package list", array_of("PackageSummary")),
+        **errors("401", "403", "500"),
+    },
+)
 def packages():
     """Aggregated package view for the SPA's package browser.
 

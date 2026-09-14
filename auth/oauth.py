@@ -72,9 +72,7 @@ def exchange_code(code: str) -> dict | None:
 
 
 def _role_for(identifier: str) -> str:
-    from config import settings
-    if settings.auth.basic_username and identifier == settings.auth.basic_username:
-        return "admin"
-    if identifier in settings.server.admin_users:
-        return "admin"
-    return "authenticated"
+    """Map an introspected subject to a role (see `auth.permissions.role_for`)."""
+    from auth.permissions import role_for
+
+    return role_for(identifier)

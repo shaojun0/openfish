@@ -23,9 +23,14 @@ dependencies = [
 
 [project.optional-dependencies]
 prod = ["gunicorn>=22"]
+# Verification gates — see scripts/check_openapi.py and scripts/check_contract.py
+dev = ["openapi-spec-validator>=0.7"]
 
 [project.scripts]
 cpypiserver = "app:main"
 
 [tool.setuptools.packages.find]
-include = ["models*", "config*", "auth*", "index*", "services*", "extensions*", "routes*"]
+include = [
+    "models*", "config*", "auth*", "index*", "services*",
+    "extensions*", "routes*", "openapi*",
+]

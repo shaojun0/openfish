@@ -13,6 +13,7 @@ from typing import Optional
 
 from sqlalchemy.orm import scoped_session
 
+from auth.permissions import role_for
 from models.api_key import ApiKey, ApiKeyStats
 
 KEY_PREFIX = "cpypi_"
@@ -104,7 +105,10 @@ class ApiKeyManager:
                 "sub": entry.created_by,
                 "key_id": entry.id,
                 "key_name": entry.name,
-                "role": "authenticated",
+                # A key inherits the role of the user it was issued to, resolved
+                # by the same rule session and OAuth2 use. Without this an API
+                # key could never reach the admin endpoints.
+                "role": role_for(entry.created_by),
                 "auth_method": "api_key",
             }
         except Exception:

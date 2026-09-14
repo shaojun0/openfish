@@ -205,6 +205,50 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 such as `/api-keys` is handled by Flask's history-mode fallback, so links can be
 shared and bookmarked.
 
+### Discovery surface (anonymous)
+
+An agent that knows only the base URL can bootstrap itself:
+
+| Path | Purpose |
+| ---- | ------- |
+| `/openapi.json` | OpenAPI 3.1 document — every endpoint, schema and security scheme |
+| `/docs` | The same document as plain HTML — no JavaScript, no CDN |
+| `/llms.txt` | Curated Markdown index laid out per the [llms.txt](https://llmstxt.org/) v2 proposal |
+| `/.well-known/api-catalog` | [RFC 9727](https://www.rfc-editor.org/info/rfc9727/) linkset pointing at the three above |
+
+Every response also carries `Link: </openapi.json>; rel="service-desc"`, so the
+description is discoverable from any URL without guessing a path. These four
+routes are anonymous on purpose: they publish the *contract*, never registry
+data.
+
+**Authentication for agents.** Create an API key on `/api-keys`, then send it as
+`Authorization: Bearer <key>`. A key **inherits the role of the user who created
+it**, so a key minted by an administrator can also call `/api/v1/admin/*`. Ask
+`GET /api/v1/session` what a given key may do — the response carries the exact
+`permissions` array.
+
+### Keeping the description honest
+
+`/openapi.json` is **generated from the live Flask `url_map`** plus an
+`@api_operation(...)` decorator on each view, so it cannot advertise an endpoint
+the server does not serve. The reverse direction — a served endpoint missing
+from the description — is a gate rather than a hope:
+
+```bash
+# Static: coverage, $ref resolution, unique operationIds, OpenAPI 3.1 validity
+python scripts/check_openapi.py
+
+# Live: validate real responses against the models the spec references
+python scripts/check_contract.py --base-url http://127.0.0.1:9090 --api-key cpypi_…
+```
+
+`check_openapi.py` exits non-zero when a machine endpoint carries no
+`@api_operation` metadata, a `$ref` dangles, two operations share an
+`operationId`, or the document fails `openapi-spec-validator` (installed via
+`pip install -e '.[dev]'`). `check_contract.py` closes the loop by calling each
+documented endpoint and handing the response to the pydantic model the spec
+points at.
+
 ## Frontend architecture
 
 The split is by **audience**, not by convenience:
@@ -226,11 +270,14 @@ app.py                 entry point — wires extensions, then routes
 config/                pydantic-settings models (server, storage, auth, security)
 extensions/            pluggable infrastructure + topological init registry
 routes/                Flask blueprints (pypi, python_build, api_keys, admin,
-                       session, spa, auth)
+                       session, discovery, spa, auth)
+openapi/               API description: metadata registry, spec builder, renderers
 auth/                  guards, decorators, permission model, API keys, OAuth2
 index/                 package / build discovery and indexing
 models/                SQLAlchemy models (API keys, stats)
 services/              templates, stats aggregation, validation
+schemas.py             request + response models (single source for /openapi.json)
+scripts/               verification gates (check_openapi.py, check_contract.py)
 frontend/              Vue 3 + Vite + Element Plus SPA (build-time only)
 static/                machine-facing templates + the built SPA in static/dist/
 docker/                docker-compose.yml and its .env template

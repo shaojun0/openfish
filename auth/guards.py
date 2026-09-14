@@ -116,13 +116,14 @@ def try_session() -> bool:
 
 
 def _role_for(identifier: str) -> str:
-    """Map a user identifier to its role."""
-    from config import settings
-    if settings.auth.basic_username and identifier == settings.auth.basic_username:
-        return "admin"
-    if identifier in settings.server.admin_users:
-        return "admin"
-    return "authenticated"
+    """Map a user identifier to its role.
+
+    Kept as a thin alias so existing importers keep working; the rule itself
+    lives in :func:`auth.permissions.role_for`.
+    """
+    from auth.permissions import role_for
+
+    return role_for(identifier)
 
 
 # ── Method registry (used by decorator) ──────────────────────────────

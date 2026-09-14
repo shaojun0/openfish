@@ -91,3 +91,24 @@ def get_permissions(role: str) -> set[Permission]:
 def has_permission(role: str, perm: Permission) -> bool:
     """Check whether *role* possesses *perm*."""
     return perm in get_permissions(role)
+
+
+def role_for(identifier: str) -> str:
+    """Map an authenticated user identifier to a role.
+
+    The configured HTTP Basic username and anyone listed in ``ADMIN_USERS`` are
+    administrators; every other authenticated identifier is a regular member.
+
+    This is the single definition of that rule. Session, OAuth2 and API-key
+    authentication all resolve roles through it, so a key cannot end up with a
+    different role than the user it was issued to.
+    """
+    from config import settings
+
+    if not identifier:
+        return "authenticated"
+    if settings.auth.basic_username and identifier == settings.auth.basic_username:
+        return "admin"
+    if identifier in settings.server.admin_users:
+        return "admin"
+    return "authenticated"

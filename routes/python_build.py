@@ -10,6 +10,7 @@ from flask import (
 
 from config import settings
 from auth.decorators import require_auth
+from openapi import api_operation, binary, errors, ok
 from services import templates
 
 logger = logging.getLogger("cpypiserver.python_build")
@@ -22,6 +23,20 @@ def _index():
 
 @require_auth()
 @python_build_bp.route("/python-builds/")
+@api_operation(
+    summary="Available CPython builds",
+    description=(
+        "Release tags of the prebuilt CPython mirror, as an HTML page of links — "
+        "the layout `uv python install` expects when "
+        "`UV_PYTHON_INSTALL_MIRROR` points here.\n\n"
+        "A wire protocol for `uv`, not a browsing page."
+    ),
+    tags=["Python builds"],
+    responses={
+        "200": {"description": "Release listing", "content": {"text/html": {}}},
+        **errors("401", "404", "500"),
+    },
+)
 def discovery():
     idx = _index()
     if idx is None:
@@ -42,6 +57,15 @@ def discovery():
 
 @require_auth()
 @python_build_bp.route("/python-builds/<release_tag>/")
+@api_operation(
+    summary="Builds within one release",
+    description="Every artifact published for a release tag, as an HTML page of links.",
+    tags=["Python builds"],
+    responses={
+        "200": {"description": "Artifact listing", "content": {"text/html": {}}},
+        **errors("401", "404", "500"),
+    },
+)
 def release_page(release_tag: str):
     idx = _index()
     if idx is None:
@@ -60,6 +84,15 @@ def release_page(release_tag: str):
 
 @require_auth()
 @python_build_bp.route("/python-builds/<release_tag>/<filename>")
+@api_operation(
+    summary="Download a CPython build",
+    description="Streams one prebuilt interpreter archive.",
+    tags=["Python builds"],
+    responses={
+        "200": binary("The requested build archive"),
+        **errors("401", "404", "500"),
+    },
+)
 def download(release_tag: str, filename: str):
     idx = _index()
     if idx is None:
@@ -75,6 +108,16 @@ def download(release_tag: str, filename: str):
 
 
 @python_build_bp.route("/python-builds/health")
+@api_operation(
+    summary="CPython mirror status",
+    description=(
+        "Counts and sizes of the mirror. Reports `status: disabled` rather than "
+        "failing when no builds directory is configured, and needs no credentials."
+    ),
+    tags=["Python builds"],
+    security=[],
+    responses={"200": ok("Mirror status", "BuildMirrorHealth"), **errors("500")},
+)
 def health():
     idx = _index()
     if idx is None:
@@ -88,6 +131,15 @@ def health():
 
 @require_auth()
 @python_build_bp.route("/python-builds/<release_tag>/<filename>/sha256")
+@api_operation(
+    summary="Checksum of one build",
+    description="SHA-256 of a build archive, for verifying a download.",
+    tags=["Python builds"],
+    responses={
+        "200": ok("Checksum", "BuildChecksum"),
+        **errors("401", "404", "500"),
+    },
+)
 def sha256(release_tag: str, filename: str):
     idx = _index()
     if idx is None:

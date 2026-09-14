@@ -12,6 +12,7 @@ import logging
 from flask import Blueprint, current_app, jsonify
 
 from auth.decorators import require_admin
+from openapi import api_operation, errors, ok
 from services.stats import compute as compute_stats
 
 admin_bp = Blueprint("admin", __name__)
@@ -20,6 +21,17 @@ _log = logging.getLogger("cpypiserver.admin")
 
 @admin_bp.route("/stats")
 @require_admin
+@api_operation(
+    summary="Server-wide statistics",
+    description=(
+        "Aggregated counters plus per-package and per-key rankings. Served from "
+        "a cache that a background thread refreshes periodically, so the numbers "
+        "can lag by up to one refresh interval — call `POST /refresh-stats` "
+        "first when you need them to be current."
+    ),
+    tags=["Administration"],
+    responses={"200": ok("Aggregated statistics", "AdminStats"), **errors("401", "403", "500")},
+)
 def stats():
     cache = current_app.extensions.get("caching")
     if cache is not None:
@@ -32,6 +44,15 @@ def stats():
 
 @admin_bp.route("/refresh-stats", methods=["POST"])
 @require_admin
+@api_operation(
+    summary="Recompute statistics",
+    description="Forces a synchronous recomputation and replaces the cached value.",
+    tags=["Administration"],
+    responses={
+        "200": ok("Statistics recomputed"),
+        **errors("401", "403", "503"),
+    },
+)
 def refresh_stats():
     cache = current_app.extensions.get("caching")
     if cache is None:

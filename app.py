@@ -48,10 +48,16 @@ from routes import register_all
 register_all(app)
 
 # ── Run ─────────────────────────────────────────────────────────────
-if __name__ == "__main__":
+
+def main() -> None:
+    """Console-script entry point (see `[project.scripts]` in pyproject.toml)."""
     app.run(
         host=settings.server.host,
         port=settings.server.port,
         debug=settings.server.debug,
         use_reloader=False,
     )
+
+
+if __name__ == "__main__":
+    main()

@@ -15,6 +15,7 @@ from flask_pydantic import validate
 
 from config import settings
 from errors import BadRequestError, PackageNotFoundError, UploadConflictError
+from openapi import api_operation, binary, errors, ref
 from schemas import FormatQuery
 from services.validation import validate_file
 from index.packages import normalize_package_name
@@ -25,7 +26,39 @@ logger = logging.getLogger("cpypiserver")
 pypi_bp = Blueprint("pypi", __name__)
 
 
+_FORMAT_PARAM = {
+    "name": "format",
+    "in": "query",
+    "required": False,
+    "schema": {"type": "string", "enum": ["json"]},
+    "description": "Set to `json` for the PEP 691 representation, equivalent to sending the vendor Accept header.",
+}
+
+_JSON_ACCEPT = "application/vnd.pypi.simple.v1+json"
+
+
 @pypi_bp.route("/simple/")
+@api_operation(
+    summary="Simple repository index (PEP 503 / PEP 691)",
+    description=(
+        "The index that `pip` and `uv` read. Returns HTML by default; send "
+        f"`Accept: {_JSON_ACCEPT}` or `?format=json` for the JSON form.\n\n"
+        "This is a wire protocol rather than a web page: the HTML is deliberately "
+        "minimal and carries one link per project."
+    ),
+    tags=["Packages"],
+    parameters=[_FORMAT_PARAM],
+    responses={
+        "200": {
+            "description": "All projects, as HTML or PEP 691 JSON per content negotiation",
+            "content": {
+                "text/html": {},
+                _JSON_ACCEPT: {"schema": ref("SimpleIndexJson")},
+            },
+        },
+        **errors("401", "500"),
+    },
+)
 @validate(query=FormatQuery)
 def simple_index(query: FormatQuery):
     packages = current_app.extensions["pypi_index"].get_snapshot()
@@ -36,6 +69,26 @@ def simple_index(query: FormatQuery):
 
 
 @pypi_bp.route("/simple/<package_name>/")
+@api_operation(
+    summary="Files of one project",
+    description=(
+        "Every distribution file for a project, with hashes. Package names are "
+        "normalised per PEP 503, so `Demo.Pkg`, `demo-pkg` and `demo_pkg` all "
+        "resolve to the same project."
+    ),
+    tags=["Packages"],
+    parameters=[_FORMAT_PARAM],
+    responses={
+        "200": {
+            "description": "File list, as HTML or PEP 691 JSON per content negotiation",
+            "content": {
+                "text/html": {},
+                _JSON_ACCEPT: {"schema": ref("SimpleProjectJson")},
+            },
+        },
+        **errors("401", "404", "500"),
+    },
+)
 @validate(query=FormatQuery)
 def package_page(query: FormatQuery, package_name: str):
     files = current_app.extensions["pypi_index"].get_files(package_name)
@@ -55,6 +108,19 @@ def package_page(query: FormatQuery, package_name: str):
 
 
 @pypi_bp.route("/packages/<path:filename>")
+@api_operation(
+    summary="Download a distribution file",
+    description=(
+        "Streams a file straight from disk. This is the URL that appears in the "
+        "simple index, so `pip` and `uv` fetch it directly. Downloads made with "
+        "an API key are attributed to that key's usage counters."
+    ),
+    tags=["Packages"],
+    responses={
+        "200": binary("The requested distribution file"),
+        **errors("401", "404", "500"),
+    },
+)
 def serve_package(filename: str):
     _record_download(filename)
     resp = send_from_directory(settings.storage.packages_dir, filename)
@@ -63,6 +129,18 @@ def serve_package(filename: str):
 
 
 @pypi_bp.route("/simple/<package_name>/<filename>")
+@api_operation(
+    summary="Download a file via its project path",
+    description=(
+        "Equivalent to `/packages/<filename>`, kept because some clients resolve "
+        "relative to the project index URL."
+    ),
+    tags=["Packages"],
+    responses={
+        "200": binary("The requested distribution file"),
+        **errors("401", "404", "500"),
+    },
+)
 def serve_package_from_simple(package_name: str, filename: str):
     _record_download(filename)
     resp = send_from_directory(settings.storage.packages_dir, filename)
@@ -72,6 +150,51 @@ def serve_package_from_simple(package_name: str, filename: str):
 
 @pypi_bp.route("/", methods=["POST"])
 @pypi_bp.route("/legacy/", methods=["POST"])
+@api_operation(
+    summary="Upload a distribution (twine)",
+    description=(
+        "Publishes a distribution file. `twine upload --repository-url <base>/ "
+        "--username __token__ --password <API-key> dist/*` speaks exactly this "
+        "endpoint.\n\n"
+        "The file is validated before it is stored: extension allow-list, MIME "
+        "sniffing, executable-signature scan, archive structure (a wheel must "
+        "contain `WHEEL` and `METADATA` in its `.dist-info`), and an optional "
+        "ClamAV scan. SHA-256 is computed while streaming to a temporary file, so "
+        "the whole body is never held in memory."
+    ),
+    tags=["Upload"],
+    request_body={
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["content"],
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "format": "binary",
+                            "description": "The distribution file (.whl, .tar.gz, .zip or .tar)",
+                        },
+                        ":action": {"type": "string", "description": "twine sends `file_upload`"},
+                        "protocol_version": {"type": "string"},
+                        "name": {"type": "string", "description": "Project name"},
+                        "version": {"type": "string"},
+                        "filetype": {"type": "string", "description": "e.g. bdist_wheel, sdist"},
+                        "pyversion": {"type": "string", "description": "e.g. py3, source"},
+                    },
+                }
+            }
+        },
+    },
+    responses={
+        "200": {
+            "description": "The file was stored",
+            "content": {"text/plain": {"schema": {"type": "string"}, "example": "Success"}},
+        },
+        **errors("400", "401", "409", "413"),
+    },
+)
 def upload():
     if "content" not in request.files:
         raise BadRequestError("Missing 'content' field")

@@ -31,6 +31,11 @@ _RESERVED_PREFIXES = (
     "auth/",
     "health",
     "favicon.ico",
+    # API discovery surface — explicit routes exist, but keep the catch-all
+    # from ever swallowing a typo'd path in these namespaces.
+    ".well-known/",
+    "openapi.json",
+    "llms.txt",
 )
 
 

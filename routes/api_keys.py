@@ -8,11 +8,25 @@ The HTML dashboard that used to live here is now part of the Vue SPA
 from flask import Blueprint, current_app, g, jsonify, request, session
 
 from errors import UnauthorizedError
+from openapi import api_operation, array_of, errors, json_body, ok
 
 api_keys_bp = Blueprint("api_keys", __name__)
 
 
 @api_keys_bp.route("/keys", methods=["GET"])
+@api_operation(
+    summary="List API keys",
+    description=(
+        "Keys created by the calling subject, newest first, each with its usage "
+        "breakdown inlined as `stats_detail`. The raw secret is never included — "
+        "only a short `prefix` for identification."
+    ),
+    tags=["API keys"],
+    responses={
+        "200": ok("API keys owned by the caller", array_of("ApiKey")),
+        **errors("401", "403", "500"),
+    },
+)
 def list_keys():
     _require_auth()
     mgr = current_app.extensions["api_key_manager"]
@@ -23,6 +37,22 @@ def list_keys():
 
 
 @api_keys_bp.route("/keys", methods=["POST"])
+@api_operation(
+    summary="Create an API key",
+    description=(
+        "Mints a new key. **The `key` field in the response is the only time the "
+        "secret is ever transmitted** — the server stores just its SHA-256, so "
+        "capture it immediately.\n\n"
+        "Use the key as `Authorization: Bearer <key>`, or as the password of an "
+        "HTTP Basic request with the username `__token__` for pip/twine."
+    ),
+    tags=["API keys"],
+    request_body={"required": True, "content": json_body("CreateKeyRequest")},
+    responses={
+        "201": ok("Key created — copy the `key` field now", "CreatedApiKey"),
+        **errors("400", "401", "403", "500"),
+    },
+)
 def create_key():
     _require_auth()
     data = request.get_json(silent=True) or {}
@@ -45,6 +75,18 @@ def create_key():
 
 
 @api_keys_bp.route("/keys/<key_id>", methods=["DELETE"])
+@api_operation(
+    summary="Revoke an API key",
+    description=(
+        "Permanently deletes the key. Any client still using it loses access "
+        "immediately; this cannot be undone."
+    ),
+    tags=["API keys"],
+    responses={
+        "200": ok("Key revoked", "DeleteResult"),
+        **errors("401", "403", "404", "500"),
+    },
+)
 def delete_key(key_id: str):
     _require_auth()
     mgr = current_app.extensions["api_key_manager"]
@@ -54,6 +96,17 @@ def delete_key(key_id: str):
 
 
 @api_keys_bp.route("/keys/<key_id>/stats", methods=["GET"])
+@api_operation(
+    summary="Per-key usage breakdown",
+    description=(
+        "Download and upload counters for one key, totalled and split by package."
+    ),
+    tags=["API keys"],
+    responses={
+        "200": ok("Usage for this key", "KeyStats"),
+        **errors("401", "403", "500"),
+    },
+)
 def key_stats(key_id: str):
     _require_auth()
     mgr = current_app.extensions["api_key_manager"]
