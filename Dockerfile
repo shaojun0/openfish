@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx \
     supervisor \
     libmagic1 \
+    curl \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /etc/nginx/sites-enabled/default
 
@@ -38,7 +39,7 @@ WORKDIR /app
 COPY pyproject.toml .
 RUN pip install -i https://mirrors.aliyun.com/pypi/simple/ --no-cache-dir \
     $(python -c "import tomllib; deps = tomllib.loads(open('/app/pyproject.toml','r').read())['project']['dependencies']; print(' '.join(deps))") \
-    gunicorn>=22
+    "gunicorn>=22"
 
 # ── Application code ────────────────────────────────────────────────
 # Everything not excluded by .dockerignore lands here.
@@ -52,6 +53,10 @@ COPY --from=frontend /static/dist ./static/dist
 
 # ── Runtime ─────────────────────────────────────────────────────────
 RUN mkdir -p /app/packages /app/data
+
+# config/server.py defaults PORT to 9090; pin it to 8080 so the app matches
+# the EXPOSE / HEALTHCHECK below (and the compose port mapping).
+ENV PORT=8080
 
 EXPOSE 8080
 

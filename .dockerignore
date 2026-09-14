@@ -30,6 +30,11 @@ api_keys_data/
 *.crt
 static/certs/
 
+# Private test-environment bundle: plaintext passwords, TLS cert and runtime
+# data. Its files are root-owned 0600, which also makes the build context
+# scan fail outright, so it must never be part of the context.
+.private/
+
 # ── Docker infra (not needed inside the image) ──────────────────────
 docker/
 Dockerfile

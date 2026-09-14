@@ -31,6 +31,11 @@ docker/.env
 !docker/.env.example
 !/.env.example
 
+# ── Private test-environment bundle ─────────────────────────────────
+# Plaintext passwords, the deployment handbook, TLS cert and runtime data
+# for the public cpypiserver test environment. Local only — never commit.
+.private/
+
 # ── Local runtime data ──────────────────────────────────────────────
 # The trailing * also covers the sidecar files SQLite creates in WAL mode
 # (`.db-wal`, `.db-shm`, `.db-journal`), which the engine turns on explicitly.
