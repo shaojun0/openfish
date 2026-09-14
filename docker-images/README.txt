@@ -1,10 +1,15 @@
-docker-images/ —— Docker 离线制品目录（脚手架）
-===============================================
+docker-images/ —— Docker 离线制品目录与 Registry v2 代理
+========================================================
 
 现状
 ----
-没有 registry 代理：`docker pull` 还不能指向本服务。这里放的是离线制品，
-下载后 `docker load -i <文件>.tar` 导入。
+两条路都可以走：
+
+1. **在线拉取**：配置 `DOCKER_UPSTREAM`（如 https://registry-1.docker.io 或内网
+   registry）后，`docker pull` 可直接指向本服务。清单与 blob 按需回源并缓存，
+   blob 以 digest 寻址、永久有效。见 `routes/docker.py` 里的 `/docker/v2/*`。
+2. **离线导入**：把 `docker save` 的镜像 tar 放进本目录，下载后
+   `docker load -i <文件>.tar` 导入。
 
 文件约定
 --------

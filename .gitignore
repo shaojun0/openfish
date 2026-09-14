@@ -42,6 +42,10 @@ docker/.env
 data/*.db*
 data/*.sqlite*
 data/*.sqlite3*
+# Upstream read-through caches (npm packuments/tarballs, docker manifests and
+# blobs, apt metadata). Derived data, potentially hundreds of megabytes —
+# never committed.
+data/cache/
 api_keys_data/
 docker/api_keys_data/
 packages/

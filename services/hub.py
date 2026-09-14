@@ -52,7 +52,7 @@ _DOC_PREFIXES = ("readme", "license", "changelog")
 _HASH_LIMIT_BYTES = 64 * 1024 * 1024
 
 #: ``(absolute path, mtime, size) -> sha256``.  Bounded crudely: cleared when it
-#: grows past this many entries, which is more than any scaffold will hold.
+#: grows past this many entries, which is more than any catalog directory holds.
 _HASH_CACHE_MAX = 512
 _sha256_cache: dict[tuple[str, float, int], str] = {}
 
@@ -151,7 +151,7 @@ def scan_tools(root: str, *, url_prefix: str = "/tools") -> dict[str, Any]:
 
     Files sitting directly in *root* land in a synthetic ``root`` category the
     UI labels "uncategorized"; a category with no files is reported too, so an
-    empty scaffold category is visible instead of silently missing.
+    empty category is visible instead of silently missing.
     """
     base = Path(root)
     if not base.is_dir():
@@ -241,10 +241,12 @@ def _npm_tarball_entry(path: Path, *, url_prefix: str, meta: dict[str, Any]) -> 
 def scan_npm(root: str, *, upstream: str = "", url_prefix: str = "/npm/files") -> dict[str, Any]:
     """Local npm catalog — explicit entries from ``catalog.json`` plus ``*.tgz``.
 
-    This is a *scaffold*: the server does not implement the npm registry
-    protocol yet, so the only thing that can be served is a tarball placed in
-    this directory.  ``upstream`` is advertised so the UI can print the
-    ``npm config set registry`` line a real proxy will eventually satisfy.
+    This is the *catalog* view: what is physically present in ``NPM_DIR``.  The
+    registry protocol itself — packuments, manifests, tarballs, search — is
+    served by :mod:`routes.npm` on top of :mod:`services.npm_registry`, which
+    consults this directory first and falls back to ``upstream``.  ``upstream``
+    is carried here so the catalog page can print the
+    ``npm config set registry`` line that actually works.
     """
     base = Path(root)
     if not base.is_dir():

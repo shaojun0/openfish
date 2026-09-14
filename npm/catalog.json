@@ -1,5 +1,5 @@
 {
-  "_comment": "本地 npm 目录清单（脚手架）。npm 注册表协议尚未实现；这里列出的条目用于展示 UI，真正可下载的 *.tgz 由 services/hub.py 自动扫描。",
+  "_comment": "本地 npm 目录清单。registry 协议（packument / manifest / tarball / 搜索）由 routes/npm.py 提供；这里列出的条目用于展示与在本地没有同名 tarball 时补充元数据，真正可下载的 *.tgz 由 services/hub.py 自动扫描。",
   "packages": [
     {
       "name": "openfish-hello",

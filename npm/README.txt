@@ -1,15 +1,19 @@
-npm/ —— 本地 npm 目录（脚手架）
-===============================
+npm/ —— 本地 npm 目录与 registry 协议
+======================================
 
 现状
 ----
-npm registry 协议（packument / version manifest / tarball 协商）**尚未实现**。
-当前提供的是本地目录的**静态索引**，可以直接浏览和脚本抓取：
+npm registry 协议（packument / version manifest / tarball 协商 / `/-/v1/search`）
+**已实现**，可直接作为 `npm config set registry` 的目标：
 
-    GET /npm/               HTML 索引（模板 static/npm/index.html）
-    GET /npm/?format=json   全量索引 JSON
-    GET /npm/-/all          全量索引 JSON（npm 旧版约定，见下）
-    GET /npm/-/ping         健康检查，返回 {}
+    GET /npm/<包名>                  packument（缩略或完整，按 Accept 协商）
+    GET /npm/<包名>/<版本>            单个版本 manifest
+    GET /npm/<包名>/-/<文件名>        tarball
+    GET /npm/-/v1/search             搜索（现代约定）
+    GET /npm/                        HTML 索引（模板 static/npm/index.html）
+    GET /npm/?format=json            全量索引 JSON
+    GET /npm/-/all                   全量索引 JSON（npm 旧版约定，见下）
+    GET /npm/-/ping                  健康检查，返回 {}
 
 为什么是 /-/all
 ---------------

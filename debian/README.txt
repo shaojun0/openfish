@@ -1,10 +1,15 @@
-debian/ —— Debian 包目录（脚手架）
-==================================
+debian/ —— Debian 包目录与 apt 镜像代理
+========================================
 
 现状
 ----
-没有 apt 代理：这里提供本地 `.deb` 与配置片段。扁平仓库的索引就是
-`/debian/Packages`，`apt` 可以按 sources.list 直接读取。
+两条路都可以走：
+
+1. **本地扁平仓库**：这里放 `.deb` 与配置片段。索引就是 `/debian/Packages`，
+   由实际存在的 `.deb` 生成，`apt` 可按 sources.list 直接读取。
+2. **镜像代理**：配置 `DEBIAN_UPSTREAM`（如 http://deb.debian.org/debian）后，
+   `/debian/dists/*` 与 `/debian/pool/*` 会从上游按需回源——元数据带 TTL 缓存，
+   `.deb` 流式转发。此时可以直接写 `deb http://<本服务>/debian bookworm main`。
 
 文件约定
 --------

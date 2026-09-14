@@ -64,11 +64,11 @@ onMounted(load)
     </div>
 
     <el-alert
-      type="warning"
+      type="info"
       show-icon
       :closable="false"
-      :title="t('npm.scaffoldTitle')"
-      :description="t('npm.scaffoldDesc')"
+      :title="t('npm.proxyTitle')"
+      :description="t('npm.proxyDesc')"
     />
 
     <el-card shadow="never">

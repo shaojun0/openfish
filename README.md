@@ -13,11 +13,15 @@ the codebase.
   (`/simple/`, upload via `POST /`).
 - **python-build-standalone hosting** — serve and checksum prebuilt CPython
   distributions.
-- **Artifact hub** — beyond Python, the sidebar is grouped by ecosystem: an npm
-  catalog scaffold, a downloadable **tools** directory (`tools/<category>/`) and
-  a **model-routing** table for downstream DSH (`config/model_routes.json`). All
-  three are file-backed, so adding an entry is a file copy — see
-  [Artifact hub](#artifact-hub-tools--npm--model-routing).
+- **Artifact hub** — beyond Python, the sidebar is grouped by ecosystem and each
+  group is a real protocol server, not a listing: an **npm registry**
+  (packuments, manifests, tarballs, `/-/v1/search`), a **Docker Registry v2**
+  pull endpoint, an **apt repository** (flat local index plus a mirror proxy), a
+  downloadable **tools** directory (`tools/<category>/`) and a
+  **model-routing** table for downstream DSH (`config/model_routes.json`). npm,
+  Docker and Debian are read-through proxies: the local directory is the first
+  source, an optional upstream mirror is fetched on demand and cached — see
+  [Artifact hub](#artifact-hub-tools--npm--docker--debian--model-routing).
 - **API keys** — issue, list, revoke and track per-key usage from a web
   dashboard; keys are stored hashed in SQLite.
 - **Pluggable authentication** — HTTP Basic, twine-style `__token__` Basic,
@@ -148,11 +152,27 @@ Templates are provided at `.env.example` (local development) and
 | `ADMIN_USERS`           | `[]`                   | Admin whitelist — **JSON array**, e.g. `["alice"]` |
 | `TOOLS_DIR`             | `tools`                | Tools catalog root — each sub-directory is a category |
 | `NPM_DIR`               | `npm`                  | Local npm catalog (`*.tgz` / `catalog.json`)       |
-| `NPM_UPSTREAM`          | `https://registry.npmmirror.com` | Mirror URL advertised on the npm page    |
-| `DOCKER_DIR`            | `docker-images`        | `docker save` tarballs + compose/Dockerfile |
-| `DOCKER_REGISTRY`       | *(empty)*              | Intranet registry advertised on the docker page |
-| `DEBIAN_DIR`            | `debian`               | Local `.deb` files + apt config snippets |
-| `DEBIAN_MIRROR`         | *(empty)*              | Intranet apt mirror advertised on the debian page |
+| `NPM_UPSTREAM`          | `https://registry.npmmirror.com` | Upstream npm registry — both the advertised `npm config set registry` target and the read-through source |
+| `NPM_PROXY_ENABLED`     | `true`                 | Serve the npm registry protocol; `false` answers only for already-cached packages |
+| `NPM_UPSTREAM_TOKEN`    | *(empty)*              | Bearer token for a private upstream npm registry   |
+| `NPM_TIMEOUT`           | `30`                   | Upstream npm read timeout (seconds)                |
+| `NPM_CACHE_DIR`         | `data/cache/npm`       | Packument + tarball cache                          |
+| `NPM_CACHE_MAX_MB`      | `512`                  | Byte budget for the npm cache (LRU eviction)       |
+| `DOCKER_DIR`            | `docker-images`        | `docker save` tarballs + compose/Dockerfile        |
+| `DOCKER_REGISTRY`       | *(empty)*              | Intranet registry advertised on the docker page    |
+| `DOCKER_UPSTREAM`       | *(empty)*              | Registry v2 endpoint to proxy pulls from (`https://registry-1.docker.io`, or an intranet registry); empty = cached-only |
+| `DOCKER_UPSTREAM_USERNAME` / `DOCKER_UPSTREAM_PASSWORD` | *(empty)* | HTTP Basic credentials for that registry |
+| `DOCKER_DEFAULT_NAMESPACE` | `library`           | Namespace assumed for a single-segment image name  |
+| `DOCKER_TIMEOUT`        | `60`                   | Upstream registry read timeout (seconds)           |
+| `DOCKER_CACHE_DIR`      | `data/cache/docker`    | Manifest + blob cache                              |
+| `DOCKER_CACHE_MAX_MB`   | `1024`                 | Byte budget for the docker cache                   |
+| `DEBIAN_DIR`            | `debian`               | Local `.deb` files + apt config snippets           |
+| `DEBIAN_MIRROR`         | *(empty)*              | Intranet apt mirror advertised on the debian page  |
+| `DEBIAN_UPSTREAM`       | *(empty)*              | apt mirror to proxy `dists/` and `pool/` from; empty = flat local repository only |
+| `DEBIAN_TIMEOUT`        | `60`                   | Upstream apt mirror read timeout (seconds)         |
+| `DEBIAN_CACHE_DIR`      | `data/cache/debian`    | Proxied apt metadata cache                         |
+| `DEBIAN_CACHE_MAX_MB`   | `256`                  | Byte budget for the apt metadata cache             |
+| `DEBIAN_METADATA_TTL`   | `300`                  | Seconds a proxied `Release`/`Packages` document is trusted |
 | `MODELS_FILE`           | `config/model_routes.json` | Model-routing table for downstream DSH         |
 
 Nested fields can also be addressed with the `__` delimiter, e.g.
@@ -299,19 +319,41 @@ Every one is idempotent.
 `CLAMAV_HOST` (empty disables scanning), `CLAMAV_PORT` (3310),
 `CLAMAV_TIMEOUT` (30), `CLAMAV_REQUIRED` (`false`).
 
-## Artifact hub (tools / npm / model routing)
+## Artifact hub (tools / npm / docker / debian / model routing)
 
 The sidebar is grouped by ecosystem rather than listed flat, so the server can
-grow beyond Python without the menu turning into a junk drawer:
+grow beyond Python without the menu turning into a junk drawer. npm, Docker and
+Debian are not merely catalogs: each speaks its ecosystem's **real wire
+protocol** and is a *read-through proxy* — the local directory is consulted
+first, and an optional upstream mirror is fetched on demand and cached:
 
-| Group        | Page       | Backing store                     | Status |
-| ------------ | ---------- | --------------------------------- | ------ |
-| Python       | `/packages`| `PACKAGES_DIR` + CPython mirror   | working |
-| npm          | `/npm`     | `NPM_DIR`                         | scaffold |
-| Docker       | `/docker`  | `DOCKER_DIR`                      | scaffold |
-| Debian       | `/debian`  | `DEBIAN_DIR`                      | scaffold |
-| 工具 / Tools | `/tools`   | `TOOLS_DIR`                       | working |
-| 模型路由     | `/models`  | `MODELS_FILE`                     | working |
+| Group        | Page       | Local store          | Upstream (optional) | Protocol served |
+| ------------ | ---------- | -------------------- | ------------------- | --------------- |
+| Python       | `/packages`| `PACKAGES_DIR` + CPython mirror | —        | PEP 503 / PEP 691 |
+| npm          | `/npm`     | `NPM_DIR`            | `NPM_UPSTREAM`      | npm registry — packuments, manifests, tarballs, `/-/v1/search` |
+| Docker       | `/docker`  | `DOCKER_DIR`         | `DOCKER_UPSTREAM`   | Docker Registry v2 — tags, manifests, blobs |
+| Debian       | `/debian`  | `DEBIAN_DIR`         | `DEBIAN_UPSTREAM`   | flat `Packages` + apt mirror proxy (`dists/`, `pool/`) |
+| 工具 / Tools | `/tools`   | `TOOLS_DIR`          | —                   | direct file downloads |
+| 模型路由     | `/models`  | `MODELS_FILE`        | —                   | publish-only JSON table |
+
+The three proxies share one caching contract, implemented once in
+`services/upstream.py` and used by `services/npm_registry.py`,
+`services/docker_registry.py` and `services/debian_apt.py`:
+
+* **Local first.** A file already in the local directory — or already in the
+  cache — is served without touching the network.
+* **Metadata expires, content does not.** A packument, a tag manifest and an
+  apt `Release`/`Packages` document are cached with a TTL; a tarball, a
+  digest-addressed blob and a `.deb` are immutable.
+* **Every cache has a budget.** `NPM_CACHE_MAX_MB`, `DOCKER_CACHE_MAX_MB` and
+  `DEBIAN_CACHE_MAX_MB` are enforced by least-recently-used eviction, and every
+  body is written through a temp file and renamed, so a reader never sees a
+  half-written entry and an aborted download changes nothing.
+* **Streaming, not buffering.** A 300 MB blob is piped from the upstream socket
+  to the client socket; nothing of that size is ever held in memory.
+* **Empty upstream means local-only.** Leaving `NPM_UPSTREAM`,
+  `DOCKER_UPSTREAM` or `DEBIAN_UPSTREAM` empty turns a proxy into a pure local
+  server rather than an error.
 
 **Tools.** Every immediate sub-directory of `TOOLS_DIR` is a category and every
 file below it is a downloadable tool. An optional `TOOLS_DIR/catalog.json`
@@ -328,20 +370,47 @@ The catalog is re-scanned on every request, so dropping a file in is the whole
 publish step. Downloads go through `/tools/<category>/<filename>` and require
 the `tool:download` permission; the listing requires `tool:read`.
 
-**npm.** A scaffold: the registry protocol is not implemented yet. `/api/v1/npm`
-lists `*.tgz` files found in `NPM_DIR` plus any entries declared in
-`NPM_DIR/catalog.json`, and the page shows the `npm config set registry` line a
-future proxy will satisfy. Entries without a tarball are flagged *metadata only*.
+**npm.** `npm config set registry <server>/npm/` is all a client needs. The
+server answers the registry protocol: a packument per package (abbreviated when
+the client sends `Accept: application/vnd.npm.install-v1+json`, full
+otherwise), one version manifest, the tarball itself, `npm ping` and the modern
+`/-/v1/search`. Tarballs found in `NPM_DIR` and entries declared in
+`NPM_DIR/catalog.json` are the local truth; anything else is fetched from
+`NPM_UPSTREAM` and cached. Every `dist.tarball` URL a client receives is
+rewritten to point back at this server, so a client never needs to reach the
+upstream registry itself.
+
+**Docker.** `GET /docker/v2/` is the API version probe every client makes
+first; from there the usual pull sequence works — `tags/list`, then a manifest
+by tag or digest, then the blobs that manifest references. When the upstream is
+Docker Hub (or any registry that issues a `WWW-Authenticate: Bearer` challenge)
+the server performs the token exchange on the client's behalf, so `docker login`
+is only needed when *this* server asks for credentials. The offline path is
+unchanged: `docker save` tarballs in `DOCKER_DIR` are downloadable and import
+with `docker load -i`.
+
+**Debian.** Two shapes coexist. The **flat local repository** is
+`/debian/Packages`, rendered from the `.deb` files that actually exist on disk
+(apt fails on a `Filename:` that does not resolve), with
+`deb [trusted=yes] <server>/debian/ ./` as the matching source line. With
+`DEBIAN_UPSTREAM` set, `dists/` and `pool/` are additionally proxied, so a
+normal `deb <server>/debian bookworm main` line works too — metadata is cached
+with `DEBIAN_METADATA_TTL`, packages are streamed through, and `Range` requests
+are forwarded so a resumed download still works.
 
 **Model routing.** `MODELS_FILE` (default `config/model_routes.json`) is a small
 JSON document describing the endpoints a downstream intranet DSH may talk to.
 This server publishes the table; it does not proxy inference. The page renders a
 table plus an alias-expanded snippet ready to paste into a DSH config.
 
-All three catalogs are file-backed and read-only over HTTP: there is no upload
-API, by design. The Docker image creates `/app/tools` and `/app/npm`, and
+All the catalogs are file-backed and read-only over HTTP: there is no upload
+API, by design — but *serving* is not read-only any more, so a package installed
+through a proxy does leave a cached copy behind. The Docker image creates
+`/app/tools`, `/app/npm`, `/app/docker-images` and `/app/debian`, and
 `docker/docker-compose.yml` bind-mounts the repository copies so an operator can
-edit them in place.
+edit them in place; the caches live under `/app/data/cache`, on the same
+persistent volume as the API-key database.
+
 
 ### Static index elements
 
@@ -368,24 +437,25 @@ conventions the ecosystem actually recognises:
   `GET /-/v1/search` and the replication feed
   ([npm blog](https://blog.npmjs.org/post/157615772423/deprecating-the-all-registry-endpoint)),
   but private registries (Verdaccio, cnpm, …) still answer it, which makes it the
-  closest thing npm has to a static index.
-
-The modern `/-/v1/search` endpoint is the intended replacement for `/-/all` and
-is not implemented yet — see the npm scaffold note above.
+  closest thing npm has to a static index. The endpoint npm actually uses today,
+  `GET /npm/-/v1/search`, is served as well.
 
 Docker and Debian each have one recognised enumeration endpoint too, and the
 indexes use them:
 
 * `GET /docker/v2/_catalog` → `{"repositories": [...]}` — the OCI distribution
   spec's repository list, the only enumeration endpoint the docker registry
-  protocol defines.
+  protocol defines. It is a genuine `_catalog`, not a stub: the registry routes
+  around it serve real manifests and blobs.
 * `GET /debian/Packages` → the flat apt **`Packages`** index, rendered from the
   `.deb` files that actually exist on disk (apt fails on a `Filename:` that does
   not resolve). Pair it with `deb [trusted=yes] <base>/debian/ ./` in
-  `sources.list`.
+  `sources.list`. The proxied `dists/` tree is available alongside it when
+  `DEBIAN_UPSTREAM` is configured.
 
-Neither proxies the real protocol yet: `docker pull` and `apt update` against a
-remote mirror still need the proxy work noted per ecosystem above.
+Both protocols are proxied now: with `DOCKER_UPSTREAM` and `DEBIAN_UPSTREAM`
+set, `docker pull` and `apt update` work against this server, and the static
+indexes above remain the enumeration surface for scripts.
 
 ## API overview
 
@@ -408,12 +478,23 @@ remote mirror still need the proxy work noted per ecosystem above.
 | GET    | `/npm/`                                         | npm catalog index (HTML, or the `/-/all` JSON) |
 | GET    | `/npm/-/all`                                    | npm legacy full-index JSON           |
 | GET    | `/npm/-/ping`                                   | npm health convention — returns `{}` |
+| GET    | `/npm/-/v1/search`                              | npm search (`?text=&size=&from=`)    |
+| GET    | `/npm/<package>`                                | npm packument — abbreviated or full per `Accept` |
+| GET    | `/npm/<package>/<version>`                      | One npm version manifest             |
+| GET    | `/npm/<package>/-/<filename>`                   | npm tarball (local, cached, or proxied) |
+| GET    | `/npm/@<scope>/<name>` + the two variants above | The same three npm endpoints for a scoped package |
 | GET    | `/npm/files/<filename>`                        | Download a local npm tarball         |
 | GET    | `/docker/`                                      | Docker catalog index (HTML or JSON)  |
+| GET    | `/docker/v2/`                                   | Registry v2 API version probe        |
 | GET    | `/docker/v2/_catalog`                           | Registry v2 repository list          |
+| GET    | `/docker/v2/<name>/tags/list`                   | Tags of one repository               |
+| GET/HEAD | `/docker/v2/<name>/manifests/<reference>`     | Manifest by tag or digest            |
+| GET/HEAD | `/docker/v2/<name>/blobs/<digest>`            | Blob by digest (supports `Range`)    |
 | GET    | `/docker/files/<filename>`                     | Download an image tarball / config   |
 | GET    | `/debian/`                                      | Debian catalog index (HTML or JSON)  |
 | GET    | `/debian/Packages`                              | Flat apt `Packages` index            |
+| GET    | `/debian/dists/<path>`                          | Proxied apt metadata (`Release`, `Packages`, …) |
+| GET/HEAD | `/debian/pool/<path>`                         | Proxied `.deb` (supports `Range`)    |
 | GET    | `/debian/files/<filename>`                     | Download a `.deb` / apt config snippet |
 | GET    | `/auth/login`, `/auth`, `/auth/logout`         | OAuth2 login flow                    |
 
@@ -531,6 +612,25 @@ the tables; and that neither of the two escalation guards can be talked around
 Both scripts exit non-zero on failure and were each verified to fail when the
 bug they guard against is reintroduced.
 
+### Keeping the proxies honest
+
+A protocol proxy is easy to get *almost* right: the packument looks correct, the
+manifest parses, and the one header a client actually depends on is missing. So
+each ecosystem ships an offline conformance gate that stands a fake upstream in
+front of the proxy and drives the real wire sequence against it:
+
+```bash
+python scripts/check_npm_proxy.py       # packuments, manifests, tarballs, search
+python scripts/check_docker_proxy.py    # token flow, manifests, blobs, Range
+python scripts/check_debian_proxy.py    # Release/Packages, gzip passthrough, Range
+```
+
+None of them needs network access: each starts a small HTTP server that plays
+the upstream, points the proxy at it with a temporary cache directory, and
+asserts on the bytes and headers a real client would see — including that the
+second request for immutable content is served from the cache. The fake upstream
+counts hits, so "we cached it" is verified rather than assumed.
+
 ## Frontend architecture
 
 The split is by **audience**, not by convenience:
@@ -553,15 +653,21 @@ cli.py                 administrative CLI (roles, grants, superuser bootstrap)
 config/                pydantic-settings models (server, storage, auth, security, hub)
 extensions/            pluggable infrastructure + topological init registry
 routes/                Flask blueprints (pypi, python_build, api_keys, admin,
-                       access, session, discovery, hub, spa, auth)
+                       access, session, discovery, spa, auth) plus one per hub
+                       ecosystem: hub (tools, models), npm, docker, debian
 openapi/               API description: metadata registry, spec builder, renderers
 auth/                  guards, decorators, permission points, API keys, OAuth2
 index/                 package / build discovery and indexing
 models/                SQLAlchemy models (users, roles, permissions, API keys, stats)
-services/              authorization service, hub catalogs, templates, stats, validation
+services/              authorization service, hub catalogs, the shared upstream
+                       proxy/cache (upstream.py) and the per-ecosystem registry
+                       adapters (npm_registry, docker_registry, debian_apt),
+                       templates, stats, validation
 schemas.py             request + response models (single source for /openapi.json)
 scripts/               verification gates (check_openapi, check_contract,
-                       check_auth_guards, check_rbac)
+                       check_auth_guards, check_rbac, and one offline
+                       conformance gate per proxy: check_npm_proxy,
+                       check_docker_proxy, check_debian_proxy)
 frontend/              Vue 3 + Vite + Element Plus SPA (build-time only)
 static/                index templates grouped by ecosystem (python/ tools/ npm/)
                        + the built SPA in static/dist/

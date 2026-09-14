@@ -44,7 +44,10 @@ TAGS: list[dict[str, str]] = [
     {"name": "API keys", "description": "Issue and revoke the tokens clients authenticate with."},
     {"name": "Administration", "description": "Server-wide aggregates. Requires the admin role."},
     {"name": "Python builds", "description": "Prebuilt CPython mirror consumed by `uv python install`."},
-    {"name": "Hub", "description": "Intranet artifact hub — tools catalog, npm scaffold and model routing."},
+    {"name": "Hub", "description": "Intranet artifact hub — tools catalog and model routing."},
+    {"name": "npm", "description": "npm registry protocol and local package catalog, consumed by `npm`/`pnpm`."},
+    {"name": "Docker", "description": "Docker Registry v2 pull protocol and offline image catalog, consumed by `docker`/`skopeo`."},
+    {"name": "Debian", "description": "Debian/apt repository — flat local index plus a read-through mirror proxy."},
     {"name": "Upload", "description": "Publish packages, as `twine` does."},
 ]
 

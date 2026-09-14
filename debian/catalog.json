@@ -1,5 +1,5 @@
 {
-  "_comment": "Debian 目录清单（脚手架）。.deb 文件由 services/hub.py 自动扫描并写入 /debian/Packages；带 filename 的条目用于覆盖展示信息，不带 filename 的是‘仅元数据’登记项。",
+  "_comment": "Debian 目录清单。.deb 文件由 services/hub.py 自动扫描并写入 /debian/Packages；带 filename 的条目用于覆盖展示信息，不带 filename 的是‘仅元数据’登记项。镜像代理走 routes/debian.py 的 /debian/dists 与 /debian/pool。",
   "artifacts": [
     {
       "filename": "openfish-hello_1.0.0_all.deb",

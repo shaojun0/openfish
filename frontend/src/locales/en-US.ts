@@ -90,7 +90,7 @@ export default {
     quickAdmin: 'Statistics',
     quickAdminDesc: 'Storage usage and call volume',
     quickNpm: 'npm catalog',
-    quickNpmDesc: 'Scaffold: local npm packages and mirror URL',
+    quickNpmDesc: 'npm registry protocol and local package list',
     quickTools: 'Tools',
     quickToolsDesc: 'Download intranet tools by category',
     quickModels: 'Model routing',
@@ -317,11 +317,11 @@ export default {
   npm: {
     title: 'npm catalog',
     description:
-      'Placeholder page for the intranet npm side: the local package list plus the mirror URL.',
+      'The npm registry protocol (packuments, tarballs, search) plus the local package list.',
     staticIndex: 'Static index',
-    scaffoldTitle: 'Scaffold: the npm reverse proxy is not wired up yet',
-    scaffoldDesc:
-      'Only a local directory listing is browsable today. The registry protocol (packuments and tarball downloads) is still planned; the URL below will work once it lands.',
+    proxyTitle: 'The npm registry protocol is served',
+    proxyDesc:
+      'Local tarballs and catalog.json entries come first; anything else is fetched from NPM_UPSTREAM on demand and cached, so `npm install`, `npm view` and `npm search` can point straight at this server.',
     setupTitle: 'Getting started',
     registryLabel: 'Local registry',
     upstreamLabel: 'Upstream mirror',
@@ -343,11 +343,11 @@ export default {
 
   docker: {
     title: 'Docker catalog',
-    description: 'Static listing of offline image tarballs and compose / Dockerfile snippets.',
+    description: 'Docker Registry v2 read-through pull proxy plus the offline image catalog.',
     staticIndex: 'Static index',
-    scaffoldTitle: 'Scaffold: no registry proxy',
-    scaffoldDesc:
-      'docker pull cannot talk to this server yet. It hands out `docker save` tarballs and config files instead — import them with `docker load -i`.',
+    proxyTitle: 'The Registry v2 pull proxy is served',
+    proxyDesc:
+      'With DOCKER_UPSTREAM set, `docker pull` can point at this server: manifests and blobs are fetched on demand and cached (blobs are digest-addressed and immutable). The image tarballs below still import with `docker load -i`.',
     setupTitle: 'Getting started',
     upstreamLabel: 'Intranet registry',
     indexLabel: 'Index endpoint',
@@ -369,11 +369,11 @@ export default {
 
   debian: {
     title: 'Debian catalog',
-    description: 'Static listing of local .deb packages and apt config snippets.',
+    description: 'The flat local .deb repository plus a read-through apt mirror proxy.',
     staticIndex: 'Static index',
-    scaffoldTitle: 'Scaffold: no apt proxy',
-    scaffoldDesc:
-      'This serves local .deb files and a sources.list snippet; the flat repository index is /debian/Packages, built from the .deb files that actually exist.',
+    proxyTitle: 'The apt mirror proxy is served',
+    proxyDesc:
+      'The local /debian/Packages index is built from the .deb files that actually exist. With DEBIAN_UPSTREAM set, `dists/` and `pool/` are fetched from the upstream mirror on demand — metadata is cached with a TTL, packages are streamed straight through.',
     setupTitle: 'Getting started',
     upstreamLabel: 'Intranet mirror',
     indexLabel: 'Index endpoint',

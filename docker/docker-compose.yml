@@ -54,6 +54,27 @@ services:
       - NPM_UPSTREAM=${NPM_UPSTREAM:-https://registry.npmmirror.com}
       - DOCKER_REGISTRY=${DOCKER_REGISTRY:-}
       - DEBIAN_MIRROR=${DEBIAN_MIRROR:-}
+      # ── 只读穿透代理（回源地址留空则仅服务本地制品）──────────
+      # npm：packument / tarball / /-/v1/search 由 NPM_UPSTREAM 回源
+      - NPM_PROXY_ENABLED=${NPM_PROXY_ENABLED:-true}
+      - NPM_UPSTREAM_TOKEN=${NPM_UPSTREAM_TOKEN:-}
+      - NPM_TIMEOUT=${NPM_TIMEOUT:-30}
+      - NPM_CACHE_DIR=/app/data/cache/npm
+      - NPM_CACHE_MAX_MB=${NPM_CACHE_MAX_MB:-512}
+      # Docker Registry v2：留空则只服务已缓存的 manifest/blob
+      - DOCKER_UPSTREAM=${DOCKER_UPSTREAM:-}
+      - DOCKER_UPSTREAM_USERNAME=${DOCKER_UPSTREAM_USERNAME:-}
+      - DOCKER_UPSTREAM_PASSWORD=${DOCKER_UPSTREAM_PASSWORD:-}
+      - DOCKER_DEFAULT_NAMESPACE=${DOCKER_DEFAULT_NAMESPACE:-library}
+      - DOCKER_TIMEOUT=${DOCKER_TIMEOUT:-60}
+      - DOCKER_CACHE_DIR=/app/data/cache/docker
+      - DOCKER_CACHE_MAX_MB=${DOCKER_CACHE_MAX_MB:-1024}
+      # apt：dists/ 与 pool/ 由 DEBIAN_UPSTREAM 回源，元数据带 TTL 缓存
+      - DEBIAN_UPSTREAM=${DEBIAN_UPSTREAM:-}
+      - DEBIAN_TIMEOUT=${DEBIAN_TIMEOUT:-60}
+      - DEBIAN_CACHE_DIR=/app/data/cache/debian
+      - DEBIAN_CACHE_MAX_MB=${DEBIAN_CACHE_MAX_MB:-256}
+      - DEBIAN_METADATA_TTL=${DEBIAN_METADATA_TTL:-300}
       - DEBUG=false
 
       # ── 安全（值来自 docker/.env，未设置则启动报错）─────────
@@ -108,6 +129,23 @@ services:
       - NPM_UPSTREAM=${NPM_UPSTREAM:-https://registry.npmmirror.com}
       - DOCKER_REGISTRY=${DOCKER_REGISTRY:-}
       - DEBIAN_MIRROR=${DEBIAN_MIRROR:-}
+      - NPM_PROXY_ENABLED=${NPM_PROXY_ENABLED:-true}
+      - NPM_UPSTREAM_TOKEN=${NPM_UPSTREAM_TOKEN:-}
+      - NPM_TIMEOUT=${NPM_TIMEOUT:-30}
+      - NPM_CACHE_DIR=/app/data/cache/npm
+      - NPM_CACHE_MAX_MB=${NPM_CACHE_MAX_MB:-512}
+      - DOCKER_UPSTREAM=${DOCKER_UPSTREAM:-}
+      - DOCKER_UPSTREAM_USERNAME=${DOCKER_UPSTREAM_USERNAME:-}
+      - DOCKER_UPSTREAM_PASSWORD=${DOCKER_UPSTREAM_PASSWORD:-}
+      - DOCKER_DEFAULT_NAMESPACE=${DOCKER_DEFAULT_NAMESPACE:-library}
+      - DOCKER_TIMEOUT=${DOCKER_TIMEOUT:-60}
+      - DOCKER_CACHE_DIR=/app/data/cache/docker
+      - DOCKER_CACHE_MAX_MB=${DOCKER_CACHE_MAX_MB:-1024}
+      - DEBIAN_UPSTREAM=${DEBIAN_UPSTREAM:-}
+      - DEBIAN_TIMEOUT=${DEBIAN_TIMEOUT:-60}
+      - DEBIAN_CACHE_DIR=/app/data/cache/debian
+      - DEBIAN_CACHE_MAX_MB=${DEBIAN_CACHE_MAX_MB:-256}
+      - DEBIAN_METADATA_TTL=${DEBIAN_METADATA_TTL:-300}
       - DEBUG=true
       - SECRET_KEY=${SECRET_KEY:?请在 docker/.env 中设置 SECRET_KEY}
       - AUTH_USERNAME=${AUTH_USERNAME:-admin}

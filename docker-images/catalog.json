@@ -1,5 +1,5 @@
 {
-  "_comment": "Docker 目录清单（脚手架）。真正的镜像 tar 由 services/hub.py 自动扫描；下面这些是没有文件的登记项，用于展示 UI 的‘仅元数据’状态。",
+  "_comment": "Docker 目录清单。真正的镜像 tar 由 services/hub.py 自动扫描；下面这些是没有文件的登记项，用于展示 UI 的‘仅元数据’状态。在线 `docker pull` 走 routes/docker.py 的 /docker/v2/* 代理，与本清单相互独立。",
   "artifacts": [
     {
       "name": "nginx",

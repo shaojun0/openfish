@@ -34,6 +34,9 @@ def register_all(app):
     from routes.spa import spa_bp
     from routes.access import access_bp
     from routes.hub import hub_bp
+    from routes.npm import npm_bp
+    from routes.docker import docker_bp
+    from routes.debian import debian_bp
 
     prefix = settings.server.route_prefix
     api = prefix + "/api/v1"
@@ -71,12 +74,17 @@ def register_all(app):
     app.register_blueprint(admin_bp, url_prefix=api + "/admin")
     app.register_blueprint(access_bp, url_prefix=api + "/admin")
 
-    # ── Artifact hub: tools / npm / model routing ───────────────────
-    # A single blueprint carries both the JSON catalog under `/api/v1/*` and
-    # the browser-facing `/tools/<path>` download link, so it is registered at
-    # the bare prefix and declares its full paths internally.  Each view keeps
-    # its own `@require_permission` guard — there is no blueprint-wide guard.
+    # ── Artifact hub: one blueprint per ecosystem ───────────────────
+    # Each carries both the JSON catalog under `/api/v1/*` and the
+    # machine-facing protocol routes of its ecosystem, so all four are
+    # registered at the bare prefix and declare their full paths internally.
+    # Every view keeps its own `@require_permission` guard — there is no
+    # blueprint-wide guard, and `scripts/check_auth_guards.py` fails the build
+    # if one is ever dropped or written above its `@route` decorator.
     app.register_blueprint(hub_bp, url_prefix=prefix)
+    app.register_blueprint(npm_bp, url_prefix=prefix)
+    app.register_blueprint(docker_bp, url_prefix=prefix)
+    app.register_blueprint(debian_bp, url_prefix=prefix)
 
     # ── SPA shell. Machine routes above win by rule specificity, so this
     #    only ever handles browser-facing URLs.

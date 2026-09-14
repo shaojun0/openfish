@@ -35,9 +35,8 @@
         <a href="{{ spa_url }}">← 控制台</a>
     </div>
     <h1>&#x1f4e6; npm 目录</h1>
-    <p class="note"><strong>脚手架：</strong>npm registry 协议（packument / tarball 协商）尚未实现。
-       本页是该星号目录的<strong>静态索引</strong>，列出本地已有的包；接入后
-       <code>npm config set registry</code> 即可指向本服务。</p>
+    <p class="note"><strong>registry 协议：</strong>已实现。本页是该目录的<strong>静态索引</strong>，列出本地已有的包；
+       包未命中时会从上游镜像按需回源并缓存。<code>npm config set registry</code> 指向下面基址即可使用。</p>
     <p class="stats">
         registry 基址 <code>{{ base_url }}</code>
         {% if upstream %}&middot; 上游镜像 <code>{{ upstream }}</code>{% endif %}

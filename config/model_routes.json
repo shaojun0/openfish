@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_comment": "内网模型路由表（脚手架）。openfish 只负责发布，不代理推理请求；下游 DSH 读取本文件后自行决定 upstream。base_url 请替换成实际内网地址。",
+  "_comment": "内网模型路由表（只发布，不代理推理）。openfish 只负责登记与展示；下游 DSH 读取本文件后自行决定 upstream 与鉴权方式。base_url 请替换成实际内网地址。",
   "routes": [
     {
       "name": "deepseek-v4-flash",

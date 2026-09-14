@@ -34,8 +34,9 @@
         <a href="{{ spa_url }}">← 控制台</a>
     </div>
     <h1>&#x1f427; Debian 目录</h1>
-    <p class="note"><strong>脚手架：</strong>没有 apt 代理，这里提供本地 <code>.deb</code> 与 apt 配置片段。
-       扁平仓库的索引就是 <code>/debian/Packages</code>，<code>apt</code> 可以按 sources.list 的方式读取。</p>
+    <p class="note"><strong>apt 代理：</strong>已实现。本地 <code>/debian/Packages</code> 扁平索引由实际存在的
+       <code>.deb</code> 生成；配置上游镜像后 <code>dists/</code> 与 <code>pool/</code> 会按需回源
+       （元数据带 TTL 缓存，包文件流式转发）。</p>
     <p class="stats">
         {% if mirror %}镜像 <code>{{ mirror }}</code> &middot; {% endif %}
         {{ artifact_count }} 个制品

@@ -35,8 +35,9 @@
         <a href="{{ spa_url }}">← 控制台</a>
     </div>
     <h1>&#x1f433; Docker 目录</h1>
-    <p class="note"><strong>脚手架：</strong>没有 registry 代理，<code>docker pull</code> 还不能直连本服务。
-       这里提供的是离线制品：<code>docker save</code> 出来的镜像 tar，以及 compose / Dockerfile 片段，
+    <p class="note"><strong>Registry v2 代理：</strong>已实现。配置上游 registry 后
+       <code>docker pull</code> 可直接指向本服务（清单与 blob 按需回源并缓存）。
+       本页则是离线制品视图：<code>docker save</code> 出来的镜像 tar 与 compose / Dockerfile 片段，
        下载后用 <code>docker load -i</code> 导入。</p>
     <p class="stats">
         {% if registry %}registry <code>{{ registry }}</code> &middot; {% endif %}

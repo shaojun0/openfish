@@ -90,7 +90,7 @@ export default {
     quickAdmin: '系统统计',
     quickAdminDesc: '存储占用与调用量分析',
     quickNpm: 'npm 目录',
-    quickNpmDesc: '脚手架：本地 npm 包与镜像地址',
+    quickNpmDesc: 'npm registry 协议与本地包清单',
     quickTools: '工具目录',
     quickToolsDesc: '按分类下载内网工具',
     quickModels: '模型路由',
@@ -307,10 +307,10 @@ export default {
 
   npm: {
     title: 'npm 目录',
-    description: '内网 npm 生态的占位页面：展示本地包清单与镜像地址。',
+    description: 'npm registry 协议（packument / tarball / 搜索）与本地包清单。',
     staticIndex: '静态索引',
-    scaffoldTitle: '脚手架：npm 反向代理尚未接入',
-    scaffoldDesc: '当前只有本地目录清单可浏览；registry 协议（packument / tarball 下载）尚在规划中，下方地址接入后即可直接使用。',
+    proxyTitle: 'npm registry 协议已接入',
+    proxyDesc: '本地 tarball 与 catalog.json 优先；未命中且配置了 NPM_UPSTREAM 时按需回源并缓存，npm install / view / search 可直接指向本服务。',
     setupTitle: '接入方式',
     registryLabel: '本机 registry',
     upstreamLabel: '上游镜像',
@@ -332,11 +332,11 @@ export default {
 
   docker: {
     title: 'Docker 目录',
-    description: '离线镜像 tar 与 compose / Dockerfile 片段的静态清单。',
+    description: 'Docker Registry v2 只读拉取代理与离线镜像制品清单。',
     staticIndex: '静态索引',
-    scaffoldTitle: '脚手架：没有 registry 代理',
-    scaffoldDesc:
-      'docker pull 还不能直连本服务。这里提供 docker save 的镜像 tar 与配置文件，下载后用 docker load -i 导入。',
+    proxyTitle: 'Registry v2 拉取代理已接入',
+    proxyDesc:
+      '配置 DOCKER_UPSTREAM 后，docker pull 可指向本服务：清单与 blob 按需回源并缓存（blob 按 digest 永久缓存）。下方镜像 tar 仍可用 docker load -i 离线导入。',
     setupTitle: '接入方式',
     upstreamLabel: '内网 registry',
     indexLabel: '索引端点',
@@ -358,11 +358,11 @@ export default {
 
   debian: {
     title: 'Debian 目录',
-    description: '本地 .deb 包与 apt 配置片段的静态清单。',
+    description: '本地 .deb 扁平仓库与 apt 镜像只读代理。',
     staticIndex: '静态索引',
-    scaffoldTitle: '脚手架：没有 apt 代理',
-    scaffoldDesc:
-      '这里提供本地 .deb 与 sources.list 片段；扁平仓库的索引是 /debian/Packages，由实际存在的 .deb 生成。',
+    proxyTitle: 'apt 镜像代理已接入',
+    proxyDesc:
+      '本地 /debian/Packages 由实际存在的 .deb 生成；配置 DEBIAN_UPSTREAM 后，dists/ 与 pool/ 会从上游镜像按需回源（元数据带 TTL 缓存，.deb 流式转发）。',
     setupTitle: '接入方式',
     upstreamLabel: '内网镜像',
     indexLabel: '索引端点',

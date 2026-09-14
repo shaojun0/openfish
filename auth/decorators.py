@@ -95,8 +95,14 @@ def _authenticate(allowed: list[str]) -> bool:
 
 
 def _unauthorized(allowed: list[str]) -> UnauthorizedError:
+    # Carry a Basic challenge unconditionally.  Package managers and container
+    # clients only send credentials after a 401 tells them which scheme to use;
+    # npm and docker both answer a bare 401 by giving up.  The browser-facing
+    # redirect for the SPA is chosen by the error handler, which reads this
+    # challenge only when it is not answering a machine client.
     return UnauthorizedError(
-        message=f"Authentication required — allowed: {', '.join(allowed)}"
+        message=f"Authentication required — allowed: {', '.join(allowed)}",
+        www_authenticate='Basic realm="cpypiserver"',
     )
 
 

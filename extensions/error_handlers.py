@@ -7,10 +7,19 @@ from extensions import Extension
 from errors import PypiError, UnauthorizedError, BadRequestError, UploadConflictError
 from auth.oauth import get_authorize_url
 
-#: Blueprints that serve the SPA and API-key clients.  These must always answer
+#: Blueprints that serve the SPA and machine clients.  These must always answer
 #: JSON — an HTML redirect would be followed silently by XHR, and the client
 #: would then try to parse a login page as JSON.
-_API_BLUEPRINTS = {"session", "api_keys", "admin", "access"}
+#:
+#: The artifact-hub ecosystems belong here for the same reason.  `npm install`,
+#: `docker pull` and `apt update` are registry clients: handed a 302 to an OAuth
+#: consent page they do not retry with credentials, they fail with a confusing
+#: parse error.  A JSON 401 carrying a `WWW-Authenticate` challenge is what
+#: makes them authenticate instead.
+_API_BLUEPRINTS = {
+    "session", "api_keys", "admin", "access",
+    "npm", "docker", "debian", "hub",
+}
 
 
 class ErrorHandlersExtension(Extension):
