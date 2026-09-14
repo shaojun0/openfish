@@ -1,4 +1,19 @@
-"""Python-build-standalone routes — CPython mirror for uv."""
+"""Python-build-standalone routes — CPython mirror for uv.
+
+⚠ Decorator order is load-bearing.  Decorators apply bottom-up, so
+``@python_build_bp.route`` must be the **topmost** one: anything above it is
+applied *after* the view has already been registered and is silently dropped.
+
+    @python_build_bp.route(...)   # applied last  → registers the guarded view
+    @require_auth()               # applied in the middle
+    @api_operation(...)           # applied first → @wraps propagates the metadata
+    def view(): ...
+
+An earlier revision had ``@require_auth()`` above ``@route``, which registered
+the *unguarded* function and left every ``/python-builds/*`` route readable
+without credentials.  ``scripts/check_auth_guards.py`` fails the build if that
+pattern comes back.
+"""
 
 import logging
 from pathlib import Path
@@ -21,8 +36,8 @@ def _index():
     return current_app.extensions.get("python_build_index")
 
 
-@require_auth()
 @python_build_bp.route("/python-builds/")
+@require_auth()
 @api_operation(
     summary="Available CPython builds",
     description=(
@@ -55,8 +70,8 @@ def discovery():
     )
 
 
-@require_auth()
 @python_build_bp.route("/python-builds/<release_tag>/")
+@require_auth()
 @api_operation(
     summary="Builds within one release",
     description="Every artifact published for a release tag, as an HTML page of links.",
@@ -82,8 +97,8 @@ def release_page(release_tag: str):
     )
 
 
-@require_auth()
 @python_build_bp.route("/python-builds/<release_tag>/<filename>")
+@require_auth()
 @api_operation(
     summary="Download a CPython build",
     description="Streams one prebuilt interpreter archive.",
@@ -129,8 +144,8 @@ def health():
     })
 
 
-@require_auth()
 @python_build_bp.route("/python-builds/<release_tag>/<filename>/sha256")
+@require_auth()
 @api_operation(
     summary="Checksum of one build",
     description="SHA-256 of a build archive, for verifying a download.",
