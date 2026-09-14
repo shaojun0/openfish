@@ -26,6 +26,9 @@ const items = computed<NavItem[]>(() => {
   if (session.isAdmin) {
     base.push({ index: '/admin', titleKey: 'nav.admin', icon: 'DataAnalysis' })
   }
+  if (session.can('admin:roles')) {
+    base.push({ index: '/access', titleKey: 'nav.access', icon: 'Lock' })
+  }
   return base
 })
 

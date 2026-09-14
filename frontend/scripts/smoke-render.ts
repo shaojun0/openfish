@@ -105,6 +105,7 @@ const EXPECTED = {
   '/packages': ['page__title', 'toolbar__search'],
   '/api-keys': ['create-row', 'card-title'],
   '/admin': ['stat-grid', 'card-title'],
+  '/access': ['access-view', 'card-title'],
 }
 
 const results = []
@@ -122,9 +123,12 @@ for (const [path, markers] of Object.entries(EXPECTED)) {
     authenticated: true,
     auth_enabled: true,
     user: 'smoke-admin',
+    display_name: 'Smoke Admin',
     role: 'admin',
+    roles: ['admin'],
     permissions: [
       'admin:refresh',
+      'admin:roles',
       'admin:view',
       'build:download',
       'build:read',
@@ -138,6 +142,7 @@ for (const [path, markers] of Object.entries(EXPECTED)) {
     ],
     server_name: 'cpypi-smoke',
     is_admin: true,
+    is_superuser: true,
     auth_method: 'basic',
   }
 

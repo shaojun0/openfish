@@ -40,6 +40,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/AdminView.vue'),
         meta: { titleKey: 'nav.admin', icon: 'DataAnalysis', requiresAdmin: true },
       },
+      {
+        path: 'access',
+        name: 'access',
+        component: () => import('@/views/AccessView.vue'),
+        meta: { titleKey: 'nav.access', icon: 'Lock', requiresPermission: 'admin:roles' },
+      },
     ],
   },
   {
@@ -57,8 +63,9 @@ const router = createRouter({
 
 /**
  * Resolve the session before the first guarded navigation, then keep
- * non-admins out of `/admin`.  The API enforces the same rule, so this is a
- * UX guard rather than a security boundary.
+ * non-admins out of `/admin` and callers without the required permission out
+ * of everything else.  The API enforces the same rules, so this is a UX guard
+ * rather than a security boundary.
  */
 router.beforeEach(async (to) => {
   const session = useSessionStore()
@@ -66,6 +73,10 @@ router.beforeEach(async (to) => {
     await session.load()
   }
   if (to.meta.requiresAdmin && !session.isAdmin) {
+    return { name: 'home' }
+  }
+  const permission = to.meta.requiresPermission
+  if (typeof permission === 'string' && !session.can(permission)) {
     return { name: 'home' }
   }
   return true

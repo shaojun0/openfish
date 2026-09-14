@@ -18,9 +18,12 @@ export const useSessionStore = defineStore('session', () => {
   const loaded = computed(() => info.value !== null)
   const authenticated = computed(() => info.value?.authenticated ?? false)
   const user = computed(() => info.value?.user ?? null)
+  const displayName = computed(() => info.value?.display_name ?? null)
   const serverName = computed(() => info.value?.server_name ?? 'cpypiserver')
   const authEnabled = computed(() => info.value?.auth_enabled ?? true)
   const isAdmin = computed(() => info.value?.is_admin ?? false)
+  const isSuperuser = computed(() => info.value?.is_superuser ?? false)
+  const roles = computed(() => info.value?.roles ?? [])
   const permissions = computed(() => new Set(info.value?.permissions ?? []))
 
   function can(permission: string): boolean {
@@ -50,9 +53,12 @@ export const useSessionStore = defineStore('session', () => {
     loaded,
     authenticated,
     user,
+    displayName,
     serverName,
     authEnabled,
     isAdmin,
+    isSuperuser,
+    roles,
     permissions,
     can,
     load,
