@@ -1,0 +1,7 @@
+# 内网扁平 apt 源示例。
+# 文件放到 /etc/apt/sources.list.d/openfish.list，把地址换成实际 openfish 地址。
+#
+# 扁平仓库：Packages 索引在 /debian/Packages，.deb 在 /debian/files/。
+# 自签/内网 CA 场景下先用 [trusted=yes]，正式环境请改用签名仓库。
+
+deb [trusted=yes] http://127.0.0.1:9090/debian/ ./

@@ -1,0 +1,19 @@
+{
+  "_comment": "Docker 目录清单（脚手架）。真正的镜像 tar 由 services/hub.py 自动扫描；下面这些是没有文件的登记项，用于展示 UI 的‘仅元数据’状态。",
+  "artifacts": [
+    {
+      "name": "nginx",
+      "version": "1.25.3",
+      "kind": "image",
+      "description": "示例：把 nginx-1.25.3.tar 放进本目录即可点击下载",
+      "tags": ["web", "base"]
+    },
+    {
+      "name": "redis",
+      "version": "7.2.4",
+      "kind": "image",
+      "description": "示例：离线缓存镜像",
+      "tags": ["cache"]
+    }
+  ]
+}

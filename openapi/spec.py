@@ -29,6 +29,8 @@ DOCUMENTED_PREFIXES: tuple[str, ...] = (
     "/python-builds/",
     "/tools/",
     "/npm/",
+    "/docker/",
+    "/debian/",
     "/health",
 )
 

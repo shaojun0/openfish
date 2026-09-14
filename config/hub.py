@@ -1,4 +1,4 @@
-"""Artifact-hub configuration — tools, npm and model routing.
+"""Artifact-hub configuration — tools, npm, docker, debian and model routing.
 
 The server started life as a Python-only package index.  It is now growing into
 an intranet artifact hub with a handful of sibling catalogs, each backed by a
@@ -9,6 +9,10 @@ directory on disk (or a small JSON file) rather than a database:
 * ``npm_dir``      — an optional local npm cache/registry directory.  The
   reverse proxy is not wired yet; the catalog is scanned so the UI can show
   what a future ``npm config set registry`` would serve.
+* ``docker_dir``   — ``docker save`` image tarballs plus the compose/Dockerfile
+  snippets an offline host needs.
+* ``debian_dir``   — local ``.deb`` files plus the ``sources.list`` snippet for
+  the intranet mirror.
 * ``models_file``  — the JSON description of the model routes a downstream
   DSH deployment may point at.
 
@@ -47,6 +51,32 @@ class HubConfig(BaseSettings):
             "Upstream npm registry this server is meant to mirror. Published to "
             "the UI as the value for `npm config set registry` once the proxy "
             "lands; it is not proxied yet."
+        ),
+    )
+    docker_dir: str = Field(
+        default="docker-images",
+        description=(
+            "Directory holding `docker save` tarballs and compose/Dockerfile "
+            "snippets. Named with a suffix so it never collides with the "
+            "repository's docker/ infrastructure directory."
+        ),
+    )
+    docker_registry: str = Field(
+        default="",
+        description=(
+            "Optional intranet registry this server fronts (e.g. "
+            "http://registry.intra:5000). Advertised in the UI; not proxied."
+        ),
+    )
+    debian_dir: str = Field(
+        default="debian",
+        description="Directory holding local .deb files and apt config snippets",
+    )
+    debian_mirror: str = Field(
+        default="",
+        description=(
+            "Optional intranet apt mirror advertised in the UI (e.g. "
+            "http://mirror.intra/debian). Not proxied."
         ),
     )
     models_file: str = Field(

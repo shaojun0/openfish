@@ -29,6 +29,8 @@ _RESERVED_PREFIXES = (
     "python-builds/",
     "tools/",
     "npm/",
+    "docker/",
+    "debian/",
     "static/",
     "auth/",
     "health",
@@ -70,6 +72,8 @@ def index():
 @spa_bp.route("/admin")
 @spa_bp.route("/tools")
 @spa_bp.route("/npm")
+@spa_bp.route("/docker")
+@spa_bp.route("/debian")
 @spa_bp.route("/models")
 def page():
     return _shell()

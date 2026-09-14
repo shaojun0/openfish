@@ -1,0 +1,20 @@
+# 示例 compose 片段：离线环境下用内网制品中心分发的镜像起服务。
+# 用法： docker compose -f docker-compose.example.yml up -d
+#
+# 镜像来自本目录登记的 tar（docker load -i 之后即可用 image 名称引用），
+# 或者来自配置项 DOCKER_REGISTRY 指向的内网 registry。
+
+services:
+  redis:
+    image: redis:7.2.4
+    container_name: openfish-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  web:
+    image: nginx:1.25.3
+    container_name: openfish-web
+    restart: unless-stopped
+    ports:
+      - "8081:80"

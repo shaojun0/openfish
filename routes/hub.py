@@ -1,29 +1,38 @@
-"""Artifact-hub routes — tools catalog, npm scaffold and model routing.
+"""Artifact-hub routes — tools, npm, docker, debian and model routing.
 
 The hub is the second half of the sidebar: besides Python packages, an intranet
-deployment needs a place to hand out tools and to describe the model endpoints
-a downstream DSH should talk to.  Everything is file-backed (see
-:mod:`services.hub`), so there is no write API here — dropping a file into the
-configured directory is the upload.
+deployment needs a place to hand out tools, npm tarballs, offline docker images
+and .deb packages, and to describe the model endpoints a downstream DSH should
+talk to.  Everything is file-backed (see :mod:`services.hub`), so there is no
+write API here — dropping a file into the configured directory is the upload.
 
 Endpoints
 ---------
 Machine-facing (parseable, no JavaScript)
-``GET /tools/``                tools index — HTML, or JSON with `?format=json`
-``GET /tools/<path:filepath>`` download one tool
-``GET /npm/``                  npm catalog index — HTML or the `/-/all` JSON
-``GET /npm/-/all``             npm legacy full-index JSON
-``GET /npm/-/ping``            npm health convention, returns `{}`
-``GET /npm/files/<filename>``  download one local tarball
+``GET /tools/``                  tools index — HTML, or JSON with `?format=json`
+``GET /tools/<path:filepath>``   download one tool
+``GET /npm/``                    npm catalog index — HTML or the `/-/all` JSON
+``GET /npm/-/all``               npm legacy full-index JSON
+``GET /npm/-/ping``              npm health convention, returns `{}`
+``GET /npm/files/<filename>``    download one local tarball
+``GET /docker/``                 docker catalog index — HTML or JSON
+``GET /docker/v2/_catalog``      Registry v2 repository list
+``GET /docker/files/<filename>`` download an image tar / compose file
+``GET /debian/``                 debian catalog index — HTML or JSON
+``GET /debian/Packages``         flat apt `Packages` index
+``GET /debian/files/<filename>`` download a .deb / apt config snippet
 
 JSON API for the SPA
-``GET /api/v1/tools``          tool catalog
-``GET /api/v1/npm``            npm catalog
-``GET /api/v1/models``         model-routing table
+``GET /api/v1/tools``            tool catalog
+``GET /api/v1/npm``              npm catalog
+``GET /api/v1/docker``           docker catalog
+``GET /api/v1/debian``           debian catalog
+``GET /api/v1/models``           model-routing table
 
-The `/tools/` and `/npm/` indexes are mirror images of `/simple/`: a
-server-rendered page a script (or a human) can read without the SPA.  Their
-templates live under ``static/tools/`` and ``static/npm/`` respectively.
+Each ``<ecosystem>/`` index is a mirror of ``/simple/``: a server-rendered page
+a script (or a human) can read without the SPA, plus the one JSON enumeration
+endpoint that ecosystem actually recognises.  Templates live under
+``static/<ecosystem>/``.
 
 ⚠ Decorator order is load-bearing (see ``routes/python_build.py``): the
 ``@*.route`` decorator must be the topmost line, or the guard is applied after
@@ -33,11 +42,15 @@ registration and never runs.  ``scripts/check_auth_guards.py`` enforces this.
 from __future__ import annotations
 
 from flask import (
-    Blueprint, current_app, jsonify, render_template_string, request, send_from_directory, url_for,
+    Blueprint, Response, current_app, jsonify, render_template_string, request,
+    send_from_directory, url_for,
 )
 
 from auth.decorators import require_permission
-from auth.permissions import MODEL_READ, NPM_READ, TOOL_DOWNLOAD, TOOL_READ
+from auth.permissions import (
+    DEBIAN_DOWNLOAD, DEBIAN_READ, DOCKER_DOWNLOAD, DOCKER_READ,
+    MODEL_READ, NPM_READ, TOOL_DOWNLOAD, TOOL_READ,
+)
 from config import settings
 from openapi import api_operation, binary, errors, json_body, ok
 from services import hub, templates
@@ -86,6 +99,33 @@ _NPM_ALL_SCHEMA = {
     "description": "Keyed by package name, npm's legacy `/-/all` shape.",
 }
 
+_DOCKER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "root": {"type": "string"},
+        "exists": {"type": "boolean"},
+        "registry": {"type": "string"},
+        "artifact_count": {"type": "integer"},
+        "artifacts": {"type": "array", "items": {"type": "object"}},
+    },
+}
+
+_DEBIAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "root": {"type": "string"},
+        "exists": {"type": "boolean"},
+        "mirror": {"type": "string"},
+        "artifact_count": {"type": "integer"},
+        "artifacts": {"type": "array", "items": {"type": "object"}},
+    },
+}
+
+_DOCKER_CATALOG_SCHEMA = {
+    "type": "object",
+    "properties": {"repositories": {"type": "array", "items": {"type": "string"}}},
+}
+
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -114,6 +154,24 @@ def _npm_payload() -> dict:
 def _spa_url(path: str) -> str:
     """Absolute-ish URL of an SPA page, honouring the global route prefix."""
     return settings.server.route_prefix.rstrip("/") + path
+
+
+def _docker_payload() -> dict:
+    prefix = settings.server.route_prefix.rstrip("/") + "/docker/files"
+    return hub.scan_docker(
+        settings.hub.docker_dir,
+        url_prefix=prefix,
+        registry=settings.hub.docker_registry,
+    )
+
+
+def _debian_payload() -> dict:
+    prefix = settings.server.route_prefix.rstrip("/") + "/debian/files"
+    return hub.scan_debian(
+        settings.hub.debian_dir,
+        url_prefix=prefix,
+        mirror=settings.hub.debian_mirror,
+    )
 
 
 # ── Tools: static index + download ───────────────────────────────────
@@ -276,6 +334,165 @@ def download_npm_file(filename: str):
     return send_from_directory(settings.hub.npm_dir, filename, as_attachment=True)
 
 
+# ── Docker: static index + Registry v2 catalog + download ────────────
+
+@hub_bp.route("/docker/")
+@require_permission(DOCKER_READ)
+@api_operation(
+    summary="Docker catalog index (scaffold)",
+    description=(
+        "The local docker directory as a browsable index: `docker save` image "
+        "tarballs plus the compose/Dockerfile snippets an offline host needs. "
+        "HTML by default, the `/api/v1/docker` document with `?format=json`.\n\n"
+        "**No registry proxy.** A real `docker pull` needs the registry "
+        "protocol; this page only hands out the tarballs (`docker load -i`)."
+    ),
+    tags=["Hub"],
+    responses={
+        "200": {
+            "description": "Docker catalog as HTML or JSON",
+            "content": {
+                "text/html": {},
+                "application/json": {"schema": _DOCKER_SCHEMA},
+            },
+        },
+        **errors("401", "403", "500"),
+    },
+)
+def docker_index():
+    catalog = _docker_payload()
+    if _wants_json():
+        return jsonify(catalog)
+    return render_template_string(
+        templates.docker_index(),
+        server_name=settings.server.server_name,
+        base_url=url_for("hub.docker_index", _external=True),
+        spa_url=_spa_url("/docker"),
+        registry=catalog["registry"],
+        artifacts=catalog["artifacts"],
+        artifact_count=catalog["artifact_count"],
+        catalog_url=url_for("hub.docker_catalog"),
+    )
+
+
+@hub_bp.route("/docker/v2/_catalog")
+@require_permission(DOCKER_READ)
+@api_operation(
+    summary="Docker registry catalog",
+    description=(
+        "The repositories present locally, in the OCI distribution spec's "
+        "`GET /v2/_catalog` shape (`{\"repositories\": [...]}`). It is the only "
+        "enumeration endpoint the docker registry protocol defines, which makes "
+        "it this ecosystem's counterpart to npm's `/-/all`."
+    ),
+    tags=["Hub"],
+    responses={
+        "200": ok("Repository names", _DOCKER_CATALOG_SCHEMA),
+        **errors("401", "403", "500"),
+    },
+)
+def docker_catalog():
+    return jsonify(hub.docker_registry_catalog(_docker_payload()))
+
+
+@hub_bp.route("/docker/files/<path:filename>")
+@require_permission(DOCKER_DOWNLOAD)
+@api_operation(
+    summary="Download a docker artifact",
+    description=(
+        "Streams one image tarball or compose/Dockerfile out of `DOCKER_DIR`. "
+        "Load an image with `docker load -i <file.tar>`."
+    ),
+    tags=["Hub"],
+    responses={
+        "200": binary("The requested image tarball or config file"),
+        **errors("401", "403", "404", "500"),
+    },
+)
+def download_docker_file(filename: str):
+    return send_from_directory(settings.hub.docker_dir, filename, as_attachment=True)
+
+
+# ── Debian: static index + flat Packages index + download ────────────
+
+@hub_bp.route("/debian/")
+@require_permission(DEBIAN_READ)
+@api_operation(
+    summary="Debian catalog index (scaffold)",
+    description=(
+        "The local debian directory as a browsable index: `.deb` files plus the "
+        "apt `sources.list` snippet for the intranet mirror. HTML by default, "
+        "the `/api/v1/debian` document with `?format=json`.\n\n"
+        "**No apt proxy.** `apt` reads the flat `Packages` index at "
+        "`/debian/Packages`; the `.deb` files themselves are served from "
+        "`/debian/files/`."
+    ),
+    tags=["Hub"],
+    responses={
+        "200": {
+            "description": "Debian catalog as HTML or JSON",
+            "content": {
+                "text/html": {},
+                "application/json": {"schema": _DEBIAN_SCHEMA},
+            },
+        },
+        **errors("401", "403", "500"),
+    },
+)
+def debian_index():
+    catalog = _debian_payload()
+    if _wants_json():
+        return jsonify(catalog)
+    return render_template_string(
+        templates.debian_index(),
+        server_name=settings.server.server_name,
+        base_url=url_for("hub.debian_index", _external=True),
+        spa_url=_spa_url("/debian"),
+        mirror=catalog["mirror"],
+        artifacts=catalog["artifacts"],
+        artifact_count=catalog["artifact_count"],
+        packages_url=url_for("hub.debian_packages"),
+    )
+
+
+@hub_bp.route("/debian/Packages")
+@require_permission(DEBIAN_READ)
+@api_operation(
+    summary="Flat apt Packages index",
+    description=(
+        "A flat apt repository index rendered from the local `.deb` files — the "
+        "static index element of the Debian ecosystem. Only entries that "
+        "actually exist on disk are listed, because apt fails on a `Filename:` "
+        "that does not resolve."
+    ),
+    tags=["Hub"],
+    responses={
+        "200": {"description": "apt Packages stanzas", "content": {"text/plain": {}}},
+        **errors("401", "403", "500"),
+    },
+)
+def debian_packages():
+    return Response(hub.debian_packages_index(_debian_payload()), mimetype="text/plain")
+
+
+@hub_bp.route("/debian/files/<path:filename>")
+@require_permission(DEBIAN_DOWNLOAD)
+@api_operation(
+    summary="Download a debian artifact",
+    description=(
+        "Streams one `.deb` or apt config snippet out of `DEBIAN_DIR`. "
+        "Install a package with `apt install ./<file>.deb`."
+    ),
+    tags=["Hub"],
+    responses={
+        "200": binary("The requested .deb or config file"),
+        **errors("401", "403", "404", "500"),
+    },
+)
+def download_debian_file(filename: str):
+    return send_from_directory(settings.hub.debian_dir, filename, as_attachment=True)
+
+
 # ── JSON API for the SPA ─────────────────────────────────────────────
 
 @hub_bp.route("/api/v1/tools")
@@ -319,6 +536,45 @@ def tools_catalog():
 )
 def npm_catalog():
     return jsonify(_npm_payload())
+
+
+@hub_bp.route("/api/v1/docker")
+@require_permission(DOCKER_READ)
+@api_operation(
+    summary="Docker catalog (scaffold)",
+    description=(
+        "Offline docker artifacts known to this server: `docker save` image "
+        "tarballs (filename parsed as `<name>-<tag>.tar`) and compose/Dockerfile "
+        "snippets, plus the optional intranet registry the UI advertises. "
+        "Entries with a null `download_url` are metadata only."
+    ),
+    tags=["Hub"],
+    responses={
+        "200": ok("Local docker catalog", _DOCKER_SCHEMA),
+        **errors("401", "403", "500"),
+    },
+)
+def docker_catalog_api():
+    return jsonify(_docker_payload())
+
+
+@hub_bp.route("/api/v1/debian")
+@require_permission(DEBIAN_READ)
+@api_operation(
+    summary="Debian catalog (scaffold)",
+    description=(
+        "Local `.deb` packages (filename parsed as `<pkg>_<version>_<arch>.deb`) "
+        "and apt config snippets, plus the optional intranet mirror the UI "
+        "advertises. Entries with a null `download_url` are metadata only."
+    ),
+    tags=["Hub"],
+    responses={
+        "200": ok("Local debian catalog", _DEBIAN_SCHEMA),
+        **errors("401", "403", "500"),
+    },
+)
+def debian_catalog_api():
+    return jsonify(_debian_payload())
 
 
 @hub_bp.route("/api/v1/models")

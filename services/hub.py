@@ -335,6 +335,219 @@ def npm_all_index(catalog: dict[str, Any], *, now: float | None = None) -> dict[
     return document
 
 
+# ── Docker / Debian flat catalogs ────────────────────────────────────
+
+def _flat_entry(
+    base: Path,
+    path: Path,
+    *,
+    url_prefix: str,
+    info: dict[str, Any],
+    meta: dict[str, Any],
+) -> dict[str, Any]:
+    """One on-disk artifact, with the parsed filename metadata and overlay."""
+    stat = path.stat()
+    rel = path.relative_to(base).as_posix()
+    return {
+        "name": meta.get("name") or info.get("name") or path.name,
+        "version": meta.get("version") or info.get("version") or "",
+        "arch": meta.get("arch") or info.get("arch") or "",
+        "kind": meta.get("kind") or info.get("kind") or "file",
+        "filename": path.name,
+        "size": stat.st_size,
+        "size_human": human_size(stat.st_size),
+        "sha256": _sha256(path, stat),
+        "modified": _iso(stat.st_mtime),
+        "download_url": f"{url_prefix.rstrip('/')}/{quote(rel)}",
+        "description": meta.get("description"),
+        "tags": list(meta.get("tags") or []),
+    }
+
+
+def _flat_metadata_entry(item: dict[str, Any]) -> dict[str, Any]:
+    """A catalog.json entry with no file behind it (nothing to download)."""
+    return {
+        "name": item.get("name") or item.get("filename") or "unnamed",
+        "version": item.get("version") or "",
+        "arch": item.get("arch") or "",
+        "kind": item.get("kind") or "file",
+        "filename": item.get("filename"),
+        "size": None,
+        "size_human": "",
+        "sha256": None,
+        "modified": None,
+        "download_url": None,
+        "description": item.get("description"),
+        "tags": list(item.get("tags") or []),
+    }
+
+
+def scan_flat(
+    root: str,
+    *,
+    url_prefix: str,
+    parse: Any,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Catalog a flat directory of artifacts (docker images, .deb files, …).
+
+    ``parse(filename)`` derives the display metadata from the filename; an
+    optional ``catalog.json`` under *root* overrides it per entry:
+
+    .. code-block:: json
+
+        {"artifacts": [
+          {"filename": "nginx-1.25.3.tar", "name": "nginx", "tags": ["web"]},
+          {"name": "redis", "version": "7.2.4"}
+        ]}
+
+    An entry without a ``filename`` (or whose file is missing) is reported with
+    ``download_url: null`` — the UI marks those *metadata only* rather than
+    pretending they are served.
+    """
+    base = Path(root)
+    result: dict[str, Any] = {
+        "root": str(base),
+        "exists": base.is_dir(),
+        "url_prefix": url_prefix,
+        "artifacts": [],
+        "artifact_count": 0,
+    }
+    result.update(extra or {})
+    if not base.is_dir():
+        return result
+
+    overlay = _load_overlay(base)
+    by_filename: dict[str, dict[str, Any]] = {}
+    metadata_only: list[dict[str, Any]] = []
+    for item in overlay.get("artifacts") or []:
+        if not isinstance(item, dict):
+            continue
+        filename = item.get("filename")
+        if filename:
+            by_filename[str(filename)] = item
+        else:
+            metadata_only.append(item)
+
+    artifacts: list[dict[str, Any]] = []
+    matched: set[str] = set()
+    for path in sorted(p for p in base.iterdir() if p.is_file() and _visible(p)):
+        meta = by_filename.get(path.name) or {}
+        artifacts.append(_flat_entry(
+            base, path, url_prefix=url_prefix, info=parse(path.name), meta=meta,
+        ))
+        matched.add(path.name)
+
+    # Entries that name a file which is not on disk, then pure metadata entries.
+    for filename, item in by_filename.items():
+        if filename not in matched:
+            artifacts.append(_flat_metadata_entry(item))
+    for item in metadata_only:
+        artifacts.append(_flat_metadata_entry(item))
+
+    result["artifacts"] = artifacts
+    result["artifact_count"] = len(artifacts)
+    return result
+
+
+def _parse_docker_filename(filename: str) -> dict[str, Any]:
+    """``nginx-1.25.3.tar`` → image ``nginx:1.25.3``; describe the rest as files."""
+    lower = filename.lower()
+    for ext in (".tar.gz", ".tgz", ".tar"):
+        if lower.endswith(ext):
+            stem = filename[: -len(ext)]
+            name, _, tag = stem.rpartition("-")
+            if not name:
+                name, tag = stem, ""
+            return {"name": name, "version": tag, "kind": "image"}
+    if lower.endswith((".yml", ".yaml")):
+        return {"name": filename, "version": "", "kind": "compose"}
+    if lower.startswith("dockerfile"):
+        return {"name": filename, "version": "", "kind": "dockerfile"}
+    return {"name": filename, "version": "", "kind": "file"}
+
+
+def _parse_debian_filename(filename: str) -> dict[str, Any]:
+    """``curl_8.5.0_arm64.deb`` → package ``curl`` 8.5.0 (arm64)."""
+    if filename.lower().endswith(".deb"):
+        parts = filename[:-4].split("_")
+        if len(parts) >= 3:
+            return {
+                "name": parts[0],
+                "version": "_".join(parts[1:-1]),
+                "arch": parts[-1],
+                "kind": "deb",
+            }
+        if len(parts) == 2:
+            return {"name": parts[0], "version": parts[1], "arch": "", "kind": "deb"}
+        return {"name": filename[:-4], "version": "", "arch": "", "kind": "deb"}
+    if filename.lower().endswith((".list", ".sources", ".example", ".gpg", ".key")):
+        return {"name": filename, "version": "", "kind": "config"}
+    return {"name": filename, "version": "", "kind": "file"}
+
+
+def scan_docker(root: str, *, url_prefix: str, registry: str = "") -> dict[str, Any]:
+    """Docker catalog — image tarballs plus compose/Dockerfile snippets."""
+    return scan_flat(
+        root,
+        url_prefix=url_prefix,
+        parse=_parse_docker_filename,
+        extra={"registry": registry},
+    )
+
+
+def scan_debian(root: str, *, url_prefix: str, mirror: str = "") -> dict[str, Any]:
+    """Debian catalog — local ``.deb`` files plus apt config snippets."""
+    return scan_flat(
+        root,
+        url_prefix=url_prefix,
+        parse=_parse_debian_filename,
+        extra={"mirror": mirror},
+    )
+
+
+def docker_registry_catalog(catalog: dict[str, Any]) -> dict[str, Any]:
+    """Shape a :func:`scan_docker` payload like the Registry v2 ``/v2/_catalog``.
+
+    The OCI distribution spec defines ``GET /v2/_catalog`` → ``{"repositories":
+    [...]}``; it is the only enumeration endpoint the Docker registry protocol
+    has, which makes it the closest analogue of npm's ``/-/all``.
+    """
+    repositories = sorted({
+        item["name"] for item in catalog.get("artifacts", [])
+        if item.get("kind") == "image"
+    })
+    return {"repositories": repositories}
+
+
+def debian_packages_index(catalog: dict[str, Any]) -> str:
+    """Render a flat apt ``Packages`` index from the ``.deb`` entries.
+
+    This is Debian's static index element: a flat repository is exactly a
+    directory of ``.deb`` files next to a ``Packages`` file that lists them.
+    Only entries with a file on disk are emitted — apt would fail on a
+    ``Filename:`` that does not resolve.
+    """
+    stanzas: list[str] = []
+    for item in catalog.get("artifacts", []):
+        if item.get("kind") != "deb" or not item.get("download_url"):
+            continue
+        lines = [
+            f"Package: {item['name']}",
+            f"Version: {item.get('version') or '0'}",
+            f"Architecture: {item.get('arch') or 'all'}",
+            # Relative to the repo base (`/debian/`), which is where apt resolves
+            # it from — the files are served under `/debian/files/`.
+            f"Filename: files/{item['filename']}",
+            f"Size: {item.get('size') or 0}",
+        ]
+        if item.get("sha256"):
+            lines.append(f"SHA256: {item['sha256']}")
+        lines.append(f"Description: {item.get('description') or item['name']}")
+        stanzas.append("\n".join(lines))
+    return "\n\n".join(stanzas) + ("\n" if stanzas else "")
+
+
 # ── Model routes ─────────────────────────────────────────────────────
 
 def load_model_routes(path: str) -> dict[str, Any]:
@@ -386,4 +599,14 @@ def load_model_routes(path: str) -> dict[str, Any]:
     }
 
 
-__all__ = ["human_size", "scan_tools", "scan_npm", "npm_all_index", "load_model_routes"]
+__all__ = [
+    "human_size",
+    "scan_tools",
+    "scan_npm",
+    "npm_all_index",
+    "scan_docker",
+    "scan_debian",
+    "docker_registry_catalog",
+    "debian_packages_index",
+    "load_model_routes",
+]

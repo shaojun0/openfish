@@ -1,0 +1,30 @@
+{
+  "_comment": "Debian 目录清单（脚手架）。.deb 文件由 services/hub.py 自动扫描并写入 /debian/Packages；带 filename 的条目用于覆盖展示信息，不带 filename 的是‘仅元数据’登记项。",
+  "artifacts": [
+    {
+      "filename": "openfish-hello_1.0.0_all.deb",
+      "name": "openfish-hello",
+      "version": "1.0.0",
+      "arch": "all",
+      "kind": "deb",
+      "description": "示例包：安装后写入 /usr/share/openfish/hello.txt（本仓库自带，可下载）",
+      "tags": ["demo"]
+    },
+    {
+      "name": "curl",
+      "version": "8.5.0",
+      "arch": "arm64",
+      "kind": "deb",
+      "description": "示例：把 curl_8.5.0_arm64.deb 放进本目录即可点击下载并进入 /debian/Packages",
+      "tags": ["tool"]
+    },
+    {
+      "name": "openfish-agent",
+      "version": "0.1.0",
+      "arch": "all",
+      "kind": "deb",
+      "description": "示例：内网采集/上报组件（仅登记元数据）",
+      "tags": ["agent"]
+    }
+  ]
+}

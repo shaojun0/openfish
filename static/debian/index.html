@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Debian — {{ server_name }}</title>
+    <style>
+        body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:960px;margin:40px auto;padding:0 20px;line-height:1.6;color:#24292f}
+        h1{border-bottom:2px solid #eee;padding-bottom:10px}
+        h2{margin-top:30px;color:#333;font-size:1.05em}
+        table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+        th,td{padding:6px 10px;text-align:left;border-bottom:1px solid #eee}
+        th{background:#f6f8fa}
+        tr:hover{background:#f6f8fa}
+        a{color:#0366d6;text-decoration:none}
+        a:hover{text-decoration:underline}
+        code{background:#f6f8fa;padding:2px 6px;border-radius:3px;font-size:12px}
+        pre{background:#f6f8fa;border:1px solid #eee;border-radius:6px;padding:12px;overflow-x:auto}
+        pre code{background:none;padding:0}
+        .stats{color:#666;font-size:.9em;font-weight:400}
+        .nav{margin-bottom:20px}
+        .nav a{padding:4px 10px;background:#0366d6;color:#fff;border-radius:4px;font-size:13px}
+        .nav a:hover{text-decoration:none;opacity:.9}
+        .note{background:#fff8e1;border:1px solid #ffe082;border-radius:6px;padding:10px 14px;font-size:13px}
+        .size{text-align:right;white-space:nowrap}
+        .desc{color:#666;font-size:12px}
+        .tag{display:inline-block;padding:1px 6px;border-radius:10px;font-size:11px;background:#eef2f6;color:#555}
+        .empty{color:#888;padding:24px 0}
+        .footer{margin-top:40px;padding-top:20px;border-top:1px solid #eee;color:#888;font-size:.85em}
+    </style>
+</head>
+<body>
+    <div class="nav">
+        <a href="{{ spa_url }}">← 控制台</a>
+    </div>
+    <h1>&#x1f427; Debian 目录</h1>
+    <p class="note"><strong>脚手架：</strong>没有 apt 代理，这里提供本地 <code>.deb</code> 与 apt 配置片段。
+       扁平仓库的索引就是 <code>/debian/Packages</code>，<code>apt</code> 可以按 sources.list 的方式读取。</p>
+    <p class="stats">
+        {% if mirror %}镜像 <code>{{ mirror }}</code> &middot; {% endif %}
+        {{ artifact_count }} 个制品
+    </p>
+
+    <h2>用法</h2>
+    <pre><code># 安装单个包
+sudo apt install ./&lt;包名&gt;.deb
+
+# 添加为扁平源（sources.list）
+deb [trusted=yes] {{ base_url }} ./
+
+# 取索引
+curl {{ packages_url }}</code></pre>
+
+    <h2>标准索引端点</h2>
+    <table>
+        <thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead>
+        <tbody>
+            <tr><td>GET</td><td><a href="{{ packages_url }}"><code>/Packages</code></a></td><td>扁平 apt 索引，由本地 .deb 生成</td></tr>
+            <tr><td>GET</td><td><a href="{{ base_url }}?format=json"><code>/?format=json</code></a></td><td>完整目录（含文件与校验和）</td></tr>
+        </tbody>
+    </table>
+
+    <h2>包清单</h2>
+    {% if not artifacts %}
+    <p class="empty">目录为空。把 <code>.deb</code> 或 apt 配置片段放进 DEBIAN_DIR 后刷新即可。</p>
+    {% else %}
+    <table>
+        <thead>
+            <tr>
+                <th>包名</th>
+                <th>版本</th>
+                <th>架构</th>
+                <th>类型</th>
+                <th class="size">大小</th>
+                <th>更新时间</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for a in artifacts %}
+            <tr>
+                <td>
+                    {% if a.download_url %}<a href="{{ a.download_url }}"><code>{{ a.name }}</code></a>
+                    {% else %}<code>{{ a.name }}</code>{% endif %}
+                    {% if a.description %}<div class="desc">{{ a.description }}</div>{% endif %}
+                </td>
+                <td>{{ a.version or '—' }}</td>
+                <td>{{ a.arch or '—' }}</td>
+                <td>
+                    <span class="tag">{{ a.kind }}</span>
+                    {% if not a.download_url %}<span class="tag">仅元数据</span>{% endif %}
+                </td>
+                <td class="size">{{ a.size_human or '—' }}</td>
+                <td>{{ a.modified[:10] if a.modified else '—' }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    <div class="footer">{{ server_name }} &middot; <a href="{{ base_url }}?format=json">JSON</a></div>
+</body>
+</html>

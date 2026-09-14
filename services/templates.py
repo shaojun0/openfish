@@ -11,6 +11,8 @@ namespaces, so a new index element goes next to the siblings it belongs to::
     static/python/    PEP 503 index + python-build-standalone listings
     static/tools/     the tools directory index
     static/npm/       the npm catalog index
+    static/docker/    the docker artifact index
+    static/debian/    the debian package index
 
 ``services/hub.py`` produces the data; the Jinja templates here only render it.
 """
@@ -21,6 +23,8 @@ from functools import lru_cache
 _PYTHON = "static/python"
 _TOOLS = "static/tools"
 _NPM = "static/npm"
+_DOCKER = "static/docker"
+_DEBIAN = "static/debian"
 
 
 @lru_cache(maxsize=16)
@@ -55,3 +59,11 @@ def tools_index() -> str:
 
 def npm_index() -> str:
     return _load(f"{_NPM}/index.html")
+
+
+def docker_index() -> str:
+    return _load(f"{_DOCKER}/index.html")
+
+
+def debian_index() -> str:
+    return _load(f"{_DEBIAN}/index.html")

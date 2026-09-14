@@ -207,6 +207,43 @@ export interface ModelRoutes {
   routes: ModelRoute[]
 }
 
+/** One entry of a flat artifact catalog (docker images, .deb packages, …). */
+export interface FlatArtifact {
+  name: string
+  version: string
+  /** Debian only — empty for docker artifacts. */
+  arch: string
+  /** `image` | `compose` | `dockerfile` | `deb` | `config` | `file`. */
+  kind: string
+  filename: string | null
+  size: number | null
+  size_human: string
+  sha256: string | null
+  modified: string | null
+  /** Null means "metadata only" — no file on disk behind this entry. */
+  download_url: string | null
+  description: string | null
+  tags: string[]
+}
+
+export interface DockerCatalog {
+  root: string
+  exists: boolean
+  /** Optional intranet registry advertised in the UI. */
+  registry: string
+  artifact_count: number
+  artifacts: FlatArtifact[]
+}
+
+export interface DebianCatalog {
+  root: string
+  exists: boolean
+  /** Optional intranet apt mirror advertised in the UI. */
+  mirror: string
+  artifact_count: number
+  artifacts: FlatArtifact[]
+}
+
 // ── Endpoints ────────────────────────────────────────────────────────
 
 export async function fetchSession(): Promise<SessionInfo> {
@@ -269,6 +306,16 @@ export async function fetchNpmCatalog(): Promise<NpmCatalog> {
 
 export async function fetchModelRoutes(): Promise<ModelRoutes> {
   const { data } = await http.get<ModelRoutes>('/models')
+  return data
+}
+
+export async function fetchDockerCatalog(): Promise<DockerCatalog> {
+  const { data } = await http.get<DockerCatalog>('/docker')
+  return data
+}
+
+export async function fetchDebianCatalog(): Promise<DebianCatalog> {
+  const { data } = await http.get<DebianCatalog>('/debian')
   return data
 }
 

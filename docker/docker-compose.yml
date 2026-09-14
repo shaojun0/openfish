@@ -21,6 +21,10 @@ services:
       - ./../tools:/app/tools
       # 本地 npm 目录（*.tgz 与 catalog.json）
       - ./../npm:/app/npm
+      # Docker 离线制品（镜像 tar 与 compose/Dockerfile）
+      - ./../docker-images:/app/docker-images
+      # Debian 本地包与 apt 配置片段
+      - ./../debian:/app/debian
       # 模型路由表：只读挂载，改完刷新页面即可
       - ./../config/model_routes.json:/app/config/model_routes.json:ro
       # 持久化 keyring/公开包，放在主 packages 目录统一管理
@@ -44,8 +48,12 @@ services:
       # ── 内网制品中心 ────────────────────────────────────────
       - TOOLS_DIR=/app/tools
       - NPM_DIR=/app/npm
+      - DOCKER_DIR=/app/docker-images
+      - DEBIAN_DIR=/app/debian
       - MODELS_FILE=/app/config/model_routes.json
       - NPM_UPSTREAM=${NPM_UPSTREAM:-https://registry.npmmirror.com}
+      - DOCKER_REGISTRY=${DOCKER_REGISTRY:-}
+      - DEBIAN_MIRROR=${DEBIAN_MIRROR:-}
       - DEBUG=false
 
       # ── 安全（值来自 docker/.env，未设置则启动报错）─────────
@@ -82,6 +90,8 @@ services:
       - api_keys_data:/app/data
       - ./../tools:/app/tools
       - ./../npm:/app/npm
+      - ./../docker-images:/app/docker-images
+      - ./../debian:/app/debian
       - ./../config/model_routes.json:/app/config/model_routes.json:ro
     environment:
       - SERVER_NAME=cpypiserver
@@ -92,8 +102,12 @@ services:
       - API_KEYS_FILE=/app/data/cpypiserver.db
       - TOOLS_DIR=/app/tools
       - NPM_DIR=/app/npm
+      - DOCKER_DIR=/app/docker-images
+      - DEBIAN_DIR=/app/debian
       - MODELS_FILE=/app/config/model_routes.json
       - NPM_UPSTREAM=${NPM_UPSTREAM:-https://registry.npmmirror.com}
+      - DOCKER_REGISTRY=${DOCKER_REGISTRY:-}
+      - DEBIAN_MIRROR=${DEBIAN_MIRROR:-}
       - DEBUG=true
       - SECRET_KEY=${SECRET_KEY:?请在 docker/.env 中设置 SECRET_KEY}
       - AUTH_USERNAME=${AUTH_USERNAME:-admin}

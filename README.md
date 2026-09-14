@@ -149,6 +149,10 @@ Templates are provided at `.env.example` (local development) and
 | `TOOLS_DIR`             | `tools`                | Tools catalog root — each sub-directory is a category |
 | `NPM_DIR`               | `npm`                  | Local npm catalog (`*.tgz` / `catalog.json`)       |
 | `NPM_UPSTREAM`          | `https://registry.npmmirror.com` | Mirror URL advertised on the npm page    |
+| `DOCKER_DIR`            | `docker-images`        | `docker save` tarballs + compose/Dockerfile |
+| `DOCKER_REGISTRY`       | *(empty)*              | Intranet registry advertised on the docker page |
+| `DEBIAN_DIR`            | `debian`               | Local `.deb` files + apt config snippets |
+| `DEBIAN_MIRROR`         | *(empty)*              | Intranet apt mirror advertised on the debian page |
 | `MODELS_FILE`           | `config/model_routes.json` | Model-routing table for downstream DSH         |
 
 Nested fields can also be addressed with the `__` delimiter, e.g.
@@ -304,6 +308,8 @@ grow beyond Python without the menu turning into a junk drawer:
 | ------------ | ---------- | --------------------------------- | ------ |
 | Python       | `/packages`| `PACKAGES_DIR` + CPython mirror   | working |
 | npm          | `/npm`     | `NPM_DIR`                         | scaffold |
+| Docker       | `/docker`  | `DOCKER_DIR`                      | scaffold |
+| Debian       | `/debian`  | `DEBIAN_DIR`                      | scaffold |
 | 工具 / Tools | `/tools`   | `TOOLS_DIR`                       | working |
 | 模型路由     | `/models`  | `MODELS_FILE`                     | working |
 
@@ -349,6 +355,8 @@ in a new tab. Templates are grouped by ecosystem under `static/`:
 | Python | `/simple/` | `simple_index.html` lists every project | `?format=json` → PEP 691 |
 | Tools  | `/tools/` | `tools/index.html` lists categories and files | `?format=json` → the `/api/v1/tools` document |
 | npm    | `/npm/` | `npm/index.html` lists local packages | `?format=json` → the `/-/all` document |
+| Docker | `/docker/` | `docker/index.html` lists images and config snippets | `?format=json` → the `/api/v1/docker` document |
+| Debian | `/debian/` | `debian/index.html` lists `.deb` files | `?format=json` → the `/api/v1/debian` document |
 
 Python and tools follow the content-negotiation convention already used by
 `/simple/`. npm has no official HTML index, so the JSON side follows the two
@@ -364,6 +372,20 @@ conventions the ecosystem actually recognises:
 
 The modern `/-/v1/search` endpoint is the intended replacement for `/-/all` and
 is not implemented yet — see the npm scaffold note above.
+
+Docker and Debian each have one recognised enumeration endpoint too, and the
+indexes use them:
+
+* `GET /docker/v2/_catalog` → `{"repositories": [...]}` — the OCI distribution
+  spec's repository list, the only enumeration endpoint the docker registry
+  protocol defines.
+* `GET /debian/Packages` → the flat apt **`Packages`** index, rendered from the
+  `.deb` files that actually exist on disk (apt fails on a `Filename:` that does
+  not resolve). Pair it with `deb [trusted=yes] <base>/debian/ ./` in
+  `sources.list`.
+
+Neither proxies the real protocol yet: `docker pull` and `apt update` against a
+remote mirror still need the proxy work noted per ecosystem above.
 
 ## API overview
 
@@ -387,6 +409,12 @@ is not implemented yet — see the npm scaffold note above.
 | GET    | `/npm/-/all`                                    | npm legacy full-index JSON           |
 | GET    | `/npm/-/ping`                                   | npm health convention — returns `{}` |
 | GET    | `/npm/files/<filename>`                        | Download a local npm tarball         |
+| GET    | `/docker/`                                      | Docker catalog index (HTML or JSON)  |
+| GET    | `/docker/v2/_catalog`                           | Registry v2 repository list          |
+| GET    | `/docker/files/<filename>`                     | Download an image tarball / config   |
+| GET    | `/debian/`                                      | Debian catalog index (HTML or JSON)  |
+| GET    | `/debian/Packages`                              | Flat apt `Packages` index            |
+| GET    | `/debian/files/<filename>`                     | Download a `.deb` / apt config snippet |
 | GET    | `/auth/login`, `/auth`, `/auth/logout`         | OAuth2 login flow                    |
 
 Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
@@ -415,13 +443,16 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 | PUT    | `/api/v1/admin/users/<id>/superuser` | Toggle the superuser bypass (superuser only) |
 | GET    | `/api/v1/tools`                   | Tools catalog grouped by category (tool:read) |
 | GET    | `/api/v1/npm`                     | Local npm catalog scaffold (npm:read)    |
+| GET    | `/api/v1/docker`                  | Local docker catalog (docker:read)       |
+| GET    | `/api/v1/debian`                  | Local debian catalog (debian:read)       |
 | GET    | `/api/v1/models`                  | Model-routing table (model:read)         |
 
 ### Browser-facing
 
-`/`, `/packages`, `/npm`, `/tools`, `/models`, `/api-keys`, `/admin` and
-`/access` all serve the SPA shell. A deep link such as `/api-keys` is handled by
-Flask's history-mode fallback, so links can be shared and bookmarked.
+`/`, `/packages`, `/npm`, `/docker`, `/debian`, `/tools`, `/models`, `/api-keys`,
+`/admin` and `/access` all serve the SPA shell. A deep link such as `/api-keys`
+is handled by Flask's history-mode fallback, so links can be shared and
+bookmarked.
 
 ### Discovery surface (anonymous)
 
@@ -536,6 +567,8 @@ static/                index templates grouped by ecosystem (python/ tools/ npm/
                        + the built SPA in static/dist/
 tools/                 artifact hub — tools/<category>/<file> + catalog.json
 npm/                   artifact hub — local npm tarballs + catalog.json
+docker-images/         artifact hub — image tarballs + compose/Dockerfile
+debian/                artifact hub — local .deb files + apt snippets
 docker/                docker-compose.yml and its .env template
 ```
 

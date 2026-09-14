@@ -39,6 +39,8 @@ interface NavGroup {
  *
  *   Python 生态 → 包管理 (SPA) · Python 索引 (/simple/) · Python 构建
  *   npm 生态    → npm 目录 (SPA) · npm 静态索引 (/npm/)
+ *   Docker 生态 → Docker 目录 (SPA) · Docker 静态索引 (/docker/)
+ *   Debian 生态 → Debian 目录 (SPA) · Debian 静态索引 (/debian/)
  *   工具        → 工具目录 (SPA) · 工具静态索引 (/tools/)
  *   模型路由    → 模型路由 (SPA) · 路由表 JSON (/api/v1/models)
  *   系统        → API 密钥 · 系统统计 · 访问控制 · 接口文档
@@ -74,6 +76,26 @@ const groups = computed<NavGroup[]>(() => {
       items: [
         { index: '/npm', titleKey: 'nav.npm', icon: 'ShoppingBag' },
         { index: '/npm/', href: '/npm/', titleKey: 'nav.npmIndex', icon: 'Link' },
+      ],
+    },
+    {
+      key: 'group-docker',
+      titleKey: 'nav.groupDocker',
+      icon: 'Ship',
+      permission: 'docker:read',
+      items: [
+        { index: '/docker', titleKey: 'nav.docker', icon: 'Ship' },
+        { index: '/docker/', href: '/docker/', titleKey: 'nav.dockerIndex', icon: 'Link' },
+      ],
+    },
+    {
+      key: 'group-debian',
+      titleKey: 'nav.groupDebian',
+      icon: 'Monitor',
+      permission: 'debian:read',
+      items: [
+        { index: '/debian', titleKey: 'nav.debian', icon: 'Monitor' },
+        { index: '/debian/', href: '/debian/', titleKey: 'nav.debianIndex', icon: 'Link' },
       ],
     },
     {

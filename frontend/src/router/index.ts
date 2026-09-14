@@ -47,6 +47,18 @@ const routes: RouteRecordRaw[] = [
         meta: { titleKey: 'nav.models', icon: 'Cpu' },
       },
       {
+        path: 'docker',
+        name: 'docker',
+        component: () => import('@/views/DockerView.vue'),
+        meta: { titleKey: 'nav.docker', icon: 'Ship' },
+      },
+      {
+        path: 'debian',
+        name: 'debian',
+        component: () => import('@/views/DebianView.vue'),
+        meta: { titleKey: 'nav.debian', icon: 'Monitor' },
+      },
+      {
         path: 'api-keys',
         name: 'api-keys',
         component: () => import('@/views/ApiKeysView.vue'),
