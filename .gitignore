@@ -32,9 +32,11 @@ docker/.env
 !/.env.example
 
 # ── Local runtime data ──────────────────────────────────────────────
-data/*.db
-data/*.sqlite
-data/*.sqlite3
+# The trailing * also covers the sidecar files SQLite creates in WAL mode
+# (`.db-wal`, `.db-shm`, `.db-journal`), which the engine turns on explicitly.
+data/*.db*
+data/*.sqlite*
+data/*.sqlite3*
 api_keys_data/
 docker/api_keys_data/
 packages/
