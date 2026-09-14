@@ -1,20 +1,24 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
 
 const { t } = useI18n()
 const route = useRoute()
+const router = useRouter()
 const appStore = useAppStore()
 const session = useSessionStore()
 
 interface NavItem {
+  /** Unique menu index: an SPA path, or the href for an external link. */
   index: string
   titleKey: string
   icon: string
+  /** Set for machine-facing / static index links — opened in a new tab. */
+  href?: string
 }
 
 interface NavGroup {
@@ -29,17 +33,18 @@ interface NavGroup {
 /**
  * Sidebar taxonomy
  * ----------------
- * The server is more than a Python index now, so the menu is grouped by
- * ecosystem rather than listed flat:
+ * The menu is grouped by ecosystem, and **every entry that belongs to an
+ * ecosystem lives inside its group** — the rich SPA page and the machine-facing
+ * index elements alike:
  *
- *   Python  → the original PEP 503 registry and the CPython mirror
- *   npm     → the npm catalog scaffold
- *   工具     → the downloadable tools directory
- *   模型路由 → the model routing table for downstream DSH
- *   系统     → keys, statistics and access control
+ *   Python 生态 → 包管理 (SPA) · Python 索引 (/simple/) · Python 构建
+ *   npm 生态    → npm 目录 (SPA) · npm 静态索引 (/npm/)
+ *   工具        → 工具目录 (SPA) · 工具静态索引 (/tools/)
+ *   模型路由    → 模型路由 (SPA) · 路由表 JSON (/api/v1/models)
+ *   系统        → API 密钥 · 系统统计 · 访问控制 · 接口文档
  *
- * Adding a category is a `NavGroup` entry here plus a route in
- * `router/index.ts`; nothing else in the shell needs to change.
+ * Items with an `href` are machine-facing (no JavaScript) and open in a new
+ * tab; the rest are SPA routes.
  */
 const home: NavItem = { index: '/', titleKey: 'nav.home', icon: 'Odometer' }
 
@@ -50,34 +55,60 @@ const groups = computed<NavGroup[]>(() => {
       titleKey: 'nav.groupPython',
       icon: 'Box',
       permission: 'package:read',
-      items: [{ index: '/packages', titleKey: 'nav.packages', icon: 'Box' }],
+      items: [
+        { index: '/packages', titleKey: 'nav.packages', icon: 'Box' },
+        { index: '/simple/', href: '/simple/', titleKey: 'nav.index', icon: 'Link' },
+        {
+          index: '/python-builds/',
+          href: '/python-builds/',
+          titleKey: 'nav.builds',
+          icon: 'Download',
+        },
+      ],
     },
     {
       key: 'group-npm',
       titleKey: 'nav.groupNpm',
       icon: 'ShoppingBag',
       permission: 'npm:read',
-      items: [{ index: '/npm', titleKey: 'nav.npm', icon: 'ShoppingBag' }],
+      items: [
+        { index: '/npm', titleKey: 'nav.npm', icon: 'ShoppingBag' },
+        { index: '/npm/', href: '/npm/', titleKey: 'nav.npmIndex', icon: 'Link' },
+      ],
     },
     {
       key: 'group-tools',
       titleKey: 'nav.groupTools',
       icon: 'Tools',
       permission: 'tool:read',
-      items: [{ index: '/tools', titleKey: 'nav.tools', icon: 'Tools' }],
+      items: [
+        { index: '/tools', titleKey: 'nav.tools', icon: 'Tools' },
+        { index: '/tools/', href: '/tools/', titleKey: 'nav.toolsIndex', icon: 'Link' },
+      ],
     },
     {
       key: 'group-models',
       titleKey: 'nav.groupModels',
       icon: 'Cpu',
       permission: 'model:read',
-      items: [{ index: '/models', titleKey: 'nav.models', icon: 'Cpu' }],
+      items: [
+        { index: '/models', titleKey: 'nav.models', icon: 'Cpu' },
+        {
+          index: '/api/v1/models',
+          href: '/api/v1/models',
+          titleKey: 'nav.modelsJson',
+          icon: 'Document',
+        },
+      ],
     },
     {
       key: 'group-system',
       titleKey: 'nav.groupSystem',
       icon: 'Setting',
-      items: [{ index: '/api-keys', titleKey: 'nav.apiKeys', icon: 'Key' }],
+      items: [
+        { index: '/api-keys', titleKey: 'nav.apiKeys', icon: 'Key' },
+        { index: '/docs', href: '/docs', titleKey: 'nav.docs', icon: 'Document' },
+      ],
     },
   ]
 
@@ -91,17 +122,31 @@ const groups = computed<NavGroup[]>(() => {
   return groups.filter((group) => !group.permission || session.can(group.permission))
 })
 
-/** Machine-facing endpoints, opened in a new tab — not part of the SPA. */
-const machineLinks = [
-  { href: '/simple/', labelKey: 'nav.index', icon: 'Link' },
-  { href: '/python-builds/', labelKey: 'nav.builds', icon: 'Download' },
-  { href: '/docs', labelKey: 'nav.docs', icon: 'Document' },
-]
+/** Every visible item, for turning a menu selection back into an action. */
+const allItems = computed<NavItem[]>(() => [home, ...groups.value.flatMap((g) => g.items)])
 
-const activeIndex = computed(() => route.path)
+/** Highlight the SPA item that matches the current route. */
+const activeIndex = computed(() => {
+  const match = allItems.value.find((item) => !item.href && item.index === route.path)
+  return match?.index ?? route.path
+})
 
 /** Build stamp injected by vite.config.ts; makes stale bundles obvious. */
 const buildId = __BUILD_ID__
+
+/**
+ * The menu is deliberately *not* in `router` mode: items mix SPA routes with
+ * machine-facing index links, and the latter must open in a new tab rather than
+ * be pushed into the history router.
+ */
+function onSelect(index: string): void {
+  const item = allItems.value.find((candidate) => candidate.index === index)
+  if (item?.href) {
+    window.open(item.href, '_blank', 'noopener')
+    return
+  }
+  router.push(index)
+}
 </script>
 
 <template>
@@ -120,7 +165,7 @@ const buildId = __BUILD_ID__
       :default-active="activeIndex"
       :collapse="appStore.sidebarCollapsed"
       :collapse-transition="false"
-      router
+      @select="onSelect"
     >
       <el-menu-item :index="home.index">
         <el-icon><component :is="home.icon" /></el-icon>
@@ -134,25 +179,16 @@ const buildId = __BUILD_ID__
         </template>
         <el-menu-item v-for="item in group.items" :key="item.index" :index="item.index">
           <el-icon><component :is="item.icon" /></el-icon>
-          <template #title>{{ t(item.titleKey) }}</template>
+          <template #title>
+            <span>{{ t(item.titleKey) }}</span>
+            <el-icon v-if="item.href" class="sidebar__external"><TopRight /></el-icon>
+          </template>
         </el-menu-item>
       </el-sub-menu>
     </el-menu>
 
     <div class="sidebar__footer">
       <el-divider class="sidebar__divider" />
-      <el-tooltip
-        v-for="link in machineLinks"
-        :key="link.href"
-        :content="link.href"
-        placement="right"
-        :disabled="!appStore.sidebarCollapsed"
-      >
-        <a class="sidebar__link" :href="link.href" target="_blank" rel="noopener">
-          <el-icon><component :is="link.icon" /></el-icon>
-          <span v-if="!appStore.sidebarCollapsed">{{ t(link.labelKey) }}</span>
-        </a>
-      </el-tooltip>
       <div v-if="!appStore.sidebarCollapsed" class="sidebar__build">build {{ buildId }}</div>
     </div>
   </div>
@@ -195,6 +231,11 @@ const buildId = __BUILD_ID__
   overflow-x: hidden;
 }
 
+.sidebar__external {
+  margin-left: 6px;
+  color: var(--el-text-color-placeholder);
+}
+
 .sidebar__footer {
   flex-shrink: 0;
   padding: 0 8px 12px;
@@ -204,27 +245,8 @@ const buildId = __BUILD_ID__
   margin: 8px 0;
 }
 
-.sidebar__link {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 40px;
-  padding: 0 12px;
-  border-radius: 6px;
-  color: var(--el-text-color-regular);
-  text-decoration: none;
-  font-size: 14px;
-  white-space: nowrap;
-  overflow: hidden;
-}
-
-.sidebar__link:hover {
-  background: var(--el-fill-color-light);
-  color: var(--el-color-primary);
-}
-
 .sidebar__build {
-  padding: 8px 12px 0;
+  padding: 0 12px;
   font-family: 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace;
   font-size: 11px;
   color: var(--el-text-color-placeholder);

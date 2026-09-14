@@ -340,8 +340,9 @@ edit them in place.
 ### Static index elements
 
 Every ecosystem gets a **server-rendered index** next to its rich SPA page, so a
-script (or a browser with JavaScript off) can still enumerate it. Templates are
-grouped by ecosystem under `static/`:
+script (or a browser with JavaScript off) can still enumerate it. Both live in
+the same sidebar group — the index entries carry an external-link icon and open
+in a new tab. Templates are grouped by ecosystem under `static/`:
 
 | Index | Path | HTML form | JSON form |
 | ----- | ---- | --------- | --------- |
