@@ -1,4 +1,8 @@
-"""Centralised template loading — lru-cached file reads."""
+"""Centralised template loading — lru-cached file reads.
+
+Only *machine-facing* templates live here.  Human-facing pages are part of the
+Vue SPA under ``frontend/`` and never touch this module.
+"""
 
 from functools import lru_cache
 
@@ -7,18 +11,6 @@ from functools import lru_cache
 def _load(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
-
-
-def admin() -> str:
-    return _load("static/admin.html")
-
-
-def api_keys() -> str:
-    return _load("static/api_keys.html")
-
-
-def root() -> str:
-    return _load("static/root.html")
 
 
 def pypi_simple_index() -> str:

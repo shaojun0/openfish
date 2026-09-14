@@ -23,10 +23,15 @@ the codebase.
 - **Local packages over HTTP** — packages are served directly from disk with an
   in-memory index kept fresh by `watchdog`.
 - **Optional ClamAV scanning** on upload.
+- **Vue 3 admin console** — the browser-facing UI is a Vue 3 + Vite + Element
+  Plus SPA in `frontend/`, built into `static/dist/` and served by Flask. Every
+  machine-facing endpoint stays server-rendered, so `pip` and `uv` never need
+  JavaScript — see [Frontend architecture](#frontend-architecture).
 
 ## Requirements
 
 - Python **3.12+**
+- Node **20+** — *build-time only*, to compile the SPA. Not needed at runtime.
 - Docker + **Docker Compose v2** (`docker compose`) for the container workflow.
   The legacy `docker-compose` 1.25 binary does **not** understand the variable
   syntax or `profiles:` used here.
@@ -40,6 +45,9 @@ cd openfish
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
+# Build the SPA (once; re-run after changing anything under frontend/)
+cd frontend && npm install && npm run build && cd ..
+
 cp .env.example .env      # then edit .env — see "Configuration" below
 python app.py
 ```
@@ -48,6 +56,35 @@ The server listens on `http://0.0.0.0:9090` by default. Health check:
 
 ```bash
 curl -fsS http://127.0.0.1:9090/health
+```
+
+If you skip the build step the API and the machine-facing endpoints still work;
+only `/` returns a "frontend bundle not found" hint.
+
+### Frontend development (hot reload)
+
+Run Flask and Vite side by side. Vite proxies the API and the machine-facing
+endpoints to Flask, so everything is reachable on one origin:
+
+```bash
+python app.py                  # terminal 1 — http://127.0.0.1:9090
+cd frontend && npm run dev     # terminal 2 — http://127.0.0.1:5173
+```
+
+> **Filesystems without symlink support.** `npm install` creates symlinks in
+> `node_modules/.bin`, which fails on NTFS/exFAT volumes (e.g. a USB stick).
+> The repo ships `frontend/.npmrc` with `bin-links=false` and the npm scripts
+> invoke the toolchain as `node ./node_modules/vite/bin/vite.js`, so an install
+> still succeeds — but such volumes also waste ~1 MB per directory on NTFS, so
+> keep `node_modules/` on a native Linux filesystem.
+
+### Frontend smoke test
+
+`npm run smoke` renders every route in jsdom — no browser required — and exits
+non-zero on any Vue warning, unresolved component or runtime error:
+
+```bash
+cd frontend && npm run smoke
 ```
 
 ## Quick start (Docker)
@@ -130,24 +167,57 @@ are non-empty, so an unconfigured deployment cannot be entered with `":"`.
 
 ## API overview
 
+### Machine-facing (consumed by clients — no JavaScript)
+
 | Method | Path                                          | Purpose                              |
 | ------ | --------------------------------------------- | ------------------------------------ |
 | GET    | `/health`                                     | Liveness probe (no auth)             |
-| GET    | `/simple/`                                     | Package index                        |
+| GET    | `/simple/`                                     | Package index (PEP 503 / PEP 691)    |
 | GET    | `/simple/<package>/`                           | Files for one package                |
 | GET    | `/simple/<package>/<filename>`                 | Download a file                      |
 | GET    | `/packages/<filename>`                         | Download a file                      |
 | POST   | `/` , `/legacy/`                               | Upload (`twine`)                     |
-| GET    | `/` (dashboard)                                | API key management UI                |
-| GET    | `/api/keys`, POST `/api/keys`                  | List / create API keys               |
-| DELETE | `/api/keys/<key_id>`                           | Revoke a key                         |
-| GET    | `/api/keys/<key_id>/stats`                     | Per-key usage stats                  |
 | GET    | `/python-builds/`                              | Available CPython builds             |
 | GET    | `/python-builds/<tag>/<filename>`              | Download a build                     |
 | GET    | `/python-builds/<tag>/<filename>/sha256`       | Build checksum                       |
 | GET    | `/python-builds/health`                        | Build mirror status                  |
-| GET    | `/admin/`, `/admin/stats`, POST `/admin/refresh-stats` | Admin dashboard             |
 | GET    | `/auth/login`, `/auth`, `/auth/logout`         | OAuth2 login flow                    |
+
+Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
+`/simple/` endpoints for the PEP 691 JSON representation.
+
+### JSON API for the SPA (`/api/v1`)
+
+| Method | Path                              | Purpose                                  |
+| ------ | --------------------------------- | ---------------------------------------- |
+| GET    | `/api/v1/session`                 | Current user, role and permissions (200 even when anonymous) |
+| GET    | `/api/v1/packages`                | Package list with sizes and call counts  |
+| GET    | `/api/v1/keys`                    | List API keys                            |
+| POST   | `/api/v1/keys`                    | Create an API key (raw key returned once)|
+| DELETE | `/api/v1/keys/<key_id>`           | Revoke a key                             |
+| GET    | `/api/v1/keys/<key_id>/stats`     | Per-key usage stats                      |
+| GET    | `/api/v1/admin/stats`             | System-wide aggregates (admin)           |
+| POST   | `/api/v1/admin/refresh-stats`     | Recompute and cache them (admin)         |
+
+### Browser-facing
+
+`/`, `/packages`, `/api-keys`, `/admin` all serve the SPA shell. A deep link
+such as `/api-keys` is handled by Flask's history-mode fallback, so links can be
+shared and bookmarked.
+
+## Frontend architecture
+
+The split is by **audience**, not by convenience:
+
+| Audience | Owned by | Why |
+| -------- | -------- | --- |
+| A human in a browser (`/`, `/packages`, `/api-keys`, `/admin`) | Vue 3 SPA in `frontend/` | Rich interaction, no crawler contract |
+| A package manager (`/simple/`, `/packages/<f>`, `/python-builds/`) | Flask + Jinja (`static/*_template/`) | `pip` and `uv` **parse the HTML directly and never run JavaScript** — these are wire protocols, not web pages |
+| A script or agent (`/api/v1/*`, `/health`) | Flask JSON | Stable contract for API-key clients |
+
+Adding a new package ecosystem (npm, Maven, …) means adding a backend adapter
+plus its protocol routes; the SPA stays unchanged as long as the ecosystem is
+surfaced through `/api/v1`.
 
 ## Project layout
 
@@ -155,12 +225,14 @@ are non-empty, so an unconfigured deployment cannot be entered with `":"`.
 app.py                 entry point — wires extensions, then routes
 config/                pydantic-settings models (server, storage, auth, security)
 extensions/            pluggable infrastructure + topological init registry
-routes/                Flask blueprints (pypi, python_build, api_keys, admin, auth)
+routes/                Flask blueprints (pypi, python_build, api_keys, admin,
+                       session, spa, auth)
 auth/                  guards, decorators, permission model, API keys, OAuth2
 index/                 package / build discovery and indexing
 models/                SQLAlchemy models (API keys, stats)
 services/              templates, stats aggregation, validation
-static/                HTML dashboard + index templates
+frontend/              Vue 3 + Vite + Element Plus SPA (build-time only)
+static/                machine-facing templates + the built SPA in static/dist/
 docker/                docker-compose.yml and its .env template
 ```
 

@@ -1,11 +1,16 @@
 """Error handler extension — global Flask error handlers."""
 
-from flask import redirect, jsonify, request
+from flask import jsonify, redirect, request
 
 from config import settings
 from extensions import Extension
-from errors import UnauthorizedError, BadRequestError, UploadConflictError
+from errors import PypiError, UnauthorizedError, BadRequestError, UploadConflictError
 from auth.oauth import get_authorize_url
+
+#: Blueprints that serve the SPA and API-key clients.  These must always answer
+#: JSON — an HTML redirect would be followed silently by XHR, and the client
+#: would then try to parse a login page as JSON.
+_API_BLUEPRINTS = {"session", "api_keys", "admin"}
 
 
 class ErrorHandlersExtension(Extension):
@@ -15,14 +20,25 @@ class ErrorHandlersExtension(Extension):
     def init_app(self, app) -> None:
         @app.errorhandler(UnauthorizedError)
         def _401(exc: UnauthorizedError):
-            best = request.accept_mimetypes.best_match(["text/html", "application/json"])
-            if best == "text/html":
+            if request.blueprint in _API_BLUEPRINTS or "application/json" in request.headers.get("Accept", ""):
+                return _unauthorized_json(exc)
+
+            # Browser navigation: prefer the OAuth flow, otherwise fall back to
+            # an HTTP Basic challenge so a Basic-only deployment can still sign
+            # in instead of being redirected to an empty authorization URL.
+            if settings.auth.oauth2_authorize_url.strip():
                 return redirect(get_authorize_url())
-            resp = jsonify({"error": exc.message})
-            resp.status_code = 401
-            if exc.www_authenticate:
-                resp.headers["WWW-Authenticate"] = exc.www_authenticate
-            return resp
+            if settings.auth.basic_username and settings.auth.basic_password:
+                resp = _unauthorized_json(exc)
+                resp.headers["WWW-Authenticate"] = 'Basic realm="cpypiserver"'
+                return resp
+            return _unauthorized_json(exc)
+
+        # Catch-all for the domain exceptions.  Flask picks the most specific
+        # handler, so BadRequestError / UploadConflictError below still win.
+        @app.errorhandler(PypiError)
+        def _pypi_error(exc: PypiError):
+            return jsonify({"error": exc.message}), exc.status_code
 
         @app.errorhandler(404)
         def _404(exc):
@@ -47,3 +63,11 @@ class ErrorHandlersExtension(Extension):
         @app.errorhandler(UploadConflictError)
         def _409(exc):
             return jsonify({"error": exc.message}), 409
+
+
+def _unauthorized_json(exc: UnauthorizedError):
+    resp = jsonify({"error": exc.message})
+    resp.status_code = 401
+    if exc.www_authenticate:
+        resp.headers["WWW-Authenticate"] = exc.www_authenticate
+    return resp

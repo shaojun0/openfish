@@ -1,41 +1,18 @@
-"""API key management dashboard — CRUD for Bearer tokens."""
+"""API key management — CRUD for Bearer tokens.
 
-from flask import (
-    Blueprint, current_app, g, jsonify, redirect,
-    render_template_string, request, session, url_for,
-)
+The HTML dashboard that used to live here is now part of the Vue SPA
+(``frontend/src/views/ApiKeysView.vue``).  This module only serves JSON, under
+``/api/v1``.
+"""
 
-from config import settings
-from auth.oauth import get_authorize_url
-from auth.permissions import Permission, has_permission
-from auth.decorators import _get_role
+from flask import Blueprint, current_app, g, jsonify, request, session
+
 from errors import UnauthorizedError
-from services import templates
 
 api_keys_bp = Blueprint("api_keys", __name__)
 
 
-@api_keys_bp.route("/")
-def dashboard():
-    user = _current_user()
-    if user is None:
-        if settings.auth.auth_enabled:
-            return redirect(get_authorize_url())
-        user = "anonymous"
-    mgr = current_app.extensions["api_key_manager"]
-    keys = mgr.list_keys(created_by=user)
-    return render_template_string(
-        templates.api_keys(),
-        server_name=settings.server.server_name,
-        user=user,
-        keys=keys,
-        auth_enabled=settings.auth.auth_enabled,
-        is_admin=_is_admin(),
-        base_url=url_for("api_keys.dashboard", _external=True).rstrip("/"),
-    )
-
-
-@api_keys_bp.route("/api/keys", methods=["GET"])
+@api_keys_bp.route("/keys", methods=["GET"])
 def list_keys():
     _require_auth()
     mgr = current_app.extensions["api_key_manager"]
@@ -45,13 +22,14 @@ def list_keys():
     return jsonify(keys)
 
 
-@api_keys_bp.route("/api/keys", methods=["POST"])
+@api_keys_bp.route("/keys", methods=["POST"])
 def create_key():
     _require_auth()
     data = request.get_json(silent=True) or {}
-    name = data.get("name", "").strip()
+    name = str(data.get("name", "")).strip()
     if not name:
         return jsonify({"error": "name is required"}), 400
+
     expires = data.get("expires_in_days")
     if expires is not None:
         try:
@@ -60,12 +38,13 @@ def create_key():
                 expires = None
         except (ValueError, TypeError):
             expires = None
+
     mgr = current_app.extensions["api_key_manager"]
     result = mgr.create_key(name=name, created_by=_current_user(), expires_in_days=expires)
     return jsonify(result), 201
 
 
-@api_keys_bp.route("/api/keys/<key_id>", methods=["DELETE"])
+@api_keys_bp.route("/keys/<key_id>", methods=["DELETE"])
 def delete_key(key_id: str):
     _require_auth()
     mgr = current_app.extensions["api_key_manager"]
@@ -74,7 +53,7 @@ def delete_key(key_id: str):
     return jsonify({"deleted": key_id})
 
 
-@api_keys_bp.route("/api/keys/<key_id>/stats", methods=["GET"])
+@api_keys_bp.route("/keys/<key_id>/stats", methods=["GET"])
 def key_stats(key_id: str):
     _require_auth()
     mgr = current_app.extensions["api_key_manager"]
@@ -91,10 +70,7 @@ def _current_user() -> str | None:
     return f"session:{token[:8]}…" if token else None
 
 
-def _is_admin() -> bool:
-    return has_permission(_get_role(), Permission.ADMIN_VIEW)
-
-
 def _require_auth() -> None:
+    """Defence in depth — the blueprint also installs a before_request guard."""
     if _current_user() is None:
         raise UnauthorizedError()

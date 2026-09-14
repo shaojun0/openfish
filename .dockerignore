@@ -7,6 +7,12 @@ __pycache__
 build/
 dist/
 
+# ── Frontend ────────────────────────────────────────────────────────
+# node_modules is reinstalled inside the frontend build stage; the bundle is
+# produced there too, so neither belongs in the build context.
+frontend/node_modules/
+static/dist/
+
 # ── Git / IDE ───────────────────────────────────────────────────────
 .git
 .gitignore

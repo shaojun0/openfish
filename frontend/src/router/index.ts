@@ -1,0 +1,74 @@
+import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
+
+import DefaultLayout from '@/layouts/DefaultLayout.vue'
+import { useSessionStore } from '@/stores/session'
+
+/**
+ * Route ownership
+ * ---------------
+ * The SPA owns every URL a human opens in a browser.  The machine-facing
+ * endpoints (`/simple/`, `/python-builds/`, `/api/v1/*`, `/health`) are served
+ * by Flask and deliberately stay out of this table — `pip` and `uv` parse those
+ * responses directly and never execute JavaScript.
+ */
+const routes: RouteRecordRaw[] = [
+  {
+    path: '/',
+    component: DefaultLayout,
+    children: [
+      {
+        path: '',
+        name: 'home',
+        component: () => import('@/views/HomeView.vue'),
+        meta: { titleKey: 'nav.home', icon: 'Odometer' },
+      },
+      {
+        path: 'packages',
+        name: 'packages',
+        component: () => import('@/views/PackagesView.vue'),
+        meta: { titleKey: 'nav.packages', icon: 'Box' },
+      },
+      {
+        path: 'api-keys',
+        name: 'api-keys',
+        component: () => import('@/views/ApiKeysView.vue'),
+        meta: { titleKey: 'nav.apiKeys', icon: 'Key' },
+      },
+      {
+        path: 'admin',
+        name: 'admin',
+        component: () => import('@/views/AdminView.vue'),
+        meta: { titleKey: 'nav.admin', icon: 'DataAnalysis', requiresAdmin: true },
+      },
+    ],
+  },
+  {
+    path: '/:pathMatch(.*)*',
+    name: 'not-found',
+    component: () => import('@/views/NotFoundView.vue'),
+  },
+]
+
+const router = createRouter({
+  history: createWebHistory('/'),
+  routes,
+  scrollBehavior: () => ({ top: 0 }),
+})
+
+/**
+ * Resolve the session before the first guarded navigation, then keep
+ * non-admins out of `/admin`.  The API enforces the same rule, so this is a
+ * UX guard rather than a security boundary.
+ */
+router.beforeEach(async (to) => {
+  const session = useSessionStore()
+  if (!session.loaded) {
+    await session.load()
+  }
+  if (to.meta.requiresAdmin && !session.isAdmin) {
+    return { name: 'home' }
+  }
+  return true
+})
+
+export default router

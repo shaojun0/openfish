@@ -1,0 +1,177 @@
+<script setup lang="ts">
+import { ElMessage } from 'element-plus'
+import { computed, onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
+
+import { fetchPackages, type PackageSummary } from '@/api'
+import { apiError } from '@/api/client'
+import { formatBytes } from '@/utils/format'
+
+const { t } = useI18n()
+
+const packages = ref<PackageSummary[]>([])
+const loading = ref(true)
+const query = ref('')
+
+const filtered = computed(() => {
+  const needle = query.value.trim().toLowerCase()
+  if (!needle) return packages.value
+  return packages.value.filter((p) => p.name.toLowerCase().includes(needle))
+})
+
+async function load(): Promise<void> {
+  loading.value = true
+  try {
+    packages.value = await fetchPackages()
+  } catch (e) {
+    ElMessage.error(apiError(e) || t('packages.loadFailed'))
+  } finally {
+    loading.value = false
+  }
+}
+
+/**
+ * Index page and JSON metadata are backend-owned, machine-facing URLs.
+ * They are opened directly rather than fetched — `pip` reads exactly the
+ * same HTML, so there is only one implementation to keep correct.
+ */
+function indexUrl(name: string): string {
+  return `/simple/${encodeURIComponent(name)}/`
+}
+
+function jsonUrl(name: string): string {
+  return `/simple/${encodeURIComponent(name)}/?format=json`
+}
+
+function openTab(url: string): void {
+  window.open(url, '_blank', 'noopener')
+}
+
+onMounted(load)
+</script>
+
+<template>
+  <div class="page">
+    <div class="page__header">
+      <div class="page__heading">
+        <h1 class="page__title">{{ t('packages.title') }}</h1>
+        <p class="page__description">{{ t('packages.description') }}</p>
+      </div>
+      <div class="toolbar">
+        <el-input
+          v-model="query"
+          class="toolbar__search"
+          clearable
+          :placeholder="t('packages.filterPlaceholder')"
+        >
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
+        <el-button :loading="loading" @click="load">
+          <el-icon><Refresh /></el-icon>
+          <span class="btn-label">{{ t('common.refresh') }}</span>
+        </el-button>
+      </div>
+    </div>
+
+    <el-card shadow="never">
+      <el-table
+        v-loading="loading"
+        :data="filtered"
+        stripe
+        :empty-text="query ? t('packages.emptyFiltered', { query }) : t('packages.empty')"
+      >
+        <el-table-column prop="name" :label="t('packages.name')" min-width="220" sortable>
+          <template #default="{ row }">
+            <a class="pkg-link mono" :href="indexUrl(row.name)" target="_blank" rel="noopener">
+              {{ row.name }}
+            </a>
+          </template>
+        </el-table-column>
+
+        <el-table-column
+          prop="file_count"
+          :label="t('packages.files')"
+          width="100"
+          align="right"
+          sortable
+        />
+
+        <el-table-column prop="total_size" :label="t('packages.size')" width="130" align="right" sortable>
+          <template #default="{ row }">
+            {{ row.total_size_human || formatBytes(row.total_size) }}
+          </template>
+        </el-table-column>
+
+        <el-table-column
+          prop="download_count"
+          :label="t('packages.downloads')"
+          width="120"
+          align="right"
+          sortable
+        />
+
+        <el-table-column
+          prop="upload_count"
+          :label="t('packages.uploads')"
+          width="110"
+          align="right"
+          sortable
+        />
+
+        <el-table-column :label="t('common.actions')" width="190" align="right">
+          <template #default="{ row }">
+            <el-button size="small" text type="primary" @click="openTab(indexUrl(row.name))">
+              <el-icon><Link /></el-icon>
+              <span class="btn-label">{{ t('packages.openIndex') }}</span>
+            </el-button>
+            <el-tooltip :content="t('packages.openJson')">
+              <el-button size="small" text @click="openTab(jsonUrl(row.name))">
+                <el-icon><Document /></el-icon>
+              </el-button>
+            </el-tooltip>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <div class="footer">
+        <span class="footer__count">{{ t('common.total', { count: filtered.length }) }}</span>
+      </div>
+    </el-card>
+  </div>
+</template>
+
+<style scoped>
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toolbar__search {
+  width: 260px;
+}
+
+.btn-label {
+  margin-left: 4px;
+}
+
+.pkg-link {
+  color: var(--el-color-primary);
+  text-decoration: none;
+}
+
+.pkg-link:hover {
+  text-decoration: underline;
+}
+
+.footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 12px;
+}
+
+.footer__count {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+</style>

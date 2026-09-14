@@ -1,3 +1,16 @@
+# ── Frontend build stage ────────────────────────────────────────────
+# Builds the Vue 3 SPA.  Vite emits straight into static/dist (outDir is
+# ../static/dist relative to frontend/), which is copied into the runtime
+# image below — Node never ships to production.
+FROM node:24-slim AS frontend
+
+WORKDIR /frontend
+COPY frontend/package*.json frontend/.npmrc ./
+RUN npm install --no-audit --no-fund
+COPY frontend/ ./
+RUN npm run build
+
+
 # ── Final stage ─────────────────────────────────────────────────────
 FROM python:3.12-slim
 
@@ -32,6 +45,10 @@ RUN pip install -i https://mirrors.aliyun.com/pypi/simple/ --no-cache-dir \
 # When you add a new directory (e.g. "templates/"), just add it to
 # .dockerignore only if it should be excluded — no Dockerfile change needed.
 COPY . .
+
+# ── Built frontend bundle ───────────────────────────────────────────
+# Copied after the source so it always wins over any stale local static/dist.
+COPY --from=frontend /static/dist ./static/dist
 
 # ── Runtime ─────────────────────────────────────────────────────────
 RUN mkdir -p /app/packages /app/data
