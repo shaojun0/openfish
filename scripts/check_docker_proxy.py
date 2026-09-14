@@ -497,6 +497,28 @@ def main() -> int:
             response.status_code == 502 and payload.get("errors"),
             "unreachable upstream blob → 502 JSON (not a 500)",
         )
+
+        # Last, because it deliberately clears the cache directory.
+        print()
+        print("── Cache budget smaller than one blob ──────────────────────────")
+        # Committing a blob and *then* enforcing the budget can evict the very
+        # entry that was just written — which is correct, but reading its size
+        # back with stat() afterwards used to turn a successful pull into a 500.
+        settings.hub.docker_upstream = f"http://127.0.0.1:{fake.port}"
+        settings.hub.docker_timeout = 5
+        registry.reset()
+        proxy = registry.get_proxy()
+        proxy._cache.clear()
+        proxy._cache.max_bytes = 1  # smaller than a single layer
+        response = client.get(f"/docker/v2/library/tiny/blobs/{LAYER_DIGEST}", headers=auth)
+        check(
+            response.status_code == 200 and response.data == BLOB,
+            "a blob larger than the whole cache budget still streams intact (no 500 after eviction)",
+        )
+        check(
+            proxy._cache.get(LAYER_DIGEST) is None,
+            "the oversized blob was evicted instead of being kept over budget",
+        )
     finally:
         server.shutdown()
         thread.join(timeout=5)

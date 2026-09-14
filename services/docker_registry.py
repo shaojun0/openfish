@@ -783,6 +783,11 @@ class DockerRegistryProxy:
         state: dict[str, Any] = {
             "handle": os.fdopen(fd, "wb"),
             "done": False,
+            # Counted as we write: the size must not be read back with stat()
+            # after the budget is enforced, because the entry we just committed
+            # is a legitimate eviction candidate when it is larger than the
+            # whole budget.
+            "written": 0,
             # Only sha256 digests can be verified cheaply and uniformly.
             "hasher": hashlib.sha256() if digest.lower().startswith("sha256:") else None,
         }
@@ -793,6 +798,7 @@ class DockerRegistryProxy:
                     if not chunk:
                         continue
                     state["handle"].write(chunk)
+                    state["written"] += len(chunk)
                     if state["hasher"] is not None:
                         state["hasher"].update(chunk)
                     yield chunk
@@ -811,11 +817,23 @@ class DockerRegistryProxy:
                 os.replace(tmp_name, dest)
                 state["done"] = True
                 self._index.record_blob(name, digest)
+                written = state["written"]
                 try:
                     self._cache.enforce_limit()
                 except OSError as exc:  # pragma: no cover - budget is best effort
                     log.warning("docker: cache eviction failed: %s", exc)
-                log.info("docker: cached blob %s (%d bytes)", digest, dest.stat().st_size)
+                if dest.exists():
+                    log.info("docker: cached blob %s (%d bytes)", digest, written)
+                else:
+                    # The blob went out to the client, but it is bigger than the
+                    # whole budget, so the entry was evicted as soon as it was
+                    # committed. Say so instead of reporting a cache hit that
+                    # will not happen.
+                    log.info(
+                        "docker: streamed blob %s (%d bytes); larger than the "
+                        "cache budget, so it was not retained",
+                        digest, written,
+                    )
             except _DiscardTemp:
                 pass
             finally:
