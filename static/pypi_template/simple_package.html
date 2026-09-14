@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="pypi:repository-version" content="1.0">
+    <title>Links for {{ package_name }}</title>
+</head>
+<body>
+    <h1>Links for {{ package_name }}</h1>
+    {% for f in files %}
+    <a href="{{ url_for('pypi.serve_package', filename=f.filename) }}#sha256={{ f.sha256_digest or '' }}" data-requires-python="{{ f.requires_python or '' }}">{{ f.filename }}</a><br>
+    {% endfor %}
+</body>
+</html>

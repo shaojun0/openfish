@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin Dashboard — {{ server_name }}</title>
+<style>
+  :root {
+    --bg: #0b1120;
+    --bg-card: #111827;
+    --bg-input: #1a2236;
+    --border: #1e2d4a;
+    --border-focus: #3b82f6;
+    --text: #e2e8f0;
+    --text-dim: #64748b;
+    --accent: #3b82f6;
+    --accent-hover: #2563eb;
+    --success: #22c55e;
+    --warning: #f59e0b;
+    --danger: #ef4444;
+    --danger-bg: #7f1d1d20;
+    --purple: #a855f7;
+    --radius: 8px;
+    --radius-sm: 6px;
+    --shadow: 0 1px 3px rgba(0,0,0,.3);
+    --bg-pattern: radial-gradient(ellipse at 20% 50%, rgba(59,130,246,0.04) 0%, transparent 50%),
+                  radial-gradient(ellipse at 80% 20%, rgba(99,102,241,0.03) 0%, transparent 50%);
+  }
+
+  [data-theme="light"] {
+    --bg: #f8fafc;
+    --bg-card: #ffffff;
+    --bg-input: #f1f5f9;
+    --border: #e2e8f0;
+    --border-focus: #3b82f6;
+    --text: #1e293b;
+    --text-dim: #64748b;
+    --accent: #3b82f6;
+    --accent-hover: #2563eb;
+    --success: #16a34a;
+    --warning: #d97706;
+    --danger: #dc2626;
+    --danger-bg: #fee2e2;
+    --purple: #7c3aed;
+    --shadow: 0 1px 3px rgba(0,0,0,.08);
+    --bg-pattern: radial-gradient(ellipse at 20% 50%, rgba(59,130,246,0.06) 0%, transparent 50%),
+                  radial-gradient(ellipse at 80% 20%, rgba(99,102,241,0.05) 0%, transparent 50%);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body::before {
+    content: "";
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-image: var(--bg-pattern);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .container {
+    position: relative;
+    z-index: 1;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 2.5rem;
+    padding-bottom: 1.25rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .brand { display: flex; align-items: center; gap: .75rem; }
+  .brand-icon {
+    width: 40px; height: 40px;
+    background: linear-gradient(135deg, var(--purple), var(--accent));
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.25rem;
+    box-shadow: 0 4px 12px rgba(168,85,247,.3);
+  }
+  .brand h1 { font-size: 1.35rem; font-weight: 600; }
+  .brand span { font-size: .8rem; color: var(--text-dim); font-weight: 400; }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+  }
+  .nav-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+    padding: .45rem .85rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+    font-size: .82rem;
+    font-weight: 500;
+    text-decoration: none;
+    transition: all .15s;
+    white-space: nowrap;
+  }
+  .nav-btn:hover {
+    background: var(--accent-hover);
+    box-shadow: 0 2px 8px rgba(59,130,246,.3);
+    transform: translateY(-1px);
+  }
+  .theme-toggle,
+  .lang-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 36px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: .85rem;
+    font-weight: 600;
+    transition: all .15s;
+    white-space: nowrap;
+  }
+  .theme-toggle { width: 36px; font-size: 1.1rem; }
+  .lang-toggle { width: 42px; letter-spacing: .5px; padding: 0 .5rem; }
+  .theme-toggle:hover, .lang-toggle:hover {
+    color: var(--text);
+    border-color: var(--text-dim);
+  }
+  .user-badge {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    padding: .4rem .85rem;
+    border-radius: 999px;
+    font-size: .8rem;
+    color: var(--text-dim);
+  }
+  .user-badge .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--purple);
+  }
+
+  /* ── Stats Grid ── */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+  .stat-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.25rem;
+    text-align: center;
+    transition: transform .15s;
+  }
+  .stat-card:hover { transform: translateY(-2px); }
+  .stat-card .stat-value {
+    font-size: 1.75rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--text), #94a3b8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .stat-card .stat-label {
+    font-size: .75rem;
+    color: var(--text-dim);
+    margin-top: .25rem;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+  }
+  .stat-card.accent .stat-value {
+    background: linear-gradient(135deg, var(--accent), #818cf8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .stat-card.success .stat-value {
+    background: linear-gradient(135deg, var(--success), #34d399);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .stat-card.warning .stat-value {
+    background: linear-gradient(135deg, var(--warning), #fbbf24);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+    margin-bottom: 1.25rem;
+    box-shadow: var(--shadow);
+  }
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.25rem;
+  }
+  .card-header h2 { font-size: 1.05rem; font-weight: 600; }
+
+  /* ── Tables ── */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td {
+    text-align: left;
+    padding: .65rem .6rem;
+    border-bottom: 1px solid var(--border);
+    font-size: .84rem;
+  }
+  th {
+    color: var(--text-dim);
+    font-weight: 500;
+    font-size: .73rem;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    position: sticky;
+    top: 0;
+    background: var(--bg-card);
+    z-index: 1;
+  }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { color: var(--text); }
+  th.sortable .sort-arrow { margin-left: 3px; font-size: .65rem; }
+  td code { font-size: .73rem; color: var(--text-dim); }
+  td.mono { font-family: "SF Mono", "Fira Code", monospace; font-size: .78rem; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.clickable { cursor: pointer; transition: background .1s; }
+  tr.clickable:hover { background: var(--bg-input); }
+
+  /* ── Badges ── */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: .3rem;
+    padding: .15rem .55rem;
+    border-radius: 999px;
+    font-size: .7rem;
+    font-weight: 500;
+  }
+  .badge-active { background: #16653420; color: #4ade80; }
+  .badge-expired { background: #991b1b20; color: #f87171; }
+  .badge-permanent { background: #1e3a5f20; color: #60a5fa; }
+
+  /* ── Bar chart (CSS-only) ── */
+  .bar-cell { display: flex; align-items: center; gap: .5rem; }
+  .bar {
+    flex: 1;
+    height: 8px;
+    background: var(--bg-input);
+    border-radius: 4px;
+    overflow: hidden;
+    min-width: 60px;
+  }
+  .bar-fill { height: 100%; border-radius: 4px; transition: width .5s ease; }
+  .bar-fill.download { background: var(--accent); }
+  .bar-fill.upload { background: var(--purple); }
+
+  /* ── Loading / Empty ── */
+  .loading {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: var(--text-dim);
+    font-size: .9rem;
+  }
+  .loading .spinner {
+    display: inline-block;
+    width: 28px; height: 28px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    margin-bottom: .75rem;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .empty {
+    text-align: center;
+    padding: 2rem 1rem;
+    color: var(--text-dim);
+    font-size: .85rem;
+  }
+
+  /* ── Tabs ── */
+  .tabs {
+    display: flex; gap: 0;
+    border-bottom: 2px solid var(--border);
+    margin-bottom: 1.25rem;
+  }
+  .tab {
+    padding: .5rem 1.1rem;
+    font-size: .82rem; font-weight: 500;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: all .15s;
+    background: none;
+    border-top: none; border-left: none; border-right: none;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  @media (max-width: 768px) {
+    .container { padding: 1rem; }
+    header { flex-direction: column; gap: 1rem; align-items: flex-start; }
+    .stats-grid { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="brand">
+      <div class="brand-icon">📊</div>
+      <div>
+        <h1>{{ server_name }}</h1>
+        <span data-i18n="brand.subtitle">Admin Dashboard</span>
+      </div>
+    </div>
+    <div class="header-actions">
+      <a class="nav-btn" href="../" data-i18n="nav.index">🏠 Index</a>
+      <button class="lang-toggle" id="lang-toggle" data-i18n-title="lang.toggle" onclick="toggleLang()">EN</button>
+      <button class="theme-toggle" id="theme-toggle" data-i18n-title="theme.toggle_dark" onclick="toggleTheme()">🌙</button>
+      <div class="user-badge">
+        <span class="dot"></span>
+        <span>{{ user }}</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="stats-grid" id="overview-grid">
+    <div class="stat-card"><div class="stat-value" id="ov-packages">—</div><div class="stat-label" data-i18n="overview.packages">Packages</div></div>
+    <div class="stat-card"><div class="stat-value" id="ov-files">—</div><div class="stat-label" data-i18n="overview.files">Files</div></div>
+    <div class="stat-card warning"><div class="stat-value" id="ov-storage">—</div><div class="stat-label" data-i18n="overview.storage">Storage</div></div>
+    <div class="stat-card accent"><div class="stat-value" id="ov-keys">—</div><div class="stat-label" data-i18n="overview.keys">API Keys (active)</div></div>
+    <div class="stat-card success"><div class="stat-value" id="ov-downloads">—</div><div class="stat-label" data-i18n="overview.downloads">Total Downloads</div></div>
+    <div class="stat-card"><div class="stat-value" id="ov-uploads">—</div><div class="stat-label" data-i18n="overview.uploads">Total Uploads</div></div>
+  </div>
+
+  <div class="card">
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('tab-packages', this)" data-i18n="tab.packages">📦 Packages</button>
+      <button class="tab" onclick="switchTab('tab-keys', this)" data-i18n="tab.keys">🔑 API Keys</button>
+    </div>
+
+    <div class="tab-content active" id="tab-packages">
+      <div class="loading" id="pkg-loading">
+        <div class="spinner"></div>
+        <p data-i18n="loading.packages">Loading package stats…</p>
+      </div>
+      <div class="table-wrap" id="pkg-table" style="display:none">
+        <table>
+          <thead>
+            <tr>
+              <th data-i18n="table.package">Package</th>
+              <th class="sortable" onclick="sortTable('pkgFiles')" data-i18n="table.files">Files <span class="sort-arrow">⇅</span></th>
+              <th class="sortable" onclick="sortTable('pkgSize')" data-i18n="table.size">Size <span class="sort-arrow">⇅</span></th>
+              <th class="sortable" onclick="sortTable('pkgDownloads')" data-i18n="table.downloads">Downloads <span class="sort-arrow">⇅</span></th>
+              <th class="sortable" onclick="sortTable('pkgUploads')" data-i18n="table.uploads">Uploads <span class="sort-arrow">⇅</span></th>
+              <th data-i18n="table.activity">Activity</th>
+            </tr>
+          </thead>
+          <tbody id="pkg-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="tab-content" id="tab-keys">
+      <div class="loading" id="key-loading">
+        <div class="spinner"></div>
+        <p data-i18n="loading.keys">Loading key stats…</p>
+      </div>
+      <div class="table-wrap" id="key-table" style="display:none">
+        <table>
+          <thead>
+            <tr>
+              <th data-i18n="table.key_name">Name</th>
+              <th data-i18n="table.key_prefix">Prefix</th>
+              <th data-i18n="table.key_owner">Owner</th>
+              <th class="sortable" onclick="sortTable('keyDownloads')" data-i18n="table.downloads">Downloads <span class="sort-arrow">⇅</span></th>
+              <th class="sortable" onclick="sortTable('keyUploads')" data-i18n="table.uploads">Uploads <span class="sort-arrow">⇅</span></th>
+              <th data-i18n="table.last_used">Last Used</th>
+              <th data-i18n="table.created">Created</th>
+              <th data-i18n="table.status">Status</th>
+            </tr>
+          </thead>
+          <tbody id="key-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+//  i18n — Chinese / English
+// ═══════════════════════════════════════════════════════════════════
+const I18N = {
+  en: {
+    lang: { toggle: 'Switch to 中文' },
+    brand: { subtitle: 'Admin Dashboard' },
+    nav: { index: '🏠 Index' },
+    theme: { toggle_dark: 'Switch to light mode', toggle_light: 'Switch to dark mode' },
+
+    overview: {
+      packages: 'Packages', files: 'Files', storage: 'Storage',
+      keys: 'API Keys (active)', downloads: 'Total Downloads', uploads: 'Total Uploads',
+    },
+
+    tab: { packages: '📦 Packages', keys: '🔑 API Keys' },
+
+    table: {
+      package: 'Package', files: 'Files', size: 'Size',
+      downloads: 'Downloads', uploads: 'Uploads', activity: 'Activity',
+      key_name: 'Name', key_prefix: 'Prefix', key_owner: 'Owner',
+      last_used: 'Last Used', created: 'Created', status: 'Status',
+    },
+
+    loading: {
+      packages: 'Loading package stats…',
+      keys: 'Loading key stats…',
+    },
+
+    empty: {
+      packages: 'No packages found',
+      keys: 'No API keys found',
+    },
+
+    badge: {
+      active: '● Active', expired: '✗ Expired', permanent: '♾ Permanent',
+    },
+
+    error: {
+      access_denied: 'Access Denied — you are not authorized to view this page.',
+      unavailable: 'Stats unavailable',
+      load_failed: 'Failed to load stats (HTTP {status})',
+    },
+  },
+
+  zh: {
+    lang: { toggle: 'Switch to English' },
+    brand: { subtitle: '管理员仪表盘' },
+    nav: { index: '🏠 首页' },
+    theme: { toggle_dark: '切换到浅色模式', toggle_light: '切换到深色模式' },
+
+    overview: {
+      packages: '包数量', files: '文件数', storage: '存储空间',
+      keys: 'API 密钥（活跃）', downloads: '总下载量', uploads: '总上传量',
+    },
+
+    tab: { packages: '📦 所有包', keys: '🔑 API 密钥' },
+
+    table: {
+      package: '包名', files: '文件数', size: '大小',
+      downloads: '下载量', uploads: '上传量', activity: '活跃度',
+      key_name: '名称', key_prefix: '前缀', key_owner: '所有者',
+      last_used: '最近使用', created: '创建时间', status: '状态',
+    },
+
+    loading: {
+      packages: '加载包统计中…',
+      keys: '加载密钥统计中…',
+    },
+
+    empty: {
+      packages: '暂无包数据',
+      keys: '暂无 API 密钥',
+    },
+
+    badge: {
+      active: '● 活跃', expired: '✗ 已过期', permanent: '♾ 永久',
+    },
+
+    error: {
+      access_denied: '访问被拒 — 您没有权限查看此页面。',
+      unavailable: '统计数据不可用',
+      load_failed: '加载统计失败（HTTP {status}）',
+    },
+  },
+};
+
+let _lang = localStorage.getItem('cpypiserver-lang') || 'en';
+
+function t(key, params) {
+  let str = (I18N[_lang] && getNested(I18N[_lang], key)) || (I18N['en'] && getNested(I18N['en'], key)) || key;
+  if (params) {
+    Object.keys(params).forEach(function(k) { str = str.replace('{' + k + '}', params[k]); });
+  }
+  return str;
+}
+
+function getNested(obj, path) {
+  return path.split('.').reduce(function(o, k) { return o && o[k]; }, obj);
+}
+
+function applyI18n() {
+  document.querySelectorAll('[data-i18n]').forEach(function(el) {
+    const key = el.getAttribute('data-i18n');
+    // Preserve sort arrows inside sortable headers
+    const sortArrow = el.querySelector('.sort-arrow');
+    el.textContent = t(key);
+    if (sortArrow) { el.appendChild(sortArrow); }
+  });
+  document.querySelectorAll('[data-i18n-title]').forEach(function(el) {
+    el.title = t(el.getAttribute('data-i18n-title'));
+  });
+}
+
+function toggleLang() {
+  _lang = _lang === 'en' ? 'zh' : 'en';
+  localStorage.setItem('cpypiserver-lang', _lang);
+  updateLangButton();
+  applyI18n();
+}
+
+function updateLangButton() {
+  var btn = document.getElementById('lang-toggle');
+  if (btn) {
+    btn.textContent = _lang === 'en' ? '中' : 'EN';
+    btn.title = t('lang.toggle');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Data store + sort state
+// ═══════════════════════════════════════════════════════════════════
+let _packages = [];
+let _keys = [];
+let _maxDownloads = 1, _maxUploads = 1;
+
+// ═══════════════════════════════════════════════════════════════════
+//  Theme (unified key: cpypiserver-theme)
+// ═══════════════════════════════════════════════════════════════════
+(function() {
+  var saved = localStorage.getItem('cpypiserver-theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', saved);
+  updateThemeIcon(saved);
+})();
+
+function toggleTheme() {
+  var html = document.documentElement;
+  var next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('cpypiserver-theme', next);
+  updateThemeIcon(next);
+}
+
+function updateThemeIcon(theme) {
+  var btn = document.getElementById('theme-toggle');
+  if (btn) {
+    btn.innerHTML = theme === 'dark' ? '🌙' : '☀️';
+    btn.title = theme === 'dark' ? t('theme.toggle_dark') : t('theme.toggle_light');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Tabs
+// ═══════════════════════════════════════════════════════════════════
+function switchTab(tabId, btn) {
+  document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+  document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); });
+  btn.classList.add('active');
+  document.getElementById(tabId).classList.add('active');
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  API base — relative to current page (survives reverse-proxy path stripping)
+// ═══════════════════════════════════════════════════════════════════
+const API_BASE = (function() {
+  var p = window.location.pathname.replace(/\/$/, '');
+  return p || '';
+})();
+
+// ═══════════════════════════════════════════════════════════════════
+//  Fetch & render
+// ═══════════════════════════════════════════════════════════════════
+(function() {
+  fetch(API_BASE + '/stats')
+    .then(function(r) {
+      if (r.status === 403) throw new Error(t('error.access_denied'));
+      if (!r.ok) throw new Error(t('error.load_failed', { status: r.status }));
+      return r.json();
+    })
+    .then(function(data) {
+      renderOverview(data.overview);
+      renderPackages(data.packages);
+      renderKeys(data.keys);
+    })
+    .catch(function(e) {
+      var el = document.getElementById('overview-grid');
+      el.innerHTML = '<div class="card" style="grid-column:1/-1"><div class="empty"><p style="color:var(--danger)">⚠ ' + esc(e.message) + '</p></div></div>';
+      document.getElementById('pkg-loading').innerHTML = '<div class="empty"><p>' + t('error.unavailable') + '</p></div>';
+      document.getElementById('key-loading').innerHTML = '<div class="empty"><p>' + t('error.unavailable') + '</p></div>';
+    });
+})();
+
+function renderOverview(o) {
+  document.getElementById('ov-packages').textContent = o.package_count;
+  document.getElementById('ov-files').textContent = o.file_count;
+  document.getElementById('ov-storage').textContent = o.total_storage_human;
+  document.getElementById('ov-keys').textContent = o.active_keys + ' / ' + o.total_keys;
+  document.getElementById('ov-downloads').textContent = fmt(o.total_downloads);
+  document.getElementById('ov-uploads').textContent = fmt(o.total_uploads);
+}
+
+function renderPackages(pkgs) {
+  _packages = pkgs;
+  _maxDownloads = pkgs.reduce(function(m, p) { return Math.max(m, p.download_count); }, 1);
+  _maxUploads = pkgs.reduce(function(m, p) { return Math.max(m, p.upload_count); }, 1);
+
+  document.getElementById('pkg-loading').style.display = 'none';
+  document.getElementById('pkg-table').style.display = '';
+
+  if (pkgs.length === 0) {
+    document.getElementById('pkg-tbody').innerHTML = '<tr><td colspan="6" class="empty">' + t('empty.packages') + '</td></tr>';
+    return;
+  }
+
+  var html = pkgs.map(function(p) {
+    var dlPct = p.download_count / _maxDownloads * 100;
+    var ulPct = p.upload_count / _maxUploads * 100;
+    return '<tr class="clickable" onclick="window.open(\'/simple/' + esc(p.name) + '/\', \'_blank\')">' +
+      '<td><strong>' + esc(p.name) + '</strong></td>' +
+      '<td class="num">' + p.file_count + '</td>' +
+      '<td class="num mono">' + esc(p.total_size_human) + '</td>' +
+      '<td class="num">' + fmt(p.download_count) + '</td>' +
+      '<td class="num">' + fmt(p.upload_count) + '</td>' +
+      '<td><div class="bar-cell"><div class="bar"><div class="bar-fill download" style="width:' + dlPct + '%"></div></div><div class="bar"><div class="bar-fill upload" style="width:' + ulPct + '%"></div></div></div></td>' +
+      '</tr>';
+  }).join('');
+  document.getElementById('pkg-tbody').innerHTML = html;
+}
+
+function renderKeys(keys) {
+  _keys = keys;
+  document.getElementById('key-loading').style.display = 'none';
+  document.getElementById('key-table').style.display = '';
+
+  if (keys.length === 0) {
+    document.getElementById('key-tbody').innerHTML = '<tr><td colspan="8" class="empty">' + t('empty.keys') + '</td></tr>';
+    return;
+  }
+
+  var html = keys.map(function(k) {
+    var statusBadge;
+    if (k.is_permanent) statusBadge = '<span class="badge badge-permanent">' + t('badge.permanent') + '</span>';
+    else if (k.is_expired) statusBadge = '<span class="badge badge-expired">' + t('badge.expired') + '</span>';
+    else statusBadge = '<span class="badge badge-active">' + t('badge.active') + '</span>';
+
+    return '<tr>' +
+      '<td><strong>' + esc(k.name) + '</strong></td>' +
+      '<td><code>' + esc(k.prefix) + '</code></td>' +
+      '<td class="mono">' + esc(k.created_by) + '</td>' +
+      '<td class="num">' + fmt(k.download_count) + '</td>' +
+      '<td class="num">' + fmt(k.upload_count) + '</td>' +
+      '<td class="mono">' + esc(k.last_used ? k.last_used.slice(0, 10) : '—') + '</td>' +
+      '<td class="mono">' + esc(k.created_at ? k.created_at.slice(0, 10) : '—') + '</td>' +
+      '<td>' + statusBadge + '</td>' +
+      '</tr>';
+  }).join('');
+  document.getElementById('key-tbody').innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Sorting
+// ═══════════════════════════════════════════════════════════════════
+let _sortState = {};
+function sortTable(field) {
+  var dir = _sortState[field] === 'asc' ? 'desc' : 'asc';
+  _sortState = {};
+  _sortState[field] = dir;
+
+  if (field.startsWith('pkg')) sortPackages(field.replace('pkg', ''), dir);
+  else if (field.startsWith('key')) sortKeys(field.replace('key', ''), dir);
+}
+
+function sortPackages(col, dir) {
+  var keyMap = { Files: 'file_count', Size: 'total_size', Downloads: 'download_count', Uploads: 'upload_count' };
+  var key = keyMap[col];
+  _packages.sort(function(a, b) {
+    var va = a[key], vb = b[key];
+    if (typeof va === 'number') return dir === 'asc' ? va - vb : vb - va;
+    return dir === 'asc' ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+  });
+  renderPackages(_packages);
+}
+
+function sortKeys(col, dir) {
+  var keyMap = { Downloads: 'download_count', Uploads: 'upload_count' };
+  var key = keyMap[col];
+  _keys.sort(function(a, b) {
+    var va = a[key], vb = b[key];
+    return dir === 'asc' ? va - vb : vb - va;
+  });
+  renderKeys(_keys);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Helpers
+// ═══════════════════════════════════════════════════════════════════
+function fmt(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  return String(n);
+}
+
+function esc(s) {
+  var d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Init
+// ═══════════════════════════════════════════════════════════════════
+(function() {
+  updateLangButton();
+  applyI18n();
+})();
+</script>
+</body>
+</html>

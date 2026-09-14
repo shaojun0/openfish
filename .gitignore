@@ -1,0 +1,43 @@
+# ── Python / build artifacts ────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Secrets & local config ──────────────────────────────────────────
+# Never commit real credentials. Commit only the *.example templates.
+.env
+.env.local
+docker/.env
+!docker/.env.example
+!/.env.example
+
+# ── Local runtime data ──────────────────────────────────────────────
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+api_keys_data/
+docker/api_keys_data/
+packages/
+python-build-standalone/
+
+# ── TLS material (private CA / certs / keys) ────────────────────────
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+static/certs/
+
+# ── Editors / OS ────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+.DS_Store

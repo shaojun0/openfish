@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="pypi:repository-version" content="1.0">
+    <title>Simple Index</title>
+</head>
+<body>
+    {% for name in package_names %}
+    <a href="{{ url_for('pypi.package_page', package_name=name) }}">{{ name }}</a><br>
+    {% endfor %}
+</body>
+</html>

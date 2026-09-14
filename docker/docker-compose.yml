@@ -1,0 +1,97 @@
+# ── cpypiserver docker-compose ──────────────────────────────────────
+#   准备配置:  cp .env.example .env  然后编辑 .env 填入真实值
+#   正常启动:  docker compose up -d
+#   调试模式:  docker compose --profile debug up -d
+#              docker exec -it cpypiserver-debug bash
+#   构建:      docker compose build --no-cache
+#
+#   所有密钥/口令都通过同目录下的 .env 注入（见 .env.example），
+#   不要把真实凭据写进本文件或提交到仓库。
+
+services:
+  pypiserver:
+    image: cpypiserver:latest
+    container_name: cpypiserver-std
+    ports:
+      - "${PYPISERVER_PORT:-20416}:8080"
+    volumes:
+      - ${SHARE_DIR:-/data/share}:/app/share
+      # 持久化 keyring/公开包，放在主 packages 目录统一管理
+      # - ./../packages/keyring*.whl:/app/packages/
+      # API keys 持久化
+      - ./api_keys_data:/app/data
+      # 自备 TLS 证书（可选）：把证书放到 docker/certs/ca_chain.pem 后取消注释。
+      # 证书文件已被 .gitignore 忽略，不会进入仓库。
+      # - ./certs/ca_chain.pem:/app/static/certs/ca_chain.pem:ro
+      # 持久化包文件，容器删除后数据不丢失
+      # - ${SHARE_DIR:-/data/share}/cpypiserver_public/packages:/app/packages
+      # - ${SHARE_DIR:-/data/share}/cpypiserver_public/python-build-standalone:/app/cpython
+    environment:
+      # ── 服务器 ──────────────────────────────────────────────
+      - SERVER_NAME=cpypiserver
+      - HOST=0.0.0.0
+      - PORT=8080                        # Flask 内部端口（nginx 代理到 80）
+      - PACKAGES_DIR=${PACKAGES_DIR:-/app/share/cpypiserver_public/packages}
+      - PYTHON_BUILDS_DIR=${PYTHON_BUILDS_DIR:-/app/share/cpypiserver_public/cpython}
+      - API_KEYS_FILE=/app/data/cpypiserver.db
+      - DEBUG=false
+
+      # ── 安全（值来自 docker/.env，未设置则启动报错）─────────
+      - SECRET_KEY=${SECRET_KEY:?请在 docker/.env 中设置 SECRET_KEY}
+
+      # ── 认证（根据需要配置）─────────────────────────────────
+      # Basic Auth
+      - AUTH_USERNAME=${AUTH_USERNAME:-admin}
+      - AUTH_ASSERT=${AUTH_ASSERT:-}
+
+      # OAuth2（如需启用 OAuth2 登录；留空则自动禁用）
+      - OAUTH2_PRODUCT_ID=${OAUTH2_PRODUCT_ID:-0}
+      - OAUTH2_CLIENT_ID=${OAUTH2_CLIENT_ID:-}
+      - OAUTH2_CLIENT_SECRET=${OAUTH2_CLIENT_SECRET:-}
+      - OAUTH2_TOKEN_URL=${OAUTH2_TOKEN_URL:-}
+      - OAUTH2_AUTHORIZE_URL=${OAUTH2_AUTHORIZE_URL:-}
+      - OAUTH2_INTROSPECT_URL=${OAUTH2_INTROSPECT_URL:-}
+      - IS_4A=${IS_4A:-false}
+      # ── 上传限制 ────────────────────────────────────────────
+      - MAX_CONTENT_LENGTH=104857600      # 100MB
+
+  # ── 调试容器：只起 bash，不进服务，方便改代码排查 ──────────────
+  pypiserver-debug:
+    image: cpypiserver:latest
+    container_name: cpypiserver-debug
+    profiles:
+      - debug
+    ports:
+      - "${PYPISERVER_DEBUG_PORT:-20417}:8080"
+    volumes:
+      - ${SHARE_DIR:-/data/share}:/app/share
+      - api_keys_data:/app/data
+    environment:
+      - SERVER_NAME=cpypiserver
+      - HOST=0.0.0.0
+      - PORT=8080
+      - PACKAGES_DIR=${PACKAGES_DIR:-/app/share/cpypiserver_public/packages}
+      - PYTHON_BUILDS_DIR=${PYTHON_BUILDS_DIR:-/app/share/cpypiserver_public/cpython}
+      - API_KEYS_FILE=/app/data/cpypiserver.db
+      - DEBUG=true
+      - SECRET_KEY=${SECRET_KEY:?请在 docker/.env 中设置 SECRET_KEY}
+      - AUTH_USERNAME=${AUTH_USERNAME:-admin}
+      - AUTH_ASSERT=${AUTH_ASSERT:-}
+      - OAUTH2_PRODUCT_ID=${OAUTH2_PRODUCT_ID:-0}
+      - OAUTH2_CLIENT_ID=${OAUTH2_CLIENT_ID:-}
+      - OAUTH2_CLIENT_SECRET=${OAUTH2_CLIENT_SECRET:-}
+      - OAUTH2_TOKEN_URL=${OAUTH2_TOKEN_URL:-}
+      - OAUTH2_AUTHORIZE_URL=${OAUTH2_AUTHORIZE_URL:-}
+      - OAUTH2_INTROSPECT_URL=${OAUTH2_INTROSPECT_URL:-}
+      - IS_4A=${IS_4A:-false}
+      - MAX_CONTENT_LENGTH=104857600
+    command: >
+      bash -c "echo '🔧 调试容器已启动';
+               echo '   进入: docker exec -it cpypiserver-debug bash';
+               echo '   手动启服务: cd /app && python app.py';
+               sleep infinity"
+    stdin_open: true
+    tty: true
+
+volumes:
+  api_keys_data:

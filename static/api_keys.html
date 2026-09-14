@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ server_name }} — API Key Management</title>
+<style>
+  :root {
+    --bg: #0b1120;
+    --bg-card: #111827;
+    --bg-input: #1a2236;
+    --border: #1e2d4a;
+    --border-focus: #3b82f6;
+    --text: #e2e8f0;
+    --text-dim: #64748b;
+    --accent: #3b82f6;
+    --accent-hover: #2563eb;
+    --success: #22c55e;
+    --warning: #f59e0b;
+    --danger: #ef4444;
+    --danger-bg: #7f1d1d20;
+    --purple: #a855f7;
+    --radius: 8px;
+    --radius-sm: 6px;
+    --shadow: 0 1px 3px rgba(0,0,0,.3);
+    --bg-pattern: radial-gradient(ellipse at 20% 50%, rgba(59,130,246,0.04) 0%, transparent 50%),
+                  radial-gradient(ellipse at 80% 20%, rgba(99,102,241,0.03) 0%, transparent 50%);
+  }
+
+  [data-theme="light"] {
+    --bg: #f8fafc;
+    --bg-card: #ffffff;
+    --bg-input: #f1f5f9;
+    --border: #e2e8f0;
+    --border-focus: #3b82f6;
+    --text: #1e293b;
+    --text-dim: #64748b;
+    --accent: #3b82f6;
+    --accent-hover: #2563eb;
+    --success: #16a34a;
+    --warning: #d97706;
+    --danger: #dc2626;
+    --danger-bg: #fee2e2;
+    --purple: #7c3aed;
+    --shadow: 0 1px 3px rgba(0,0,0,.08);
+    --bg-pattern: radial-gradient(ellipse at 20% 50%, rgba(59,130,246,0.06) 0%, transparent 50%),
+                  radial-gradient(ellipse at 80% 20%, rgba(99,102,241,0.05) 0%, transparent 50%);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body::before {
+    content: "";
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-image: var(--bg-pattern);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .container {
+    position: relative;
+    z-index: 1;
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 2.5rem;
+    padding-bottom: 1.25rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .brand { display: flex; align-items: center; gap: .75rem; }
+  .brand-icon {
+    width: 40px; height: 40px;
+    background: linear-gradient(135deg, var(--accent), #6366f1);
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.25rem;
+    box-shadow: 0 4px 12px rgba(59,130,246,.25);
+  }
+  .brand h1 { font-size: 1.35rem; font-weight: 600; }
+  .brand span { font-size: .8rem; color: var(--text-dim); font-weight: 400; }
+
+  .user-badge {
+    display: flex; align-items: center; gap: .5rem;
+    background: var(--bg-card); border: 1px solid var(--border);
+    padding: .4rem .85rem; border-radius: 999px;
+    font-size: .8rem; color: var(--text-dim);
+  }
+  .user-badge .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
+
+  .header-actions { display: flex; align-items: center; gap: .5rem; }
+
+  .theme-toggle, .lang-toggle {
+    display: flex; align-items: center; justify-content: center;
+    height: 36px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: var(--bg-card);
+    color: var(--text-dim); cursor: pointer;
+    transition: all .15s; white-space: nowrap;
+  }
+  .theme-toggle { width: 36px; font-size: 1.1rem; }
+  .lang-toggle { width: 42px; font-size: .85rem; font-weight: 600; letter-spacing: .5px; padding: 0 .5rem; }
+  .theme-toggle:hover, .lang-toggle:hover { color: var(--text); border-color: var(--text-dim); }
+
+  .nav-btn {
+    display: inline-flex; align-items: center; gap: .35rem;
+    padding: .45rem .85rem; border-radius: var(--radius-sm);
+    border: 1px solid var(--accent); background: var(--accent);
+    color: #fff; cursor: pointer; font-size: .82rem; font-weight: 500;
+    text-decoration: none; transition: all .15s; white-space: nowrap;
+  }
+  .nav-btn:hover { background: var(--accent-hover); box-shadow: 0 2px 8px rgba(59,130,246,.3); transform: translateY(-1px); }
+
+  /* ── Stats row ── */
+  .stats-row {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem; margin-bottom: 2rem;
+  }
+  .stat-card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 1.25rem; text-align: center;
+  }
+  .stat-card .stat-value {
+    font-size: 1.75rem; font-weight: 700;
+    background: linear-gradient(135deg, var(--text), #94a3b8);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+  }
+  .stat-card .stat-label { font-size: .75rem; color: var(--text-dim); margin-top: .25rem; text-transform: uppercase; letter-spacing: .5px; }
+  .stat-card.accent .stat-value {
+    background: linear-gradient(135deg, var(--accent), #818cf8);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+  }
+
+  /* ── Cards ── */
+  .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1.25rem; box-shadow: var(--shadow); }
+  .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem; }
+  .card-header h2 { font-size: 1.05rem; font-weight: 600; }
+
+  /* ── Forms ── */
+  .form-row { display: flex; gap: .75rem; align-items: flex-end; flex-wrap: wrap; }
+  .form-group { flex: 1; min-width: 160px; }
+  .form-group label { display: block; font-size: .785rem; color: var(--text-dim); margin-bottom: .35rem; font-weight: 500; }
+  .form-group input, .form-group select {
+    width: 100%; padding: .55rem .75rem; border-radius: var(--radius-sm);
+    background: var(--bg-input); border: 1px solid var(--border);
+    color: var(--text); font-size: .875rem; transition: border-color .15s, box-shadow .15s;
+  }
+  .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--border-focus); box-shadow: 0 0 0 3px rgba(59,130,246,.15); }
+  .form-group select {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2364748b' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right .75rem center; padding-right: 2rem; cursor: pointer;
+  }
+  .hint { font-size: .73rem; color: var(--text-dim); margin-top: .3rem; line-height: 1.4; }
+  .hint.warning { color: var(--warning); }
+
+  /* ── Buttons ── */
+  .btn { display: inline-flex; align-items: center; gap: .4rem; padding: .55rem 1.1rem; border-radius: var(--radius-sm); border: none; cursor: pointer; font-size: .85rem; font-weight: 500; transition: all .15s; white-space: nowrap; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #fff; box-shadow: 0 2px 8px rgba(59,130,246,.3); }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); transform: translateY(-1px); }
+  .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  .btn-danger:hover { background: var(--danger-bg); }
+  .btn-ghost { background: transparent; color: var(--text-dim); border: 1px solid var(--border); }
+  .btn-ghost:hover { color: var(--text); border-color: var(--text-dim); }
+  .btn-sm { padding: .3rem .7rem; font-size: .75rem; }
+
+  /* ── New key display ── */
+  .key-reveal { background: linear-gradient(135deg, #0f2a1a, #0a1a10); border: 1px solid #166534; border-radius: var(--radius); padding: 1.25rem; margin-top: 1rem; display: none; }
+  .key-reveal.show { display: block; animation: slideDown .3s ease; }
+  .key-reveal .key-label { font-size: .75rem; color: var(--success); margin-bottom: .5rem; font-weight: 500; }
+  .key-reveal .key-value {
+    display: flex; align-items: center; gap: .75rem;
+    background: #0a140c; border: 1px solid #14522a;
+    border-radius: var(--radius-sm); padding: .65rem .85rem;
+    font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+    font-size: .8rem; color: var(--success); word-break: break-all; overflow-wrap: anywhere;
+  }
+  .key-reveal .key-value code { flex: 1; user-select: all; }
+  .key-reveal .alert { display: flex; align-items: flex-start; gap: .5rem; margin-top: .75rem; font-size: .78rem; color: var(--warning); line-height: 1.5; }
+  .key-reveal .alert-icon { flex-shrink: 0; margin-top: 1px; }
+
+  /* ── Table ── */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: .75rem .65rem; border-bottom: 1px solid var(--border); font-size: .85rem; }
+  th { color: var(--text-dim); font-weight: 500; font-size: .75rem; text-transform: uppercase; letter-spacing: .5px; }
+  td code { font-size: .75rem; color: var(--text-dim); }
+  td .name { display: flex; align-items: center; gap: .5rem; font-weight: 500; }
+  td .name .key-icon { font-size: .75rem; opacity: .6; }
+
+  /* ── Status badges ── */
+  .badge { display: inline-flex; align-items: center; gap: .3rem; padding: .15rem .55rem; border-radius: 999px; font-size: .7rem; font-weight: 500; }
+  .badge-active { background: #16653420; color: #4ade80; }
+  .badge-expired { background: #991b1b20; color: #f87171; }
+  .badge-permanent { background: #1e3a5f20; color: #60a5fa; }
+
+  /* ── Stats inline ── */
+  .inline-stats { display: flex; gap: .75rem; font-size: .75rem; }
+  .inline-stats .stat-item { display: flex; align-items: center; gap: .25rem; color: var(--text-dim); }
+  .inline-stats .stat-item .num { color: var(--text); font-weight: 600; }
+
+  /* ── Expandable stats detail ── */
+  .stats-detail { display: none; margin-top: .5rem; padding: .75rem; background: var(--bg-input); border-radius: var(--radius-sm); border: 1px solid var(--border); font-size: .78rem; }
+  .stats-detail.show { display: block; }
+  .stats-detail .detail-row { display: flex; justify-content: space-between; padding: .2rem 0; color: var(--text-dim); }
+  .stats-detail .detail-row .pkg { color: var(--text); }
+
+  /* ── Empty state ── */
+  .empty { text-align: center; padding: 3rem 1rem; color: var(--text-dim); }
+  .empty .empty-icon { font-size: 2.5rem; margin-bottom: .75rem; opacity: .5; }
+  .empty p { font-size: .875rem; }
+
+  /* ── Toast ── */
+  .toast-container { position: fixed; bottom: 1.25rem; right: 1.25rem; z-index: 999; display: flex; flex-direction: column; gap: .5rem; }
+  .toast { padding: .7rem 1rem; border-radius: var(--radius-sm); font-size: .83rem; font-weight: 500; box-shadow: 0 4px 16px rgba(0,0,0,.4); animation: toastIn .25s ease; display: flex; align-items: center; gap: .5rem; }
+  .toast-success { background: #166534; color: #bbf7d0; }
+  .toast-error { background: #991b1b; color: #fecaca; }
+  @keyframes toastIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes slideDown { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* ── Usage ── */
+  .usage-block {
+    background: var(--bg-input); border-radius: var(--radius-sm);
+    padding: 1rem 1.25rem; font-size: .8rem; line-height: 1.7;
+  }
+  .usage-block pre { margin: 0; overflow-x: auto; color: var(--text-dim); font-family: "SF Mono", "Fira Code", monospace; font-size: .78rem; }
+  .usage-block pre .cmd { color: #93c5fd; }
+  .usage-block p { font-size: .82rem; color: var(--text-dim); margin-bottom: .75rem; }
+
+  /* ── TLS subsection (inside usage guide) ── */
+  .usage-tls-toggle {
+    display: inline-flex; align-items: center; gap: .35rem;
+    padding: .35rem .7rem; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: var(--bg-card);
+    color: var(--text-dim); cursor: pointer; font-size: .75rem;
+    transition: all .15s; margin-top: 1rem;
+  }
+  .usage-tls-toggle:hover { color: var(--text); border-color: var(--warning); }
+  .usage-tls-toggle .arrow { transition: transform .2s; font-size: .65rem; }
+  .usage-tls-toggle.expanded .arrow { transform: rotate(90deg); }
+  .usage-tls-content {
+    display: none; margin-top: .75rem; padding: 1rem;
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--bg-card); font-size: .78rem;
+  }
+  .usage-tls-content.show { display: block; }
+  .usage-tls-content .tls-note {
+    color: var(--warning); font-size: .75rem; margin-bottom: .75rem;
+    padding: .5rem .75rem; background: var(--danger-bg);
+    border-radius: var(--radius-sm); border-left: 3px solid var(--warning);
+  }
+
+  /* ── Confirm dialog ── */
+  .overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 998; align-items: center; justify-content: center; }
+  .overlay.show { display: flex; }
+  .dialog { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; max-width: 400px; width: 90%; box-shadow: 0 12px 32px rgba(0,0,0,.5); animation: toastIn .2s ease; }
+  .dialog h3 { font-size: 1rem; margin-bottom: .75rem; }
+  .dialog p { font-size: .85rem; color: var(--text-dim); margin-bottom: 1rem; line-height: 1.5; }
+  .dialog .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+
+  @media (max-width: 640px) {
+    .container { padding: 1rem; }
+    header { flex-direction: column; gap: 1rem; align-items: flex-start; }
+    .form-row { flex-direction: column; }
+    .form-group { min-width: 100%; }
+    .stats-row { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="brand">
+      <div class="brand-icon">🔑</div>
+      <div>
+        <h1>{{ server_name }}</h1>
+        <span data-i18n="brand.subtitle">API Key Management</span>
+      </div>
+    </div>
+    <div class="header-actions">
+      <a class="nav-btn" href="{{ base_url }}/simple/" data-i18n-title="nav.packages_title" data-i18n="nav.packages">📦 Packages</a>
+      {% if is_admin %}<a class="nav-btn" href="{{ base_url }}/admin/" style="border-color:var(--purple);background:var(--purple)">📊 Admin</a>{% endif %}
+      <button class="lang-toggle" id="lang-toggle" data-i18n-title="lang.toggle" onclick="toggleLang()">EN</button>
+      <button class="theme-toggle" id="theme-toggle" data-i18n-title="theme.toggle_dark" onclick="toggleTheme()">🌙</button>
+      <div class="user-badge">
+        <span class="dot"></span>
+        <span>{{ user }}</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Stats Overview ── -->
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-value" id="stat-total-keys">{{ keys|length }}</div>
+      <div class="stat-label" data-i18n="stat.active_keys">Active Keys</div>
+    </div>
+    <div class="stat-card accent">
+      <div class="stat-value" id="stat-total-downloads">—</div>
+      <div class="stat-label" data-i18n="stat.total_downloads">Total Downloads</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="stat-total-uploads">—</div>
+      <div class="stat-label" data-i18n="stat.total_uploads">Total Uploads</div>
+    </div>
+  </div>
+
+  <!-- ── Create Key ── -->
+  <div class="card">
+    <div class="card-header">
+      <h2 data-i18n="create.title">✦ Create New API Key</h2>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="key-name" data-i18n="create.name_label">Key Name</label>
+        <input type="text" id="key-name" data-i18n-placeholder="create.name_placeholder" placeholder="e.g. my-laptop, ci-pipeline, team-sdk" maxlength="64" autocomplete="off">
+      </div>
+      <div class="form-group" style="max-width:220px">
+        <label for="key-expiry" data-i18n="create.expiry_label">Expiration</label>
+        <select id="key-expiry">
+          <option value="90" data-i18n="create.expiry_90">90 days (recommended)</option>
+          <option value="180" data-i18n="create.expiry_180">180 days</option>
+          <option value="365" data-i18n="create.expiry_365">365 days</option>
+          <option value="30" data-i18n="create.expiry_30">30 days</option>
+          <option value="7" data-i18n="create.expiry_7">7 days</option>
+          <option value="" data-i18n="create.expiry_permanent">⚠ Permanent (not recommended)</option>
+        </select>
+        <div class="hint" data-i18n="create.expiry_hint">Keys with expiration are safer for enterprise environments.</div>
+      </div>
+      <div class="form-group" style="max-width:fit-content">
+        <label>&nbsp;</label>
+        <button class="btn btn-primary" id="btn-create" onclick="createKey()">
+          <span>⚡</span> <span data-i18n="create.btn_generate">Generate Key</span>
+        </button>
+      </div>
+    </div>
+
+    <div id="new-key-reveal" class="key-reveal">
+      <div class="key-label" data-i18n="create.key_label">✓ Your new API key — copy it now!</div>
+      <div class="key-value">
+        <code id="new-key-value"></code>
+        <button class="btn btn-ghost btn-sm" onclick="copyKey()" data-i18n="create.key_copy">📋 Copy</button>
+      </div>
+      <div class="alert">
+        <span class="alert-icon">⚠️</span>
+        <span data-i18n-html="create.key_warning">This key will <strong>never</strong> be shown again. Store it securely — we only keep its hash. The key will expire on <strong id="new-key-expiry-date">—</strong>.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Usage Guide (includes TLS cert as subsection) ── -->
+  <div class="card">
+    <div class="card-header">
+      <h2 data-i18n="usage.title">📖 How to Use</h2>
+      <button class="btn btn-ghost btn-sm" onclick="toggleUsage()" data-i18n="usage.toggle">Show/Hide</button>
+    </div>
+    <div class="usage-block" id="usage-block">
+      <pre><span class="cmd"># pip install</span>
+pip install -i {{ base_url | replace('://', '://__token__:<API_KEY>@') }}/simple/ &lt;package&gt;
+<span class="cmd">#   Or configure ~/.netrc (Linux/macOS) / %HOME%\_netrc (Windows):</span>
+<span class="cmd">#     machine &lt;HOST&gt; login __token__ password &lt;API_KEY&gt;</span>
+
+<span class="cmd"># uv (recommended)</span>
+uv pip install --index-url {{ base_url | replace('://', '://__token__:<API_KEY>@') }}/simple/ &lt;package&gt;
+
+<span class="cmd"># twine upload</span>
+twine upload --repository-url {{ base_url }}/ \
+  --username __token__ --password &lt;API_KEY&gt; dist/*
+
+<span class="cmd"># curl test</span>
+curl -H "Authorization: Bearer &lt;API_KEY&gt;" {{ base_url }}/simple/</pre>
+
+      <button class="usage-tls-toggle" id="tls-toggle" onclick="toggleTlsSection()">
+        <span class="arrow">▶</span> <span data-i18n="usage.tls_toggle_label">TLS Certificate Configuration (if you see SSL errors)</span>
+      </button>
+      <div class="usage-tls-content" id="tls-content">
+        <div class="tls-note" data-i18n="usage.tls_note">
+          ⚠️ Your deployment may use a private or self-signed CA certificate. Only follow these steps if you see <code style="background:var(--bg-input);padding:1px 4px;border-radius:3px;color:var(--danger)">SSL certificate verify failed</code> errors.
+        </div>
+        <p style="margin-bottom:1rem">
+          <a href="{{ base_url }}/static/certs/ca_chain.pem" download class="btn btn-primary" style="font-size:.78rem">⬇ Download CA Certificate (ca_chain.pem)</a>
+        </p>
+        <pre>
+<span class="cmd"># twine upload with cert:</span>
+export REQUESTS_CA_BUNDLE=/path/to/ca_chain.pem
+twine upload --repository-url {{ base_url }}/ \
+  --username __token__ --password &lt;API_KEY&gt; dist/*
+</pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Key List ── -->
+  <div class="card">
+    <div class="card-header">
+      <h2 data-i18n="keys.title">📋 Your API Keys</h2>
+      <span style="font-size:.8rem;color:var(--text-dim)" data-i18n="keys.count" data-i18n-count="{{ keys|length }}">{{ keys|length }} key(s)</span>
+    </div>
+
+    {% if keys %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th data-i18n="table.name">Name</th>
+            <th data-i18n="table.prefix">Prefix</th>
+            <th data-i18n="table.status">Status</th>
+            <th data-i18n="table.downloads">Downloads</th>
+            <th data-i18n="table.uploads">Uploads</th>
+            <th data-i18n="table.created">Created</th>
+            <th data-i18n="table.expires">Expires</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for k in keys %}
+        <tr data-key-id="{{ k.id }}">
+          <td>
+            <div class="name">
+              <span class="key-icon">🔑</span>
+              {{ k.name }}
+            </div>
+          </td>
+          <td><code>{{ k.prefix }}</code></td>
+          <td>
+            {% if k.is_permanent %}
+            <span class="badge badge-permanent" data-i18n="badge.permanent">♾ Permanent</span>
+            {% elif k.is_expired %}
+            <span class="badge badge-expired" data-i18n="badge.expired">✗ Expired</span>
+            {% else %}
+            <span class="badge badge-active" data-i18n="badge.active">● Active</span>
+            {% endif %}
+          </td>
+          <td>
+            <span class="inline-stats">
+              <span class="stat-item">⬇ <span class="num">{{ k.download_count }}</span></span>
+            </span>
+            <button class="btn btn-ghost btn-sm" style="padding:.1rem .35rem;font-size:.65rem;margin-left:.3rem"
+                    onclick="toggleDetail('{{ k.id }}')" data-i18n-title="keys.stats_detail_title">▼</button>
+          </td>
+          <td><span class="stat-item">⬆ <span class="num">{{ k.upload_count }}</span></span></td>
+          <td>{{ k.created_at[:10] }}</td>
+          <td>
+            {% if k.is_permanent %}
+            <span style="color:var(--text-dim);font-size:.78rem" data-i18n="keys.no_expiration">No expiration</span>
+            {% elif k.is_expired %}
+            <span class="badge badge-expired">{{ k.expires_at[:10] if k.expires_at else '—' }}</span>
+            {% else %}
+            <span style="font-size:.78rem">{{ k.expires_at[:10] if k.expires_at else '—' }}</span>
+            {% endif %}
+          </td>
+          <td>
+            <button class="btn btn-danger btn-sm" onclick="confirmDelete('{{ k.id }}', '{{ k.name }}')" data-i18n="keys.delete">
+              Delete
+            </button>
+          </td>
+        </tr>
+        <tr id="detail-{{ k.id }}" class="stats-detail" style="display:none">
+          <td colspan="8">
+            <div id="detail-content-{{ k.id }}" style="color:var(--text-dim);font-size:.75rem" data-i18n="keys.stats_loading">
+              Loading stats…
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty">
+      <div class="empty-icon">🔑</div>
+      <p data-i18n="keys.empty">No API keys yet. Create your first key above.</p>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- ── Delete confirmation dialog ── -->
+<div class="overlay" id="delete-overlay">
+  <div class="dialog">
+    <h3 data-i18n="dialog.title">Delete API Key?</h3>
+    <p data-i18n-html="dialog.message">Are you sure you want to delete <strong id="delete-key-name">—</strong>? Pip/uv/twine clients using this key will lose access immediately. This action cannot be undone.</p>
+    <div class="dialog-actions">
+      <button class="btn btn-ghost" onclick="closeDeleteDialog()" data-i18n="dialog.cancel">Cancel</button>
+      <button class="btn btn-danger" id="btn-confirm-delete" data-i18n="dialog.confirm">Delete Permanently</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toast-container"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+//  i18n — Chinese / English
+// ═══════════════════════════════════════════════════════════════════
+const I18N = {
+  en: {
+    lang: { toggle: 'Switch to 中文' },
+    brand: { subtitle: 'API Key Management' },
+    nav: { packages: '📦 Packages', packages_title: 'Browse all packages' },
+    theme: { toggle_dark: 'Switch to light mode', toggle_light: 'Switch to dark mode' },
+
+    stat: { active_keys: 'Active Keys', total_downloads: 'Total Downloads', total_uploads: 'Total Uploads' },
+
+    create: {
+      title: '✦ Create New API Key',
+      name_label: 'Key Name',
+      name_placeholder: 'e.g. my-laptop, ci-pipeline, team-sdk',
+      expiry_label: 'Expiration',
+      expiry_90: '90 days (recommended)',
+      expiry_180: '180 days',
+      expiry_365: '365 days',
+      expiry_30: '30 days',
+      expiry_7: '7 days',
+      expiry_permanent: '⚠ Permanent (not recommended)',
+      expiry_hint: 'Keys with expiration are safer for enterprise environments.',
+      btn_generate: 'Generate Key',
+      key_label: '✓ Your new API key — copy it now!',
+      key_copy: '📋 Copy',
+      key_warning: 'This key will <strong>never</strong> be shown again. Store it securely — we only keep its hash. The key will expire on <strong id="new-key-expiry-date">__EXPIRY__</strong>.',
+    },
+
+    usage: {
+      title: '📖 How to Use',
+      toggle: 'Show/Hide',
+      tls_toggle_label: 'TLS Certificate Configuration (if you see SSL errors)',
+      tls_note: '⚠️ Your deployment may use a private or self-signed CA certificate. Only follow these steps if you see <code style="background:var(--bg-input);padding:1px 4px;border-radius:3px;color:var(--danger)">SSL certificate verify failed</code> errors.',
+    },
+
+    keys: {
+      title: '📋 Your API Keys',
+      count: '{count} key(s)',
+      no_expiration: 'No expiration',
+      delete: 'Delete',
+      empty: 'No API keys yet. Create your first key above.',
+      stats_detail_title: 'View per-package breakdown',
+      stats_loading: 'Loading stats…',
+      stats_no_data: 'No usage data yet.',
+      stats_failed: 'Failed to load stats.',
+    },
+
+    table: { name: 'Name', prefix: 'Prefix', status: 'Status', downloads: 'Downloads', uploads: 'Uploads', created: 'Created', expires: 'Expires' },
+
+    badge: { permanent: '♾ Permanent', expired: '✗ Expired', active: '● Active' },
+
+    dialog: {
+      title: 'Delete API Key?',
+      message: 'Are you sure you want to delete <strong id="delete-key-name">__NAME__</strong>? Pip/uv/twine clients using this key will lose access immediately. This action cannot be undone.',
+      cancel: 'Cancel', confirm: 'Delete Permanently',
+    },
+
+    stats_detail: { package: 'Package', type: 'Type', count: 'Count', download: '⬇ Download', upload: '⬆ Upload' },
+
+    toast: {
+      enter_name: 'Please enter a key name',
+      generating: '⏳ Generating…', generate_btn: '⚡ Generate Key',
+      create_failed: 'Failed to create key', created: 'Key created successfully!',
+      copied: 'Key copied to clipboard!', copied_fallback: 'Key copied!',
+      delete_failed: 'Delete failed', deleted: 'Key deleted',
+    },
+  },
+
+  zh: {
+    lang: { toggle: 'Switch to English' },
+    brand: { subtitle: 'API 密钥管理' },
+    nav: { packages: '📦 所有包', packages_title: '浏览所有包' },
+    theme: { toggle_dark: '切换到浅色模式', toggle_light: '切换到深色模式' },
+
+    stat: { active_keys: '活跃密钥', total_downloads: '总下载量', total_uploads: '总上传量' },
+
+    create: {
+      title: '✦ 创建新 API 密钥',
+      name_label: '密钥名称',
+      name_placeholder: '例如: my-laptop, ci-pipeline, team-sdk',
+      expiry_label: '有效期',
+      expiry_90: '90 天（推荐）',
+      expiry_180: '180 天',
+      expiry_365: '365 天',
+      expiry_30: '30 天',
+      expiry_7: '7 天',
+      expiry_permanent: '⚠ 永久（不推荐）',
+      expiry_hint: '设置有效期对企业环境更安全。',
+      btn_generate: '生成密钥',
+      key_label: '✓ 您的新 API 密钥 — 请立即复制！',
+      key_copy: '📋 复制',
+      key_warning: '此密钥<strong>不会</strong>再次显示。请妥善保存 — 我们仅存储其哈希值。密钥将于 <strong id="new-key-expiry-date">__EXPIRY__</strong> 过期。',
+    },
+
+    usage: {
+      title: '📖 使用指南',
+      toggle: '显示/隐藏',
+      tls_toggle_label: 'TLS 证书配置（遇到 SSL 错误时需要）',
+      tls_note: '⚠️ 你的部署可能使用私有或自签名 CA 证书。仅在遇到 <code style="background:var(--bg-input);padding:1px 4px;border-radius:3px;color:var(--danger)">SSL certificate verify failed</code> 错误时才需配置以下步骤。',
+    },
+
+    keys: {
+      title: '📋 您的 API 密钥',
+      count: '{count} 个密钥',
+      no_expiration: '永不过期',
+      delete: '删除',
+      empty: '暂无 API 密钥，请在上方创建您的第一个密钥。',
+      stats_detail_title: '查看按包分类的详细统计',
+      stats_loading: '加载统计中…',
+      stats_no_data: '暂无使用数据。',
+      stats_failed: '加载统计失败。',
+    },
+
+    table: { name: '名称', prefix: '前缀', status: '状态', downloads: '下载', uploads: '上传', created: '创建时间', expires: '过期时间' },
+
+    badge: { permanent: '♾ 永久', expired: '✗ 已过期', active: '● 活跃' },
+
+    dialog: {
+      title: '删除 API 密钥？',
+      message: '确定要删除 <strong id="delete-key-name">__NAME__</strong> 吗？使用此密钥的 pip/uv/twine 客户端将立即失去访问权限。此操作不可撤销。',
+      cancel: '取消', confirm: '永久删除',
+    },
+
+    stats_detail: { package: '包名', type: '类型', count: '数量', download: '⬇ 下载', upload: '⬆ 上传' },
+
+    toast: {
+      enter_name: '请输入密钥名称',
+      generating: '⏳ 生成中…', generate_btn: '⚡ 生成密钥',
+      create_failed: '创建密钥失败', created: '密钥创建成功！',
+      copied: '密钥已复制到剪贴板！', copied_fallback: '密钥已复制！',
+      delete_failed: '删除失败', deleted: '密钥已删除',
+    },
+  }
+};
+
+const API_BASE = (function() {
+  var p = window.location.pathname.replace(/\/$/, '');
+  return p || '';
+})();
+
+let _lang = localStorage.getItem('cpypiserver-lang') || 'en';
+
+function t(key, params) {
+  let str = (I18N[_lang] && getNested(I18N[_lang], key)) || (I18N['en'] && getNested(I18N['en'], key)) || key;
+  if (params) {
+    Object.keys(params).forEach(function(k) { str = str.replace('{' + k + '}', params[k]); });
+  }
+  return str;
+}
+
+function getNested(obj, path) {
+  return path.split('.').reduce(function(o, k) { return o && o[k]; }, obj);
+}
+
+function applyI18n() {
+  document.querySelectorAll('[data-i18n]').forEach(function(el) {
+    const key = el.getAttribute('data-i18n');
+    const count = el.getAttribute('data-i18n-count');
+    el.textContent = t(key, count != null ? { count: count } : undefined);
+  });
+  document.querySelectorAll('[data-i18n-html]').forEach(function(el) {
+    const key = el.getAttribute('data-i18n-html');
+    const count = el.getAttribute('data-i18n-count');
+    el.innerHTML = t(key, count != null ? { count: count } : undefined);
+  });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(function(el) {
+    el.placeholder = t(el.getAttribute('data-i18n-placeholder'));
+  });
+  document.querySelectorAll('[data-i18n-title]').forEach(function(el) {
+    el.title = t(el.getAttribute('data-i18n-title'));
+  });
+}
+
+function toggleLang() {
+  _lang = _lang === 'en' ? 'zh' : 'en';
+  localStorage.setItem('cpypiserver-lang', _lang);
+  updateLangButton();
+  applyI18n();
+}
+
+function updateLangButton() {
+  var btn = document.getElementById('lang-toggle');
+  if (btn) {
+    btn.textContent = _lang === 'en' ? '中' : 'EN';
+    btn.title = t('lang.toggle');
+  }
+}
+
+// ── Toast ──────────────────────────────────────────────────────────
+function toast(keyOrMsg, type) {
+  var container = document.getElementById('toast-container');
+  var el = document.createElement('div');
+  el.className = 'toast toast-' + (type || 'success');
+  el.textContent = t('toast.' + keyOrMsg) !== 'toast.' + keyOrMsg ? t('toast.' + keyOrMsg) : keyOrMsg;
+  container.appendChild(el);
+  setTimeout(function() {
+    el.style.opacity = '0';
+    el.style.transition = 'opacity .2s';
+    setTimeout(function() { el.remove(); }, 200);
+  }, 3000);
+}
+
+// ── Create Key ─────────────────────────────────────────────────────
+async function createKey() {
+  var name = document.getElementById('key-name').value.trim();
+  if (!name) return toast('enter_name', 'error');
+
+  var expiresIn = document.getElementById('key-expiry').value;
+  var body = { name: name };
+  if (expiresIn !== '') body.expires_in_days = parseInt(expiresIn);
+
+  var btn = document.getElementById('btn-create');
+  btn.disabled = true;
+  btn.innerHTML = '<span>' + t('toast.generating') + '</span>';
+
+  try {
+    var resp = await fetch(API_BASE + '/api/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok) {
+      var err = await resp.json();
+      throw new Error(err.error || t('toast.create_failed'));
+    }
+    var data = await resp.json();
+    document.getElementById('new-key-value').textContent = data.key;
+    document.getElementById('new-key-expiry-date').textContent =
+      data.expires_at ? data.expires_at.slice(0, 10) + ' (UTC)' : (_lang === 'zh' ? '永久' : 'permanent');
+    document.getElementById('new-key-reveal').classList.add('show');
+    document.getElementById('key-name').value = '';
+    toast('created', 'success');
+    setTimeout(function() { location.reload(); }, 5000);
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<span>⚡</span> ' + t('toast.generate_btn');
+  }
+}
+
+// ── Copy Key ───────────────────────────────────────────────────────
+async function copyKey() {
+  var code = document.getElementById('new-key-value').textContent;
+  try {
+    await navigator.clipboard.writeText(code);
+    toast('copied', 'success');
+  } catch (e) {
+    var ta = document.createElement('textarea');
+    ta.value = code; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+    toast('copied_fallback', 'success');
+  }
+}
+
+// ── Delete Key ─────────────────────────────────────────────────────
+let _deleteKeyId = null;
+
+function confirmDelete(keyId, keyName) {
+  _deleteKeyId = keyId;
+  var msgEl = document.querySelector('#delete-overlay [data-i18n-html="dialog.message"]');
+  if (msgEl) {
+    var raw = t('dialog.message');
+    msgEl.innerHTML = raw.replace('__NAME__', '<strong>' + escapeHtml(keyName) + '</strong>');
+  }
+  document.getElementById('delete-key-name').textContent = keyName;
+  document.getElementById('delete-overlay').classList.add('show');
+}
+
+function closeDeleteDialog() {
+  _deleteKeyId = null;
+  document.getElementById('delete-overlay').classList.remove('show');
+}
+
+document.getElementById('btn-confirm-delete').addEventListener('click', async function() {
+  if (!_deleteKeyId) return;
+  var id = _deleteKeyId;
+  closeDeleteDialog();
+  try {
+    var resp = await fetch(API_BASE + '/api/keys/' + id, { method: 'DELETE' });
+    if (!resp.ok) throw new Error('Delete failed');
+    toast('deleted', 'success');
+    setTimeout(function() { location.reload(); }, 800);
+  } catch (e) {
+    toast('delete_failed', 'error');
+  }
+});
+
+// ── Stats Detail Toggle ────────────────────────────────────────────
+async function toggleDetail(keyId) {
+  var row = document.getElementById('detail-' + keyId);
+  var content = document.getElementById('detail-content-' + keyId);
+  if (row.style.display === 'table-row') { row.style.display = 'none'; return; }
+  try {
+    content.textContent = t('keys.stats_loading');
+    row.style.display = 'table-row';
+    var resp = await fetch(API_BASE + '/api/keys/' + keyId + '/stats');
+    if (!resp.ok) throw new Error('Failed to load stats');
+    var stats = await resp.json();
+    if (stats.per_package && stats.per_package.length > 0) {
+      var html = '<table style="width:100%;font-size:.75rem"><thead><tr>' +
+        '<th style="padding:.3rem">' + t('stats_detail.package') + '</th>' +
+        '<th style="padding:.3rem">' + t('stats_detail.type') + '</th>' +
+        '<th style="padding:.3rem;text-align:right">' + t('stats_detail.count') + '</th>' +
+        '</tr></thead><tbody>';
+      stats.per_package.forEach(function(s) {
+        html += '<tr><td style="padding:.3rem" class="pkg">' + escapeHtml(s.package_name) + '</td>' +
+          '<td style="padding:.3rem">' + (s.event_type === 'download' ? t('stats_detail.download') : t('stats_detail.upload')) + '</td>' +
+          '<td style="padding:.3rem;text-align:right;font-weight:600">' + s.count + '</td></tr>';
+      });
+      html += '</tbody></table>';
+      content.innerHTML = html;
+    } else {
+      content.textContent = t('keys.stats_no_data');
+    }
+  } catch (e) {
+    content.textContent = t('keys.stats_failed');
+    row.style.display = 'none';
+  }
+}
+
+// ── Usage Toggle ───────────────────────────────────────────────────
+function toggleUsage() {
+  var el = document.getElementById('usage-block');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+// ── TLS Subsection Toggle ─────────────────────────────────────────
+function toggleTlsSection() {
+  var content = document.getElementById('tls-content');
+  var btn = document.getElementById('tls-toggle');
+  var visible = content.classList.toggle('show');
+  if (visible) btn.classList.add('expanded');
+  else btn.classList.remove('expanded');
+}
+
+// ── Theme Toggle (unified key: cpypiserver-theme) ─────────────────
+(function() {
+  var saved = localStorage.getItem('cpypiserver-theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', saved);
+  updateThemeIcon(saved);
+})();
+
+function toggleTheme() {
+  var html = document.documentElement;
+  var next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('cpypiserver-theme', next);
+  updateThemeIcon(next);
+}
+
+function updateThemeIcon(theme) {
+  var btn = document.getElementById('theme-toggle');
+  if (btn) {
+    btn.innerHTML = theme === 'dark' ? '🌙' : '☀️';
+    btn.title = theme === 'dark' ? t('theme.toggle_dark') : t('theme.toggle_light');
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────
+(function() {
+  updateLangButton();
+  applyI18n();
+})();
+
+// ── Helpers ──────────────────────────────────────────────────────
+function escapeHtml(str) {
+  var div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ── Load overview stats ──────────────────────────────────────────
+(function() {
+  fetch(API_BASE + '/api/keys')
+    .then(function(r) { return r.json(); })
+    .then(function(keys) {
+      var totalDownloads = 0, totalUploads = 0;
+      keys.forEach(function(k) {
+        totalDownloads += k.download_count || 0;
+        totalUploads += k.upload_count || 0;
+      });
+      document.getElementById('stat-total-downloads').textContent = totalDownloads;
+      document.getElementById('stat-total-uploads').textContent = totalUploads;
+    })
+    .catch(function() {
+      document.getElementById('stat-total-downloads').textContent = '—';
+      document.getElementById('stat-total-uploads').textContent = '—';
+    });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+# ── Python / build artifacts ────────────────────────────────────────
+__pycache__
+*.pyc
+*.pyo
+.venv
+*.egg-info
+build/
+dist/
+
+# ── Git / IDE ───────────────────────────────────────────────────────
+.git
+.gitignore
+.idea/
+
+# ── Config / env / secrets ──────────────────────────────────────────
+# Keep credentials and TLS material out of the image; inject them at runtime.
+.env
+.env.*
+!.env.example
+data/
+api_keys_data/
+*.pem
+*.key
+*.crt
+static/certs/
+
+# ── Docker infra (not needed inside the image) ──────────────────────
+docker/
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# ── Tests ──────────────────────────────────────────────────────────
+tests/
+
+# ── Data / archives / docs ──────────────────────────────────────────
+packages/
+*.zip
+*.tar.gz
+*.md
+uv.lock
