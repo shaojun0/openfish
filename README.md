@@ -16,9 +16,12 @@ the codebase.
 - **API keys** — issue, list, revoke and track per-key usage from a web
   dashboard; keys are stored hashed in SQLite.
 - **Pluggable authentication** — HTTP Basic, twine-style `__token__` Basic,
-  Bearer API keys, and OAuth2 token introspection. Fine-grained permissions
-  (`package:read`, `package:write`, `build:download`, …) mapped onto roles.
-- **Extension registry** — extensions declare dependencies and are initialized
+  Bearer API keys, and OAuth2 token introspection.
+- **Database-backed RBAC** — the five classic tables (`users`, `roles`,
+  `permissions`, `user_roles`, `role_permissions`). Roles are rows, not code:
+  granting one is a database write that takes effect on the next request. Every
+  permission point is enforced by the route that names it —
+  see [Roles and permissions](#roles-and-permissions).- **Extension registry** — extensions declare dependencies and are initialized
   in topological order (`extensions/`), so `app.py` stays short.
 - **Local packages over HTTP** — packages are served directly from disk with an
   in-memory index kept fresh by `watchdog`.
@@ -49,6 +52,10 @@ pip install -e .
 cd frontend && npm install && npm run build && cd ..
 
 cp .env.example .env      # then edit .env — see "Configuration" below
+
+# Designate the first administrator — see "Roles and permissions"
+python cli.py create-admin <your-login>
+
 python app.py
 ```
 
@@ -155,10 +162,124 @@ Nested fields can also be addressed with the `__` delimiter, e.g.
 | `OAUTH2_CLIENT_SECRET`   | OAuth2 client secret                                              |
 | `OAUTH2_PRODUCT_ID`      | Provider-specific product ID (default `0`)                        |
 | `OAUTH2_AUTH_PREFERENCE` | Optional `auth-preference` query parameter for 4A-style flows      |
+| `OAUTH2_CA_BUNDLE`       | CA bundle (PEM) for verifying the provider's TLS certificate. Empty uses the system trust store; there is deliberately no way to disable verification |
 | `IS_4A`                  | Enable the 4A authentication mode                                 |
+| `ADMIN_USERS`            | JSON array. A **one-shot cold-start seed** for the first superuser only — inert once any superuser exists. Use `cli.py` afterwards |
 
 Basic Auth is only attempted when **both** `AUTH_USERNAME` and `AUTH_ASSERT`
 are non-empty, so an unconfigured deployment cannot be entered with `":"`.
+
+## Roles and permissions
+
+Authorization is five tables in the same SQLite file as the API keys:
+
+```
+users ──< user_roles >── roles ──< role_permissions >── permissions
+```
+
+| Table | Holds | Who owns it |
+| ----- | ----- | ----------- |
+| `users` | One row per human, keyed by a **stable** `external_id` | created automatically on first login |
+| `roles` | `code`, display name, and three behaviour flags | fully database-owned |
+| `permissions` | The permission *points* the code checks | seeded from code, editable in the console |
+| `user_roles` | Which account holds which role | database-owned |
+| `role_permissions` | Which role holds which permission point | database-owned |
+
+**The split that matters.** A route must name the permission it requires, so
+permission *codes* are declared in code:
+
+```python
+@pypi_bp.route("/", methods=["POST"])
+@require_permission(PACKAGE_WRITE)
+def upload(): ...
+```
+
+Everything else is data. There is no role → permission mapping anywhere in
+Python — `auth/permissions.py` contains a catalog of points and their default
+labels, and nothing else. Adding a role, granting it permissions, and handing it
+to somebody are all database writes that take effect on the **next request**,
+with no redeploy. That is the whole point of the rewrite: the previous design
+carried a `ROLES` dict and read `ADMIN_USERS` from the environment, so every
+authorization change was a code change and a restart.
+
+> Serving with several `gunicorn` workers? Each worker caches the grant sets it
+> has resolved, so a change made through one worker is visible immediately there
+> and within `AuthzService.CACHE_TTL_SECONDS` (30s) everywhere else. The shipped
+> container runs a single process, where the change is immediate. Lower the TTL,
+> or call `AuthzService.invalidate()`, if you need tighter cross-worker
+> propagation.
+
+The permission points shipped today, and the routes that enforce them:
+
+| Permission | Guards |
+| ---------- | ------ |
+| `package:read` | `/simple/*`, `/packages/<file>`, `GET /api/v1/packages` |
+| `package:write` | `POST /` and `/legacy/` (twine upload) |
+| `build:read` | `/python-builds/` listings |
+| `build:download` | `/python-builds/<tag>/<file>` |
+| `build:sha256` | `/python-builds/<tag>/<file>/sha256` |
+| `key:list` / `key:create` / `key:delete` / `key:stats` | the matching `/api/v1/keys*` endpoints |
+| `admin:view` | `/api/v1/admin/stats` |
+| `admin:refresh` | `POST /api/v1/admin/refresh-stats` |
+| `admin:roles` | `/api/v1/admin/{roles,permissions,users}` |
+
+### Built-in roles
+
+| Role | Behaviour |
+| ---- | --------- |
+| `anonymous` | Flagged `is_anonymous_default` — applies to requests that never authenticated (only reachable with `AUTH_ENABLED=false`) |
+| `authenticated` | Flagged `auto_grant` — handed to every account the moment it is created |
+| `admin` | Flagged `is_builtin` — always holds every permission point, and cannot be deleted |
+
+The flags are columns, not code, so "everyone who logs in may publish" is
+expressed by editing the `authenticated` row rather than by changing a Python
+dict. Roles you create yourself are ordinary rows; deleting one removes its
+grants and nothing else.
+
+### Bootstrapping an administrator
+
+Superuser status is a flag on the account (`users.is_superuser`) that **bypasses
+every permission lookup**. It is separate from the `admin` role on purpose: if a
+grant is deleted by mistake, a superuser can still get in and repair it.
+
+Because that is a chicken-and-egg problem, there are four ways in, in order of
+preference:
+
+```bash
+# 1. The normal path — works before the person has ever logged in,
+#    because the account row is created by the command itself.
+python cli.py create-admin zhangsan
+
+#    In Docker:
+docker exec cpypiserver-std python /app/cli.py create-admin zhangsan
+```
+
+2. **`ADMIN_USERS` / `AUTH_USERNAME`** — applied at startup **only while the
+   server has zero superusers**, and logged loudly when it fires. It is a
+   cold-start seed, not a standing grant: whoever can set an environment
+   variable cannot quietly promote themselves later.
+
+3. **The console** — an existing superuser can toggle the flag at
+   `/access`. The API refuses this for anyone else, and refuses to demote the
+   last remaining superuser.
+
+4. **Last resort**, with the server stopped:
+
+   ```sql
+   UPDATE users SET is_superuser = 1 WHERE external_id = 'zhangsan';
+   ```
+
+Other `cli.py` verbs: `show <id>`, `grant <id> <role>`, `revoke <id> <role>`,
+`demote <id>`, `list-admins`, `list-users`, `list-roles`, `list-permissions`.
+Every one is idempotent.
+
+> **Identity is `external_id`, never the display name.** It is the corporate
+> login (the local part of the e-mail address) or the IdP's `sub`, and it is
+> what roles attach to. Renaming somebody in the directory changes their
+> `display_name` only — their roles survive. Accounts are unique on
+> `external_id` alone rather than `(provider, external_id)`, so the same person
+> reaching the server through OAuth2, the HTTP Basic fallback, or `ADMIN_USERS`
+> is one account, not three.
 
 ### ClamAV (optional)
 
@@ -198,12 +319,21 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 | GET    | `/api/v1/keys/<key_id>/stats`     | Per-key usage stats                      |
 | GET    | `/api/v1/admin/stats`             | System-wide aggregates (admin)           |
 | POST   | `/api/v1/admin/refresh-stats`     | Recompute and cache them (admin)         |
+| GET    | `/api/v1/admin/roles`             | Roles with their permissions (admin:roles) |
+| POST   | `/api/v1/admin/roles`             | Create a role (admin:roles)              |
+| DELETE | `/api/v1/admin/roles/<role_id>`   | Delete a non-builtin role (admin:roles)  |
+| PUT    | `/api/v1/admin/roles/<role_id>/permissions` | Replace a role's permissions (admin:roles) |
+| GET    | `/api/v1/admin/permissions`       | All permission points (admin:roles)      |
+| GET    | `/api/v1/admin/users`             | Accounts and their roles (admin:roles)   |
+| POST   | `/api/v1/admin/users/<id>/roles`  | Grant a role (admin:roles)               |
+| DELETE | `/api/v1/admin/users/<id>/roles/<role>` | Revoke a role (admin:roles)        |
+| PUT    | `/api/v1/admin/users/<id>/superuser` | Toggle the superuser bypass (superuser only) |
 
 ### Browser-facing
 
-`/`, `/packages`, `/api-keys`, `/admin` all serve the SPA shell. A deep link
-such as `/api-keys` is handled by Flask's history-mode fallback, so links can be
-shared and bookmarked.
+`/`, `/packages`, `/api-keys`, `/admin` and `/access` all serve the SPA shell. A
+deep link such as `/api-keys` is handled by Flask's history-mode fallback, so
+links can be shared and bookmarked.
 
 ### Discovery surface (anonymous)
 
@@ -249,6 +379,39 @@ python scripts/check_contract.py --base-url http://127.0.0.1:9090 --api-key cpyp
 documented endpoint and handing the response to the pydantic model the spec
 points at.
 
+### Keeping authorization honest
+
+The same principle applies to access control: a permission table nothing
+consults is worse than none, because it looks like security.
+
+```bash
+# Every protected route must actually refuse an anonymous request
+python scripts/check_auth_guards.py
+
+# The RBAC tables must actually decide access
+python scripts/check_rbac.py
+```
+
+`check_auth_guards.py` runs two independent checks. Statically, it parses every
+module in `routes/` and fails if a `require_*` decorator is written *above* a
+`@*.route` decorator — decorators apply bottom-up, so that ordering registers the
+unguarded view and silently drops the check. This is not hypothetical: it is how
+every `/python-builds/*` route came to be readable without credentials. At
+runtime it boots the app and requests every registered rule with no credentials,
+failing anything reachable that is not explicitly declared public through
+`security=[]` or the documented `PUBLIC_ENDPOINTS` list — which also catches a
+blueprint that simply forgot to attach a guard.
+
+`check_rbac.py` drives the model end to end against a throwaway database: that a
+cold start promotes exactly one superuser and only once; that granting a role
+takes effect on the next request without a restart; that a role lacking
+`package:write` gets 403 from the upload endpoint; that `is_superuser` bypasses
+the tables; and that neither of the two escalation guards can be talked around
+(a non-superuser cannot set the flag, and the last superuser cannot be demoted).
+
+Both scripts exit non-zero on failure and were each verified to fail when the
+bug they guard against is reintroduced.
+
 ## Frontend architecture
 
 The split is by **audience**, not by convenience:
@@ -267,17 +430,19 @@ surfaced through `/api/v1`.
 
 ```
 app.py                 entry point — wires extensions, then routes
+cli.py                 administrative CLI (roles, grants, superuser bootstrap)
 config/                pydantic-settings models (server, storage, auth, security)
 extensions/            pluggable infrastructure + topological init registry
 routes/                Flask blueprints (pypi, python_build, api_keys, admin,
-                       session, discovery, spa, auth)
+                       access, session, discovery, spa, auth)
 openapi/               API description: metadata registry, spec builder, renderers
-auth/                  guards, decorators, permission model, API keys, OAuth2
+auth/                  guards, decorators, permission points, API keys, OAuth2
 index/                 package / build discovery and indexing
-models/                SQLAlchemy models (API keys, stats)
-services/              templates, stats aggregation, validation
+models/                SQLAlchemy models (users, roles, permissions, API keys, stats)
+services/              authorization service, templates, stats, validation
 schemas.py             request + response models (single source for /openapi.json)
-scripts/               verification gates (check_openapi.py, check_contract.py)
+scripts/               verification gates (check_openapi, check_contract,
+                       check_auth_guards, check_rbac)
 frontend/              Vue 3 + Vite + Element Plus SPA (build-time only)
 static/                machine-facing templates + the built SPA in static/dist/
 docker/                docker-compose.yml and its .env template
@@ -298,8 +463,16 @@ Adding a feature usually means one new module in `extensions/`, one blueprint in
   `/static/certs/ca_chain.pem`.
 - Generate `SECRET_KEY` with:
   `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
-- OAuth2 token introspection and code exchange run with `verify=False`, so a
-  private CA is expected to be trusted at the OS level rather than per request.
+- **OAuth2 introspection verifies TLS.** Set `OAUTH2_CA_BUNDLE` when the
+  provider uses a private CA; otherwise the system trust store is used. There is
+  no option to disable verification, because an unverified introspection call
+  lets anyone who can intercept the connection fabricate an identity — and this
+  server trusts the result enough to mint a session from it.
+- The `admin` role and `is_superuser` are different things. The role grants the
+  administrative permission points; the flag bypasses the permission tables
+  entirely and is what makes it impossible to lock yourself out by mis-editing a
+  grant. Only a superuser can hand out the flag, and the last superuser cannot
+  be demoted.
 
 ## License
 

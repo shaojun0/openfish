@@ -14,7 +14,7 @@ Layout
 
 from config import settings
 from auth.decorators import require_auth, require_permission
-from auth.permissions import Permission
+from auth.permissions import ADMIN_ROLES, ADMIN_VIEW
 
 
 def register_all(app):
@@ -28,6 +28,7 @@ def register_all(app):
     from routes.session import session_bp
     from routes.discovery import discovery_bp
     from routes.spa import spa_bp
+    from routes.access import access_bp
 
     prefix = settings.server.route_prefix
     api = prefix + "/api/v1"
@@ -38,8 +39,16 @@ def register_all(app):
     api_keys_bp.before_request(
         require_auth(methods=["session", "basic", "api_key", "api_key_basic", "bearer"])
     )
-    admin_bp.before_request(require_permission(Permission.ADMIN_VIEW))
+    admin_bp.before_request(require_permission(ADMIN_VIEW))
+    # Access control is a strictly narrower grant than "view the dashboard":
+    # holding admin:view does not let you edit roles.
+    access_bp.before_request(require_permission(ADMIN_ROLES))
     pypi_bp.before_request(require_auth())
+    # `python_build_bp` intentionally has no blueprint-wide guard: its
+    # `/python-builds/health` endpoint is a public mirror probe.  The other
+    # routes there carry `@require_auth()` decorators, and
+    # `scripts/check_auth_guards.py` fails the build if one of them is ever
+    # written above its `@route` decorator and silently stops running.
 
     # ── Machine-facing endpoints ────────────────────────────────────
     app.register_blueprint(health_bp)
@@ -55,6 +64,7 @@ def register_all(app):
     app.register_blueprint(session_bp, url_prefix=api)
     app.register_blueprint(api_keys_bp, url_prefix=api)
     app.register_blueprint(admin_bp, url_prefix=api + "/admin")
+    app.register_blueprint(access_bp, url_prefix=api + "/admin")
 
     # ── SPA shell. Machine routes above win by rule specificity, so this
     #    only ever handles browser-facing URLs.

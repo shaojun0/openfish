@@ -93,11 +93,25 @@ class SessionInfo(BaseModel):
 
     authenticated: bool = Field(description="Whether a usable credential was presented")
     auth_enabled: bool = Field(description="Whether this deployment enforces authentication")
-    user: str | None = Field(description="Subject of the credential, or null when anonymous")
-    role: str = Field(description="anonymous | authenticated | admin")
-    permissions: list[str] = Field(description="Permission strings granted to the role")
+    user: str | None = Field(
+        description="Stable account id of the credential (never a display name), or null"
+    )
+    display_name: str | None = Field(
+        default=None, description="Human-facing name for `user`, when known"
+    )
+    role: str = Field(description="Primary role code — admin | authenticated | anonymous | custom")
+    roles: list[str] = Field(
+        default_factory=list, description="Every role code the account holds"
+    )
+    permissions: list[str] = Field(
+        description="Effective permission strings, resolved from the role tables"
+    )
     server_name: str = Field(description="Configured branding name")
     is_admin: bool = Field(description="Shorthand for the admin:view permission")
+    is_superuser: bool = Field(
+        default=False,
+        description="True when the account bypasses permission checks entirely",
+    )
     auth_method: str | None = Field(description="Which credential was accepted")
 
 
@@ -277,3 +291,88 @@ class SimpleProjectJson(BaseModel):
     meta: dict
     name: str
     files: list[SimpleFile]
+
+
+# ── Access control (roles, permission points, accounts) ───────────────
+# Backed by the five RBAC tables: users / roles / permissions /
+# user_roles / role_permissions.  See services/authz.py.
+
+class RoleInfo(BaseModel):
+    """One role and the permission points it currently holds."""
+
+    id: int
+    code: str = Field(description="Stable identifier, e.g. `publisher`")
+    name: str = Field(description="Display name, editable by an administrator")
+    description: str | None = None
+    is_builtin: bool = Field(description="Built-in roles cannot be deleted")
+    is_anonymous_default: bool = Field(
+        description="Granted to requests that never authenticated"
+    )
+    auto_grant: bool = Field(
+        description="Granted automatically to every account on first login"
+    )
+    permissions: list[str] = Field(
+        default_factory=list, description="Permission codes this role holds"
+    )
+    user_count: int = Field(default=0, description="Accounts holding this role")
+
+
+class PermissionInfo(BaseModel):
+    """One permission point — a code some route guard checks."""
+
+    id: int
+    code: str = Field(description="`module:action`, e.g. `package:write`")
+    name: str
+    module: str | None = Field(default=None, description="UI grouping key")
+    description: str | None = None
+    role_count: int = Field(
+        default=0,
+        description="How many roles hold this point. 0 means no code path can reach "
+                    "it except through a superuser — usually a typo.",
+    )
+
+
+class UserInfo(BaseModel):
+    """One local account (a shadow of an externally authenticated identity)."""
+
+    id: int
+    provider: str = Field(description="How the account was first seen")
+    external_id: str = Field(description="Stable identity — what roles attach to")
+    display_name: str | None = None
+    email: str | None = None
+    is_active: bool
+    is_superuser: bool = Field(description="Bypasses every permission check")
+    roles: list[str] = Field(default_factory=list)
+    last_login_at: str | None = None
+    created_at: str | None = None
+
+
+class CreateRoleRequest(BaseModel):
+    """Body of `POST /api/v1/admin/roles`."""
+
+    code: str = Field(description="Letters, digits, '-' and '_' only")
+    name: str = Field(default="", description="Defaults to `code` when empty")
+    description: str | None = None
+
+
+class SetRolePermissionsRequest(BaseModel):
+    """Body of `PUT /api/v1/admin/roles/{role_id}/permissions`.
+
+    Replaces the role's grants wholesale.  Codes that do not exist yet are
+    created as new permission points, so a permission can be defined before the
+    code that checks it ships.
+    """
+
+    permissions: list[str]
+
+
+class GrantRoleRequest(BaseModel):
+    """Body of `POST /api/v1/admin/users/{user_id}/roles`."""
+
+    role: str = Field(description="Role code to grant")
+
+
+class SetSuperuserRequest(BaseModel):
+    """Body of `PUT /api/v1/admin/users/{user_id}/superuser`."""
+
+    superuser: bool

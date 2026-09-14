@@ -13,6 +13,8 @@ from flask import (
 )
 from flask_pydantic import validate
 
+from auth.decorators import require_permission
+from auth.permissions import PACKAGE_READ, PACKAGE_WRITE
 from config import settings
 from errors import BadRequestError, PackageNotFoundError, UploadConflictError
 from openapi import api_operation, binary, errors, ref
@@ -38,6 +40,7 @@ _JSON_ACCEPT = "application/vnd.pypi.simple.v1+json"
 
 
 @pypi_bp.route("/simple/")
+@require_permission(PACKAGE_READ)
 @api_operation(
     summary="Simple repository index (PEP 503 / PEP 691)",
     description=(
@@ -69,6 +72,7 @@ def simple_index(query: FormatQuery):
 
 
 @pypi_bp.route("/simple/<package_name>/")
+@require_permission(PACKAGE_READ)
 @api_operation(
     summary="Files of one project",
     description=(
@@ -108,6 +112,7 @@ def package_page(query: FormatQuery, package_name: str):
 
 
 @pypi_bp.route("/packages/<path:filename>")
+@require_permission(PACKAGE_READ)
 @api_operation(
     summary="Download a distribution file",
     description=(
@@ -129,6 +134,7 @@ def serve_package(filename: str):
 
 
 @pypi_bp.route("/simple/<package_name>/<filename>")
+@require_permission(PACKAGE_READ)
 @api_operation(
     summary="Download a file via its project path",
     description=(
@@ -150,6 +156,7 @@ def serve_package_from_simple(package_name: str, filename: str):
 
 @pypi_bp.route("/", methods=["POST"])
 @pypi_bp.route("/legacy/", methods=["POST"])
+@require_permission(PACKAGE_WRITE)
 @api_operation(
     summary="Upload a distribution (twine)",
     description=(

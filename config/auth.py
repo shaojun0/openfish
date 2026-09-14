@@ -37,6 +37,14 @@ class AuthConfig(BaseSettings):
         default="",
         description="Token introspection endpoint (RFC 7662), e.g. https://auth.example.com/oauth/introspect",
     )
+    oauth2_ca_bundle: str = Field(
+        default="",
+        description=(
+            "Path to a CA bundle (PEM) used to verify the OAuth2 provider's "
+            "TLS certificate. Empty = the system trust store. There is "
+            "deliberately no option to disable verification."
+        ),
+    )
     oauth2_client_id: str = Field(
         default="",
         description="Client ID registered with the OAuth2 provider (env: OAUTH2_CLIENT_ID)",

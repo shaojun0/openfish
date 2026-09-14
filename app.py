@@ -47,6 +47,27 @@ registry.init_all(app)
 from routes import register_all
 register_all(app)
 
+# ── Seed authorization ──────────────────────────────────────────────
+# Must run after the blueprints are imported: the guards in those modules are
+# what declare the permission points, so the catalog is incomplete until now.
+from services.authz import bootstrap as bootstrap_authz
+
+# Cold-start superusers.  Both sources are configuration, so neither can be
+# used to grant a role at runtime — they only seed the very first administrator
+# (see AuthzService.bootstrap_superusers).  Prefer `python cli.py create-admin`
+# for everything afterwards.
+_bootstrap_ids = list(settings.server.admin_users)
+if settings.auth.basic_username:
+    _bootstrap_ids.append(settings.auth.basic_username)
+
+_authz_summary = bootstrap_authz(app.extensions["authz"], _bootstrap_ids)
+logging.getLogger("cpypiserver").info(
+    "Authorization ready: %d permission point(s), %d role(s), %d superuser(s) total",
+    _authz_summary["permissions"]["total"],
+    len(app.extensions["authz"].list_roles()),
+    app.extensions["authz"].count_superusers(),
+)
+
 # ── Run ─────────────────────────────────────────────────────────────
 
 def main() -> None:

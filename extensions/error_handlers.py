@@ -10,7 +10,7 @@ from auth.oauth import get_authorize_url
 #: Blueprints that serve the SPA and API-key clients.  These must always answer
 #: JSON — an HTML redirect would be followed silently by XHR, and the client
 #: would then try to parse a login page as JSON.
-_API_BLUEPRINTS = {"session", "api_keys", "admin"}
+_API_BLUEPRINTS = {"session", "api_keys", "admin", "access"}
 
 
 class ErrorHandlersExtension(Extension):

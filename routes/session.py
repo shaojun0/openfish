@@ -7,11 +7,11 @@ That keeps the client-side 401 interceptor reserved for real API calls.
 
 from __future__ import annotations
 
-from flask import Blueprint, g, jsonify
+from flask import Blueprint, current_app, g, jsonify
 
 from auth.decorators import require_permission
 from auth.guards import AUTH_METHODS
-from auth.permissions import Permission, get_permissions, has_permission
+from auth.permissions import ADMIN_VIEW, PACKAGE_READ
 from config import settings
 from openapi import api_operation, array_of, errors, ok
 
@@ -54,24 +54,40 @@ def identify() -> tuple[dict | None, str | None]:
 )
 def whoami():
     user, method = identify()
-    role = user.get("role", "anonymous") if user else "anonymous"
+    authz = current_app.extensions.get("authz")
+
+    permissions = sorted(authz.permission_codes(user) if authz else frozenset())
+    roles = sorted(user.get("roles") or []) if user else []
+    is_superuser = bool(user.get("is_superuser")) if user else False
+
+    # `role` stays a single string for the SPA's header badge; `roles` carries
+    # the full set for anything that needs it.
+    if user is None:
+        primary = "anonymous"
+    elif is_superuser or "admin" in roles:
+        primary = "admin"
+    else:
+        primary = roles[0] if roles else "authenticated"
 
     return jsonify(
         {
             "authenticated": user is not None,
             "auth_enabled": settings.auth.auth_enabled,
             "user": user.get("sub") if user else None,
-            "role": role,
-            "permissions": sorted(p.value for p in get_permissions(role)),
+            "display_name": user.get("display_name") if user else None,
+            "role": primary,
+            "roles": roles,
+            "permissions": permissions,
             "server_name": settings.server.server_name,
-            "is_admin": has_permission(role, Permission.ADMIN_VIEW),
+            "is_admin": ADMIN_VIEW in permissions,
+            "is_superuser": is_superuser,
             "auth_method": method,
         }
     )
 
 
 @session_bp.route("/packages")
-@require_permission(Permission.PACKAGE_READ)
+@require_permission(PACKAGE_READ)
 @api_operation(
     summary="List packages",
     description=(
@@ -92,8 +108,6 @@ def packages():
     Reuses the same computation the admin dashboard relies on so the two
     views can never disagree on counts or sizes.
     """
-    from flask import current_app
-
     from services.stats import compute
 
     pkg_index = current_app.extensions.get("pypi_index")

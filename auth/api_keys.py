@@ -11,9 +11,9 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import scoped_session
 
-from auth.permissions import role_for
 from models.api_key import ApiKey, ApiKeyStats
 
 KEY_PREFIX = "cpypi_"
@@ -33,8 +33,17 @@ class ApiKeyManager:
     # ── Create ──────────────────────────────────────────────────────
 
     def create_key(
-        self, name: str, created_by: str, expires_in_days: int | None = None,
+        self,
+        name: str,
+        created_by: str,
+        expires_in_days: int | None = None,
+        user_id: int | None = None,
     ) -> dict:
+        """Mint a key.  ``user_id`` links it to the account that owns it.
+
+        ``created_by`` is kept for display and for keys written before the
+        users table existed; authorization resolves through ``user_id``.
+        """
         raw = KEY_PREFIX + secrets.token_hex(KEY_BYTES)
         key_hash = _sha256(raw)
         key_id = f"k_{secrets.token_hex(6)}"
@@ -50,7 +59,8 @@ class ApiKeyManager:
         try:
             entry = ApiKey(
                 id=key_id, name=name, prefix=prefix, hash=key_hash,
-                created_by=created_by, created_at=_now_iso(), expires_at=expires_at,
+                created_by=created_by, user_id=user_id,
+                created_at=_now_iso(), expires_at=expires_at,
             )
             session.add(entry)
             session.commit()
@@ -61,11 +71,25 @@ class ApiKeyManager:
         finally:
             session.close()
 
-    def list_keys(self, created_by: str | None = None) -> list[dict]:
+    def list_keys(
+        self,
+        created_by: str | None = None,
+        user_id: int | None = None,
+    ) -> list[dict]:
+        """Keys belonging to one account.
+
+        Matches on ``user_id`` **or** ``created_by`` so keys minted before the
+        users table existed still show up for their owner.
+        """
         session = self._s
         try:
             q = session.query(ApiKey)
-            if created_by:
+            if user_id is not None and created_by:
+                q = q.filter(or_(ApiKey.user_id == user_id,
+                                 ApiKey.created_by == created_by))
+            elif user_id is not None:
+                q = q.filter(ApiKey.user_id == user_id)
+            elif created_by:
                 q = q.filter(ApiKey.created_by == created_by)
             keys = q.order_by(ApiKey.created_at.desc()).all()
             return [k.to_dict() for k in keys]
@@ -90,7 +114,13 @@ class ApiKeyManager:
     # ── Validate ────────────────────────────────────────────────────
 
     def validate(self, raw_key: str) -> Optional[dict]:
-        """Validate a raw API key. Returns user info dict (with role) or None."""
+        """Validate a raw API key.
+
+        Returns the owning identity (``user_id`` / ``sub``) rather than a role:
+        authorization is resolved against the ``users`` table by
+        :class:`services.authz.AuthzService`, so a key always carries exactly
+        the permissions of the account it was issued to.
+        """
         if not raw_key or not raw_key.startswith(KEY_PREFIX):
             return None
         key_hash = _sha256(raw_key)
@@ -103,12 +133,9 @@ class ApiKeyManager:
             session.commit()
             return {
                 "sub": entry.created_by,
+                "user_id": entry.user_id,
                 "key_id": entry.id,
                 "key_name": entry.name,
-                # A key inherits the role of the user it was issued to, resolved
-                # by the same rule session and OAuth2 use. Without this an API
-                # key could never reach the admin endpoints.
-                "role": role_for(entry.created_by),
                 "auth_method": "api_key",
             }
         except Exception:

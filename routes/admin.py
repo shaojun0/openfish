@@ -11,7 +11,8 @@ import logging
 
 from flask import Blueprint, current_app, jsonify
 
-from auth.decorators import require_admin
+from auth.decorators import require_admin, require_permission
+from auth.permissions import ADMIN_REFRESH
 from openapi import api_operation, errors, ok
 from services.stats import compute as compute_stats
 
@@ -43,7 +44,7 @@ def stats():
 
 
 @admin_bp.route("/refresh-stats", methods=["POST"])
-@require_admin
+@require_permission(ADMIN_REFRESH)
 @api_operation(
     summary="Recompute statistics",
     description="Forces a synchronous recomputation and replaces the cached value.",

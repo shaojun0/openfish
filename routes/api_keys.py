@@ -5,15 +5,17 @@ The HTML dashboard that used to live here is now part of the Vue SPA
 ``/api/v1``.
 """
 
-from flask import Blueprint, current_app, g, jsonify, request, session
+from flask import Blueprint, current_app, jsonify, request
 
-from errors import UnauthorizedError
+from auth.decorators import current_sub, current_user_id, require_permission
+from auth.permissions import KEY_CREATE, KEY_DELETE, KEY_LIST, KEY_STATS
 from openapi import api_operation, array_of, errors, json_body, ok
 
 api_keys_bp = Blueprint("api_keys", __name__)
 
 
 @api_keys_bp.route("/keys", methods=["GET"])
+@require_permission(KEY_LIST)
 @api_operation(
     summary="List API keys",
     description=(
@@ -28,15 +30,15 @@ api_keys_bp = Blueprint("api_keys", __name__)
     },
 )
 def list_keys():
-    _require_auth()
     mgr = current_app.extensions["api_key_manager"]
-    keys = mgr.list_keys(created_by=_current_user())
+    keys = mgr.list_keys(user_id=current_user_id(), created_by=current_sub())
     for k in keys:
         k["stats_detail"] = mgr.get_key_stats(k["id"])
     return jsonify(keys)
 
 
 @api_keys_bp.route("/keys", methods=["POST"])
+@require_permission(KEY_CREATE)
 @api_operation(
     summary="Create an API key",
     description=(
@@ -54,7 +56,6 @@ def list_keys():
     },
 )
 def create_key():
-    _require_auth()
     data = request.get_json(silent=True) or {}
     name = str(data.get("name", "")).strip()
     if not name:
@@ -70,11 +71,17 @@ def create_key():
             expires = None
 
     mgr = current_app.extensions["api_key_manager"]
-    result = mgr.create_key(name=name, created_by=_current_user(), expires_in_days=expires)
+    result = mgr.create_key(
+        name=name,
+        created_by=current_sub() or "unknown",
+        expires_in_days=expires,
+        user_id=current_user_id(),
+    )
     return jsonify(result), 201
 
 
 @api_keys_bp.route("/keys/<key_id>", methods=["DELETE"])
+@require_permission(KEY_DELETE)
 @api_operation(
     summary="Revoke an API key",
     description=(
@@ -88,7 +95,6 @@ def create_key():
     },
 )
 def delete_key(key_id: str):
-    _require_auth()
     mgr = current_app.extensions["api_key_manager"]
     if not mgr.delete_key(key_id):
         return jsonify({"error": "key not found"}), 404
@@ -96,6 +102,7 @@ def delete_key(key_id: str):
 
 
 @api_keys_bp.route("/keys/<key_id>/stats", methods=["GET"])
+@require_permission(KEY_STATS)
 @api_operation(
     summary="Per-key usage breakdown",
     description=(
@@ -108,22 +115,6 @@ def delete_key(key_id: str):
     },
 )
 def key_stats(key_id: str):
-    _require_auth()
     mgr = current_app.extensions["api_key_manager"]
     return jsonify(mgr.get_key_stats(key_id))
 
-
-# ── Helpers ──────────────────────────────────────────────────────────
-
-def _current_user() -> str | None:
-    user = getattr(g, "auth_user", None)
-    if user:
-        return user.get("sub", str(user)) if isinstance(user, dict) else str(user)
-    token = session.get("auth_token", "")
-    return f"session:{token[:8]}…" if token else None
-
-
-def _require_auth() -> None:
-    """Defence in depth — the blueprint also installs a before_request guard."""
-    if _current_user() is None:
-        raise UnauthorizedError()

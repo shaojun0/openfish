@@ -51,6 +51,8 @@ services:
       - OAUTH2_TOKEN_URL=${OAUTH2_TOKEN_URL:-}
       - OAUTH2_AUTHORIZE_URL=${OAUTH2_AUTHORIZE_URL:-}
       - OAUTH2_INTROSPECT_URL=${OAUTH2_INTROSPECT_URL:-}
+      # 私有 CA 证书路径；留空 = 系统信任库。没有关闭校验的开关。
+      - OAUTH2_CA_BUNDLE=${OAUTH2_CA_BUNDLE:-}
       - IS_4A=${IS_4A:-false}
       # ── 上传限制 ────────────────────────────────────────────
       - MAX_CONTENT_LENGTH=104857600      # 100MB
@@ -83,6 +85,8 @@ services:
       - OAUTH2_TOKEN_URL=${OAUTH2_TOKEN_URL:-}
       - OAUTH2_AUTHORIZE_URL=${OAUTH2_AUTHORIZE_URL:-}
       - OAUTH2_INTROSPECT_URL=${OAUTH2_INTROSPECT_URL:-}
+      # 私有 CA 证书路径；留空 = 系统信任库。没有关闭校验的开关。
+      - OAUTH2_CA_BUNDLE=${OAUTH2_CA_BUNDLE:-}
       - IS_4A=${IS_4A:-false}
       - MAX_CONTENT_LENGTH=104857600
     command: >

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -77,6 +78,19 @@ PUBLIC_ENDPOINTS: dict[str, str] = {
 
 #: Statuses that prove the guard ran.
 DENIED = frozenset({401, 403})
+
+#: `<int:role_id>` -> `1`, `<path:filename>` -> `x`, and so on.  Flask's test
+#: client needs a *concrete* URL; a raw rule string containing the converter
+#: syntax would fall through to the SPA catch-all and report a bogus 405.
+_CONVERTER_RE = re.compile(r"<(?:([a-zA-Z_]+):)?([a-zA-Z_]+)>")
+
+
+def _concrete_path(rule: str) -> str:
+    """Substitute placeholder values into a rule so it can actually be routed."""
+    def substitute(match: re.Match[str]) -> str:
+        return "1" if match.group(1) == "int" else "x"
+
+    return _CONVERTER_RE.sub(substitute, rule)
 
 
 def _decorator_name(node: ast.expr) -> str:
@@ -151,16 +165,17 @@ def check_endpoints_deny_anonymous() -> list[str]:
             continue
 
         method = "GET" if "GET" in methods else methods[0]
+        path = _concrete_path(str(rule))
         try:
-            response = client.open(str(rule), method=method)
+            response = client.open(path, method=method)
             status = response.status_code
         except Exception as exc:  # noqa: BLE001 - any error means we never reached the guard
-            problems.append(f"{method} {rule} — raised {type(exc).__name__}: {exc}")
+            problems.append(f"{method} {path} — raised {type(exc).__name__}: {exc}")
             continue
 
         if status not in DENIED:
             problems.append(
-                f"{method} {rule} returned {status} without credentials "
+                f"{method} {path} returned {status} without credentials "
                 f"(endpoint {endpoint!r}). Either attach a guard, or declare it "
                 f"public with @api_operation(security=[]) / add it to PUBLIC_ENDPOINTS."
             )

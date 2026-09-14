@@ -18,6 +18,12 @@ class ApiKey(Base):
     prefix: Mapped[str] = Column(String(16), nullable=False)                   # first 12 chars of raw key + "…"
     hash: Mapped[str] = Column(String(64), nullable=False, unique=True, index=True)  # SHA256 of raw key
     created_by: Mapped[str] = Column(String(256), nullable=False, index=True)  # OAuth2 sub / username
+    # Preferred owner link.  ``created_by`` stays as a readable fallback for
+    # rows written before the users table existed — DatabaseExtension adds this
+    # column to pre-existing databases with an idempotent ALTER TABLE.
+    user_id: Mapped[int | None] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[str] = Column(String(32), nullable=False)               # ISO 8601 UTC
 
     # ── Expiration ──────────────────────────────────────────────────

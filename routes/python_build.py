@@ -24,7 +24,8 @@ from flask import (
 )
 
 from config import settings
-from auth.decorators import require_auth
+from auth.decorators import require_permission
+from auth.permissions import BUILD_DOWNLOAD, BUILD_READ, BUILD_SHA256
 from openapi import api_operation, binary, errors, ok
 from services import templates
 
@@ -37,7 +38,7 @@ def _index():
 
 
 @python_build_bp.route("/python-builds/")
-@require_auth()
+@require_permission(BUILD_READ)
 @api_operation(
     summary="Available CPython builds",
     description=(
@@ -71,7 +72,7 @@ def discovery():
 
 
 @python_build_bp.route("/python-builds/<release_tag>/")
-@require_auth()
+@require_permission(BUILD_READ)
 @api_operation(
     summary="Builds within one release",
     description="Every artifact published for a release tag, as an HTML page of links.",
@@ -98,7 +99,7 @@ def release_page(release_tag: str):
 
 
 @python_build_bp.route("/python-builds/<release_tag>/<filename>")
-@require_auth()
+@require_permission(BUILD_DOWNLOAD)
 @api_operation(
     summary="Download a CPython build",
     description="Streams one prebuilt interpreter archive.",
@@ -145,7 +146,7 @@ def health():
 
 
 @python_build_bp.route("/python-builds/<release_tag>/<filename>/sha256")
-@require_auth()
+@require_permission(BUILD_SHA256)
 @api_operation(
     summary="Checksum of one build",
     description="SHA-256 of a build archive, for verifying a download.",
