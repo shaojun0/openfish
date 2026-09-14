@@ -21,6 +21,7 @@ from config.server import ServerConfig
 from config.storage import StorageConfig
 from config.auth import AuthConfig
 from config.security import SecurityConfig
+from config.hub import HubConfig
 
 
 class Settings(BaseSettings):
@@ -35,6 +36,7 @@ class Settings(BaseSettings):
     storage: StorageConfig = StorageConfig()
     auth: AuthConfig = AuthConfig()
     security: SecurityConfig = SecurityConfig()
+    hub: HubConfig = HubConfig()
 
     # ── Convenience aliases (backward-compat with Flask config) ─────
     @property

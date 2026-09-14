@@ -13,6 +13,11 @@ the codebase.
   (`/simple/`, upload via `POST /`).
 - **python-build-standalone hosting** — serve and checksum prebuilt CPython
   distributions.
+- **Artifact hub** — beyond Python, the sidebar is grouped by ecosystem: an npm
+  catalog scaffold, a downloadable **tools** directory (`tools/<category>/`) and
+  a **model-routing** table for downstream DSH (`config/model_routes.json`). All
+  three are file-backed, so adding an entry is a file copy — see
+  [Artifact hub](#artifact-hub-tools--npm--model-routing).
 - **API keys** — issue, list, revoke and track per-key usage from a web
   dashboard; keys are stored hashed in SQLite.
 - **Pluggable authentication** — HTTP Basic, twine-style `__token__` Basic,
@@ -141,6 +146,10 @@ Templates are provided at `.env.example` (local development) and
 | `STORAGE__OVERWRITE`    | `false`                | Allow re-uploading an existing filename            |
 | `MAX_CONTENT_LENGTH`    | `104857600` (100 MiB)  | Maximum upload size                                |
 | `ADMIN_USERS`           | `[]`                   | Admin whitelist — **JSON array**, e.g. `["alice"]` |
+| `TOOLS_DIR`             | `tools`                | Tools catalog root — each sub-directory is a category |
+| `NPM_DIR`               | `npm`                  | Local npm catalog (`*.tgz` / `catalog.json`)       |
+| `NPM_UPSTREAM`          | `https://registry.npmmirror.com` | Mirror URL advertised on the npm page    |
+| `MODELS_FILE`           | `config/model_routes.json` | Model-routing table for downstream DSH         |
 
 Nested fields can also be addressed with the `__` delimiter, e.g.
 `SERVER__PORT=9091`.
@@ -286,6 +295,75 @@ Every one is idempotent.
 `CLAMAV_HOST` (empty disables scanning), `CLAMAV_PORT` (3310),
 `CLAMAV_TIMEOUT` (30), `CLAMAV_REQUIRED` (`false`).
 
+## Artifact hub (tools / npm / model routing)
+
+The sidebar is grouped by ecosystem rather than listed flat, so the server can
+grow beyond Python without the menu turning into a junk drawer:
+
+| Group        | Page       | Backing store                     | Status |
+| ------------ | ---------- | --------------------------------- | ------ |
+| Python       | `/packages`| `PACKAGES_DIR` + CPython mirror   | working |
+| npm          | `/npm`     | `NPM_DIR`                         | scaffold |
+| 工具 / Tools | `/tools`   | `TOOLS_DIR`                       | working |
+| 模型路由     | `/models`  | `MODELS_FILE`                     | working |
+
+**Tools.** Every immediate sub-directory of `TOOLS_DIR` is a category and every
+file below it is a downloadable tool. An optional `TOOLS_DIR/catalog.json`
+overrides display names, descriptions and tags:
+
+```json
+{
+  "categories": { "ops": { "name": "运维脚本", "description": "…", "icon": "Tools" } },
+  "tools": { "ops/backup.sh": { "name": "备份脚本", "tags": ["ops"] } }
+}
+```
+
+The catalog is re-scanned on every request, so dropping a file in is the whole
+publish step. Downloads go through `/tools/<category>/<filename>` and require
+the `tool:download` permission; the listing requires `tool:read`.
+
+**npm.** A scaffold: the registry protocol is not implemented yet. `/api/v1/npm`
+lists `*.tgz` files found in `NPM_DIR` plus any entries declared in
+`NPM_DIR/catalog.json`, and the page shows the `npm config set registry` line a
+future proxy will satisfy. Entries without a tarball are flagged *metadata only*.
+
+**Model routing.** `MODELS_FILE` (default `config/model_routes.json`) is a small
+JSON document describing the endpoints a downstream intranet DSH may talk to.
+This server publishes the table; it does not proxy inference. The page renders a
+table plus an alias-expanded snippet ready to paste into a DSH config.
+
+All three catalogs are file-backed and read-only over HTTP: there is no upload
+API, by design. The Docker image creates `/app/tools` and `/app/npm`, and
+`docker/docker-compose.yml` bind-mounts the repository copies so an operator can
+edit them in place.
+
+### Static index elements
+
+Every ecosystem gets a **server-rendered index** next to its rich SPA page, so a
+script (or a browser with JavaScript off) can still enumerate it. Templates are
+grouped by ecosystem under `static/`:
+
+| Index | Path | HTML form | JSON form |
+| ----- | ---- | --------- | --------- |
+| Python | `/simple/` | `simple_index.html` lists every project | `?format=json` → PEP 691 |
+| Tools  | `/tools/` | `tools/index.html` lists categories and files | `?format=json` → the `/api/v1/tools` document |
+| npm    | `/npm/` | `npm/index.html` lists local packages | `?format=json` → the `/-/all` document |
+
+Python and tools follow the content-negotiation convention already used by
+`/simple/`. npm has no official HTML index, so the JSON side follows the two
+conventions the ecosystem actually recognises:
+
+* `GET /npm/-/ping` → `{}` — the health probe every npm client makes first.
+* `GET /npm/-/all` → the **legacy full-index** shape, keyed by package name with
+  `dist-tags` and `versions`. npm shut its own copy down in 2017 in favour of
+  `GET /-/v1/search` and the replication feed
+  ([npm blog](https://blog.npmjs.org/post/157615772423/deprecating-the-all-registry-endpoint)),
+  but private registries (Verdaccio, cnpm, …) still answer it, which makes it the
+  closest thing npm has to a static index.
+
+The modern `/-/v1/search` endpoint is the intended replacement for `/-/all` and
+is not implemented yet — see the npm scaffold note above.
+
 ## API overview
 
 ### Machine-facing (consumed by clients — no JavaScript)
@@ -302,6 +380,12 @@ Every one is idempotent.
 | GET    | `/python-builds/<tag>/<filename>`              | Download a build                     |
 | GET    | `/python-builds/<tag>/<filename>/sha256`       | Build checksum                       |
 | GET    | `/python-builds/health`                        | Build mirror status                  |
+| GET    | `/tools/`                                       | Tools index (HTML, or JSON with `?format=json`) |
+| GET    | `/tools/<category>/<filename>`                  | Download a tool from the hub         |
+| GET    | `/npm/`                                         | npm catalog index (HTML, or the `/-/all` JSON) |
+| GET    | `/npm/-/all`                                    | npm legacy full-index JSON           |
+| GET    | `/npm/-/ping`                                   | npm health convention — returns `{}` |
+| GET    | `/npm/files/<filename>`                        | Download a local npm tarball         |
 | GET    | `/auth/login`, `/auth`, `/auth/logout`         | OAuth2 login flow                    |
 
 Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
@@ -328,12 +412,15 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 | POST   | `/api/v1/admin/users/<id>/roles`  | Grant a role (admin:roles)               |
 | DELETE | `/api/v1/admin/users/<id>/roles/<role>` | Revoke a role (admin:roles)        |
 | PUT    | `/api/v1/admin/users/<id>/superuser` | Toggle the superuser bypass (superuser only) |
+| GET    | `/api/v1/tools`                   | Tools catalog grouped by category (tool:read) |
+| GET    | `/api/v1/npm`                     | Local npm catalog scaffold (npm:read)    |
+| GET    | `/api/v1/models`                  | Model-routing table (model:read)         |
 
 ### Browser-facing
 
-`/`, `/packages`, `/api-keys`, `/admin` and `/access` all serve the SPA shell. A
-deep link such as `/api-keys` is handled by Flask's history-mode fallback, so
-links can be shared and bookmarked.
+`/`, `/packages`, `/npm`, `/tools`, `/models`, `/api-keys`, `/admin` and
+`/access` all serve the SPA shell. A deep link such as `/api-keys` is handled by
+Flask's history-mode fallback, so links can be shared and bookmarked.
 
 ### Discovery surface (anonymous)
 
@@ -431,20 +518,23 @@ surfaced through `/api/v1`.
 ```
 app.py                 entry point — wires extensions, then routes
 cli.py                 administrative CLI (roles, grants, superuser bootstrap)
-config/                pydantic-settings models (server, storage, auth, security)
+config/                pydantic-settings models (server, storage, auth, security, hub)
 extensions/            pluggable infrastructure + topological init registry
 routes/                Flask blueprints (pypi, python_build, api_keys, admin,
-                       access, session, discovery, spa, auth)
+                       access, session, discovery, hub, spa, auth)
 openapi/               API description: metadata registry, spec builder, renderers
 auth/                  guards, decorators, permission points, API keys, OAuth2
 index/                 package / build discovery and indexing
 models/                SQLAlchemy models (users, roles, permissions, API keys, stats)
-services/              authorization service, templates, stats, validation
+services/              authorization service, hub catalogs, templates, stats, validation
 schemas.py             request + response models (single source for /openapi.json)
 scripts/               verification gates (check_openapi, check_contract,
                        check_auth_guards, check_rbac)
 frontend/              Vue 3 + Vite + Element Plus SPA (build-time only)
-static/                machine-facing templates + the built SPA in static/dist/
+static/                index templates grouped by ecosystem (python/ tools/ npm/)
+                       + the built SPA in static/dist/
+tools/                 artifact hub — tools/<category>/<file> + catalog.json
+npm/                   artifact hub — local npm tarballs + catalog.json
 docker/                docker-compose.yml and its .env template
 ```
 

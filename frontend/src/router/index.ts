@@ -29,6 +29,24 @@ const routes: RouteRecordRaw[] = [
         meta: { titleKey: 'nav.packages', icon: 'Box' },
       },
       {
+        path: 'npm',
+        name: 'npm',
+        component: () => import('@/views/NpmView.vue'),
+        meta: { titleKey: 'nav.npm', icon: 'ShoppingBag' },
+      },
+      {
+        path: 'tools',
+        name: 'tools',
+        component: () => import('@/views/ToolsView.vue'),
+        meta: { titleKey: 'nav.tools', icon: 'Tools' },
+      },
+      {
+        path: 'models',
+        name: 'models',
+        component: () => import('@/views/ModelsView.vue'),
+        meta: { titleKey: 'nav.models', icon: 'Cpu' },
+      },
+      {
         path: 'api-keys',
         name: 'api-keys',
         component: () => import('@/views/ApiKeysView.vue'),

@@ -17,27 +17,91 @@ interface NavItem {
   icon: string
 }
 
-const items = computed<NavItem[]>(() => {
-  const base: NavItem[] = [
-    { index: '/', titleKey: 'nav.home', icon: 'Odometer' },
-    { index: '/packages', titleKey: 'nav.packages', icon: 'Box' },
-    { index: '/api-keys', titleKey: 'nav.apiKeys', icon: 'Key' },
+interface NavGroup {
+  key: string
+  titleKey: string
+  icon: string
+  /** When set, the group is hidden unless the caller holds this permission. */
+  permission?: string
+  items: NavItem[]
+}
+
+/**
+ * Sidebar taxonomy
+ * ----------------
+ * The server is more than a Python index now, so the menu is grouped by
+ * ecosystem rather than listed flat:
+ *
+ *   Python  → the original PEP 503 registry and the CPython mirror
+ *   npm     → the npm catalog scaffold
+ *   工具     → the downloadable tools directory
+ *   模型路由 → the model routing table for downstream DSH
+ *   系统     → keys, statistics and access control
+ *
+ * Adding a category is a `NavGroup` entry here plus a route in
+ * `router/index.ts`; nothing else in the shell needs to change.
+ */
+const home: NavItem = { index: '/', titleKey: 'nav.home', icon: 'Odometer' }
+
+const groups = computed<NavGroup[]>(() => {
+  const groups: NavGroup[] = [
+    {
+      key: 'group-python',
+      titleKey: 'nav.groupPython',
+      icon: 'Box',
+      permission: 'package:read',
+      items: [{ index: '/packages', titleKey: 'nav.packages', icon: 'Box' }],
+    },
+    {
+      key: 'group-npm',
+      titleKey: 'nav.groupNpm',
+      icon: 'ShoppingBag',
+      permission: 'npm:read',
+      items: [{ index: '/npm', titleKey: 'nav.npm', icon: 'ShoppingBag' }],
+    },
+    {
+      key: 'group-tools',
+      titleKey: 'nav.groupTools',
+      icon: 'Tools',
+      permission: 'tool:read',
+      items: [{ index: '/tools', titleKey: 'nav.tools', icon: 'Tools' }],
+    },
+    {
+      key: 'group-models',
+      titleKey: 'nav.groupModels',
+      icon: 'Cpu',
+      permission: 'model:read',
+      items: [{ index: '/models', titleKey: 'nav.models', icon: 'Cpu' }],
+    },
+    {
+      key: 'group-system',
+      titleKey: 'nav.groupSystem',
+      icon: 'Setting',
+      items: [{ index: '/api-keys', titleKey: 'nav.apiKeys', icon: 'Key' }],
+    },
   ]
+
+  const system = groups[groups.length - 1]
   if (session.isAdmin) {
-    base.push({ index: '/admin', titleKey: 'nav.admin', icon: 'DataAnalysis' })
+    system.items.push({ index: '/admin', titleKey: 'nav.admin', icon: 'DataAnalysis' })
   }
   if (session.can('admin:roles')) {
-    base.push({ index: '/access', titleKey: 'nav.access', icon: 'Lock' })
+    system.items.push({ index: '/access', titleKey: 'nav.access', icon: 'Lock' })
   }
-  return base
+  return groups.filter((group) => !group.permission || session.can(group.permission))
 })
 
 /** Machine-facing endpoints, opened in a new tab — not part of the SPA. */
 const machineLinks = [
-  { href: '/simple/', labelKey: 'nav.builds', icon: 'Link' },
+  { href: '/simple/', labelKey: 'nav.index', icon: 'Link' },
+  { href: '/python-builds/', labelKey: 'nav.builds', icon: 'Download' },
+  { href: '/docs', labelKey: 'nav.docs', icon: 'Document' },
 ]
 
 const activeIndex = computed(() => route.path)
+
+/** Build stamp injected by vite.config.ts; makes stale bundles obvious. */
+const buildId = __BUILD_ID__
 </script>
 
 <template>
@@ -58,10 +122,21 @@ const activeIndex = computed(() => route.path)
       :collapse-transition="false"
       router
     >
-      <el-menu-item v-for="item in items" :key="item.index" :index="item.index">
-        <el-icon><component :is="item.icon" /></el-icon>
-        <template #title>{{ t(item.titleKey) }}</template>
+      <el-menu-item :index="home.index">
+        <el-icon><component :is="home.icon" /></el-icon>
+        <template #title>{{ t(home.titleKey) }}</template>
       </el-menu-item>
+
+      <el-sub-menu v-for="group in groups" :key="group.key" :index="group.key">
+        <template #title>
+          <el-icon><component :is="group.icon" /></el-icon>
+          <span>{{ t(group.titleKey) }}</span>
+        </template>
+        <el-menu-item v-for="item in group.items" :key="item.index" :index="item.index">
+          <el-icon><component :is="item.icon" /></el-icon>
+          <template #title>{{ t(item.titleKey) }}</template>
+        </el-menu-item>
+      </el-sub-menu>
     </el-menu>
 
     <div class="sidebar__footer">
@@ -78,6 +153,7 @@ const activeIndex = computed(() => route.path)
           <span v-if="!appStore.sidebarCollapsed">{{ t(link.labelKey) }}</span>
         </a>
       </el-tooltip>
+      <div v-if="!appStore.sidebarCollapsed" class="sidebar__build">build {{ buildId }}</div>
     </div>
   </div>
 </template>
@@ -145,6 +221,16 @@ const activeIndex = computed(() => route.path)
 .sidebar__link:hover {
   background: var(--el-fill-color-light);
   color: var(--el-color-primary);
+}
+
+.sidebar__build {
+  padding: 8px 12px 0;
+  font-family: 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .fade-enter-active,

@@ -40,6 +40,16 @@ BUILD_READ = "build:read"
 BUILD_DOWNLOAD = "build:download"
 BUILD_SHA256 = "build:sha256"
 
+# Artifact hub — tools catalog (downloadable scripts/binaries)
+TOOL_READ = "tool:read"
+TOOL_DOWNLOAD = "tool:download"
+
+# Artifact hub — npm catalog scaffold
+NPM_READ = "npm:read"
+
+# Artifact hub — model routing table for downstream DSH
+MODEL_READ = "model:read"
+
 # API key self-service
 KEY_LIST = "key:list"
 KEY_CREATE = "key:create"
@@ -60,6 +70,10 @@ BUILTIN: dict[str, tuple[str, str]] = {
     BUILD_READ: ("浏览 CPython 构建", "查看 python-build-standalone 发布列表"),
     BUILD_DOWNLOAD: ("下载 CPython 构建", "下载预编译的 CPython 发行版"),
     BUILD_SHA256: ("读取构建校验和", "查询构建产物的 SHA256"),
+    TOOL_READ: ("浏览工具目录", "查看内网工具目录的分类与文件清单"),
+    TOOL_DOWNLOAD: ("下载工具", "从工具目录下载脚本或二进制文件"),
+    NPM_READ: ("浏览 npm 目录", "查看本地 npm 包目录（脚手架）"),
+    MODEL_READ: ("浏览模型路由", "查看供内网 DSH 使用的模型路由表"),
     KEY_LIST: ("列出 API 密钥", "查看自己名下的 API 密钥"),
     KEY_CREATE: ("创建 API 密钥", "签发新的 API 密钥"),
     KEY_DELETE: ("吊销 API 密钥", "删除 API 密钥"),
@@ -158,6 +172,7 @@ BUILTIN_ROLES: dict[str, tuple[str, str, bool, bool, bool]] = {
 __all__ = [
     "PACKAGE_READ", "PACKAGE_WRITE",
     "BUILD_READ", "BUILD_DOWNLOAD", "BUILD_SHA256",
+    "TOOL_READ", "TOOL_DOWNLOAD", "NPM_READ", "MODEL_READ",
     "KEY_LIST", "KEY_CREATE", "KEY_DELETE", "KEY_STATS",
     "ADMIN_VIEW", "ADMIN_REFRESH", "ADMIN_ROLES",
     "BUILTIN", "BUILTIN_ROLES",

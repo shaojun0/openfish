@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "_comment": "内网模型路由表（脚手架）。openfish 只负责发布，不代理推理请求；下游 DSH 读取本文件后自行决定 upstream。base_url 请替换成实际内网地址。",
+  "routes": [
+    {
+      "name": "deepseek-v4-flash",
+      "provider": "openai-compatible",
+      "base_url": "http://10.0.0.10:8000",
+      "model": "deepseek-v4-flash",
+      "aliases": ["flash", "default"],
+      "path": "/v1/chat/completions",
+      "enabled": true,
+      "description": "默认对话模型，走内网 vLLM 推理服务"
+    },
+    {
+      "name": "deepseek-v4",
+      "provider": "openai-compatible",
+      "base_url": "http://10.0.0.10:8001",
+      "model": "deepseek-v4",
+      "aliases": ["pro"],
+      "path": "/v1/chat/completions",
+      "enabled": true,
+      "description": "长上下文主力模型"
+    },
+    {
+      "name": "bge-m3-embedding",
+      "provider": "openai-compatible",
+      "base_url": "http://10.0.0.11:8002",
+      "model": "bge-m3",
+      "aliases": ["embedding"],
+      "path": "/v1/embeddings",
+      "enabled": false,
+      "description": "向量化模型，尚未上线（示例：enabled=false）"
+    }
+  ]
+}

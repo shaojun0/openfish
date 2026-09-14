@@ -16,6 +16,13 @@ services:
       - "${PYPISERVER_PORT:-20416}:8080"
     volumes:
       - ${SHARE_DIR:-/data/share}:/app/share
+      # ── 内网制品中心：工具 / npm / 模型路由 ──────────────────
+      # 工具目录 tools/<分类>/<文件>，丢文件即生效，无需重建镜像
+      - ./../tools:/app/tools
+      # 本地 npm 目录（*.tgz 与 catalog.json）
+      - ./../npm:/app/npm
+      # 模型路由表：只读挂载，改完刷新页面即可
+      - ./../config/model_routes.json:/app/config/model_routes.json:ro
       # 持久化 keyring/公开包，放在主 packages 目录统一管理
       # - ./../packages/keyring*.whl:/app/packages/
       # API keys 持久化
@@ -34,6 +41,11 @@ services:
       - PACKAGES_DIR=${PACKAGES_DIR:-/app/share/cpypiserver_public/packages}
       - PYTHON_BUILDS_DIR=${PYTHON_BUILDS_DIR:-/app/share/cpypiserver_public/cpython}
       - API_KEYS_FILE=/app/data/cpypiserver.db
+      # ── 内网制品中心 ────────────────────────────────────────
+      - TOOLS_DIR=/app/tools
+      - NPM_DIR=/app/npm
+      - MODELS_FILE=/app/config/model_routes.json
+      - NPM_UPSTREAM=${NPM_UPSTREAM:-https://registry.npmmirror.com}
       - DEBUG=false
 
       # ── 安全（值来自 docker/.env，未设置则启动报错）─────────
@@ -68,6 +80,9 @@ services:
     volumes:
       - ${SHARE_DIR:-/data/share}:/app/share
       - api_keys_data:/app/data
+      - ./../tools:/app/tools
+      - ./../npm:/app/npm
+      - ./../config/model_routes.json:/app/config/model_routes.json:ro
     environment:
       - SERVER_NAME=cpypiserver
       - HOST=0.0.0.0
@@ -75,6 +90,10 @@ services:
       - PACKAGES_DIR=${PACKAGES_DIR:-/app/share/cpypiserver_public/packages}
       - PYTHON_BUILDS_DIR=${PYTHON_BUILDS_DIR:-/app/share/cpypiserver_public/cpython}
       - API_KEYS_FILE=/app/data/cpypiserver.db
+      - TOOLS_DIR=/app/tools
+      - NPM_DIR=/app/npm
+      - MODELS_FILE=/app/config/model_routes.json
+      - NPM_UPSTREAM=${NPM_UPSTREAM:-https://registry.npmmirror.com}
       - DEBUG=true
       - SECRET_KEY=${SECRET_KEY:?请在 docker/.env 中设置 SECRET_KEY}
       - AUTH_USERNAME=${AUTH_USERNAME:-admin}

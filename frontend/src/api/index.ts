@@ -132,6 +132,81 @@ export interface HealthInfo {
   packages_dir: string
 }
 
+// ── Artifact hub: tools / npm / model routing ────────────────────────
+
+export interface ToolEntry {
+  name: string
+  filename: string
+  /** Path relative to the tools root — the download URL's tail. */
+  relative_path: string
+  download_url: string
+  size: number | null
+  size_human: string
+  sha256: string | null
+  modified: string | null
+  description: string | null
+  tags: string[]
+}
+
+export interface ToolCategory {
+  /** Directory name, or `root` for files sitting at the tools root. */
+  key: string
+  /** Overlay display name; null means "use the category key". */
+  name: string | null
+  description: string | null
+  icon: string | null
+  tools: ToolEntry[]
+}
+
+export interface ToolCatalog {
+  root: string
+  exists: boolean
+  url_prefix: string
+  tool_count: number
+  categories: ToolCategory[]
+}
+
+export interface NpmPackage {
+  name: string
+  version: string
+  filename: string | null
+  size: number | null
+  size_human: string
+  modified: string | null
+  /** Null means "metadata only" — no tarball on disk to serve yet. */
+  download_url: string | null
+  description: string | null
+  tags: string[]
+}
+
+export interface NpmCatalog {
+  root: string
+  exists: boolean
+  upstream: string
+  package_count: number
+  packages: NpmPackage[]
+}
+
+export interface ModelRoute {
+  name: string
+  provider: string
+  base_url: string
+  model: string
+  aliases: string[]
+  path: string
+  enabled: boolean
+  description: string | null
+  tags: string[]
+}
+
+export interface ModelRoutes {
+  source: string
+  exists: boolean
+  error: string | null
+  version?: number | null
+  routes: ModelRoute[]
+}
+
 // ── Endpoints ────────────────────────────────────────────────────────
 
 export async function fetchSession(): Promise<SessionInfo> {
@@ -177,6 +252,23 @@ export async function refreshAdminStats(): Promise<void> {
 
 export async function fetchHealth(): Promise<HealthInfo> {
   const { data } = await http.get<HealthInfo>('/health')
+  return data
+}
+
+// ── Artifact hub ─────────────────────────────────────────────────────
+
+export async function fetchToolCatalog(): Promise<ToolCatalog> {
+  const { data } = await http.get<ToolCatalog>('/tools')
+  return data
+}
+
+export async function fetchNpmCatalog(): Promise<NpmCatalog> {
+  const { data } = await http.get<NpmCatalog>('/npm')
+  return data
+}
+
+export async function fetchModelRoutes(): Promise<ModelRoutes> {
+  const { data } = await http.get<ModelRoutes>('/models')
   return data
 }
 

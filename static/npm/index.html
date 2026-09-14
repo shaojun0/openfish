@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>npm — {{ server_name }}</title>
+    <style>
+        body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:960px;margin:40px auto;padding:0 20px;line-height:1.6;color:#24292f}
+        h1{border-bottom:2px solid #eee;padding-bottom:10px}
+        h2{margin-top:30px;color:#333;font-size:1.05em}
+        table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+        th,td{padding:6px 10px;text-align:left;border-bottom:1px solid #eee}
+        th{background:#f6f8fa}
+        tr:hover{background:#f6f8fa}
+        a{color:#0366d6;text-decoration:none}
+        a:hover{text-decoration:underline}
+        code{background:#f6f8fa;padding:2px 6px;border-radius:3px;font-size:12px}
+        pre{background:#f6f8fa;border:1px solid #eee;border-radius:6px;padding:12px;overflow-x:auto}
+        pre code{background:none;padding:0}
+        .stats{color:#666;font-size:.9em;font-weight:400}
+        .nav{margin-bottom:20px}
+        .nav a{padding:4px 10px;background:#0366d6;color:#fff;border-radius:4px;font-size:13px}
+        .nav a:hover{text-decoration:none;opacity:.9}
+        .note{background:#fff8e1;border:1px solid #ffe082;border-radius:6px;padding:10px 14px;font-size:13px}
+        .size{text-align:right;white-space:nowrap}
+        .desc{color:#666;font-size:12px}
+        .tag{display:inline-block;padding:1px 6px;border-radius:10px;font-size:11px;background:#eef2f6;color:#555}
+        .tag--ok{background:#e6f4ea;color:#137333}
+        .empty{color:#888;padding:24px 0}
+        .footer{margin-top:40px;padding-top:20px;border-top:1px solid #eee;color:#888;font-size:.85em}
+    </style>
+</head>
+<body>
+    <div class="nav">
+        <a href="{{ spa_url }}">← 控制台</a>
+    </div>
+    <h1>&#x1f4e6; npm 目录</h1>
+    <p class="note"><strong>脚手架：</strong>npm registry 协议（packument / tarball 协商）尚未实现。
+       本页是该星号目录的<strong>静态索引</strong>，列出本地已有的包；接入后
+       <code>npm config set registry</code> 即可指向本服务。</p>
+    <p class="stats">
+        registry 基址 <code>{{ base_url }}</code>
+        {% if upstream %}&middot; 上游镜像 <code>{{ upstream }}</code>{% endif %}
+        &middot; {{ package_count }} 个包
+    </p>
+
+    <h2>接入方式</h2>
+    <pre><code>npm config set registry {{ base_url }}
+npm ping                       # 走 {{ base_url }}-/ping
+npm view &lt;包名&gt; --registry {{ base_url }}</code></pre>
+
+    <h2>标准索引端点</h2>
+    <table>
+        <thead>
+            <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+            <tr><td>GET</td><td><a href="{{ all_url }}"><code>/-/all</code></a></td><td>全量索引 JSON（npm 旧版约定，npm 官方已弃用但私有仓库普遍保留）</td></tr>
+            <tr><td>GET</td><td><a href="{{ base_url }}?format=json"><code>/?format=json</code></a></td><td>同上，便于脚本抓取</td></tr>
+            <tr><td>GET</td><td><a href="{{ ping_url }}"><code>/-/ping</code></a></td><td>健康检查，返回 <code>{}</code></td></tr>
+            <tr><td>GET</td><td><code>/-/v1/search?text=…</code></td><td>npm 搜索 v1（规划中，取代 <code>/-/all</code>）</td></tr>
+        </tbody>
+    </table>
+
+    <h2>包清单</h2>
+    {% if not packages %}
+    <p class="empty">本地 npm 目录为空。把 <code>*.tgz</code> 或 <code>catalog.json</code> 放进 NPM_DIR 后刷新即可。</p>
+    {% else %}
+    <table>
+        <thead>
+            <tr>
+                <th>包名</th>
+                <th>版本</th>
+                <th class="size">大小</th>
+                <th>更新时间</th>
+                <th>状态</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for p in packages %}
+            <tr>
+                <td>
+                    {% if p.download_url %}<a href="{{ p.download_url }}"><code>{{ p.name }}</code></a>
+                    {% else %}<code>{{ p.name }}</code>{% endif %}
+                    {% if p.description %}<div class="desc">{{ p.description }}</div>{% endif %}
+                </td>
+                <td>{{ p.version }}</td>
+                <td class="size">{{ p.size_human or '—' }}</td>
+                <td>{{ p.modified[:10] if p.modified else '—' }}</td>
+                <td>
+                    {% if p.download_url %}<span class="tag tag--ok">可下载</span>
+                    {% else %}<span class="tag">仅元数据</span>{% endif %}
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    <div class="footer">{{ server_name }} &middot; 索引更新于 {{ updated }}</div>
+</body>
+</html>

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Tools — {{ server_name }}</title>
+    <style>
+        body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:960px;margin:40px auto;padding:0 20px;line-height:1.6;color:#24292f}
+        h1{border-bottom:2px solid #eee;padding-bottom:10px}
+        h2{margin-top:30px;color:#333;font-size:1.05em}
+        table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+        th,td{padding:6px 10px;text-align:left;border-bottom:1px solid #eee}
+        th{background:#f6f8fa}
+        tr:hover{background:#f6f8fa}
+        a{color:#0366d6;text-decoration:none}
+        a:hover{text-decoration:underline}
+        code{background:#f6f8fa;padding:2px 6px;border-radius:3px;font-size:12px}
+        pre{background:#f6f8fa;border:1px solid #eee;border-radius:6px;padding:12px;overflow-x:auto}
+        pre code{background:none;padding:0}
+        .stats{color:#666;font-size:.9em;font-weight:400}
+        .nav{margin-bottom:20px}
+        .nav a{padding:4px 10px;background:#0366d6;color:#fff;border-radius:4px;font-size:13px}
+        .nav a:hover{text-decoration:none;opacity:.9}
+        .size{text-align:right;white-space:nowrap}
+        .desc{color:#666;font-size:12px}
+        .empty{color:#888;padding:24px 0}
+        .footer{margin-top:40px;padding-top:20px;border-top:1px solid #eee;color:#888;font-size:.85em}
+    </style>
+</head>
+<body>
+    <div class="nav">
+        <a href="{{ spa_url }}">← 控制台</a>
+    </div>
+    <h1>&#x1f9f0; 工具目录</h1>
+    <p>按分类整理的内网工具，点击文件名即可下载。这是一个静态索引：脚本可以直接解析它。</p>
+    <p class="stats">{{ categories|length }} 个分类 &middot; {{ tool_count }} 个文件</p>
+
+    <h2>用法</h2>
+    <pre><code># 下载某个工具
+curl -O {{ base_url }}&lt;分类&gt;/&lt;文件名&gt;
+
+# 取 JSON 清单（与 /api/v1/tools 相同）
+curl -H 'Accept: application/json' {{ base_url }}</code></pre>
+
+    {% if not categories %}
+    <p class="empty">工具目录为空。把文件放进 TOOLS_DIR 下的分类目录后刷新即可。</p>
+    {% endif %}
+
+    {% for c in categories %}
+    <h2>{{ c.name or c.key }}{% if c.description %} <span class="stats">— {{ c.description }}</span>{% endif %}</h2>
+    {% if c.tools %}
+    <table>
+        <thead>
+            <tr>
+                <th>名称</th>
+                <th>文件名</th>
+                <th class="size">大小</th>
+                <th>更新时间</th>
+                <th>SHA256</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for t in c.tools %}
+            <tr>
+                <td>
+                    <a href="{{ url_for('hub.download_tool', filepath=t.relative_path) }}">{{ t.name }}</a>
+                    {% if t.description %}<div class="desc">{{ t.description }}</div>{% endif %}
+                </td>
+                <td><code>{{ t.filename }}</code></td>
+                <td class="size">{{ t.size_human }}</td>
+                <td>{{ t.modified[:10] if t.modified else '' }}</td>
+                <td><code title="{{ t.sha256 or '' }}">{{ (t.sha256[:12] ~ '…') if t.sha256 else '' }}</code></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty">该分类下暂无文件。</p>
+    {% endif %}
+    {% endfor %}
+
+    <div class="footer">{{ server_name }} &middot; <a href="{{ base_url }}?format=json">JSON</a></div>
+</body>
+</html>

@@ -3,10 +3,20 @@ import { fileURLToPath, URL } from 'node:url'
 import vue from '@vitejs/plugin-vue'
 import { defineConfig } from 'vite'
 
+// Human-readable build stamp, shown in the sidebar footer.  It exists so
+// "am I looking at the new bundle or a cached one?" is answerable at a glance —
+// pass BUILD_ID to pin it from CI, otherwise it is the build time.
+const buildId =
+  process.env.BUILD_ID || `${new Date().toISOString().replace('T', ' ').slice(0, 16)}Z`
+
 // Flask serves the built bundle from /static/dist/ and the SPA shell at the
 // application root, so `base` (asset URLs) and the router history base differ.
 export default defineConfig({
   plugins: [vue()],
+
+  define: {
+    __BUILD_ID__: JSON.stringify(buildId),
+  },
 
   resolve: {
     alias: {

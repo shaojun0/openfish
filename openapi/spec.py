@@ -27,6 +27,8 @@ DOCUMENTED_PREFIXES: tuple[str, ...] = (
     "/simple/",
     "/packages/",
     "/python-builds/",
+    "/tools/",
+    "/npm/",
     "/health",
 )
 
@@ -40,6 +42,7 @@ TAGS: list[dict[str, str]] = [
     {"name": "API keys", "description": "Issue and revoke the tokens clients authenticate with."},
     {"name": "Administration", "description": "Server-wide aggregates. Requires the admin role."},
     {"name": "Python builds", "description": "Prebuilt CPython mirror consumed by `uv python install`."},
+    {"name": "Hub", "description": "Intranet artifact hub — tools catalog, npm scaffold and model routing."},
     {"name": "Upload", "description": "Publish packages, as `twine` does."},
 ]
 

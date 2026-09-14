@@ -1,0 +1,51 @@
+{
+  "categories": {
+    "python": {
+      "name": "Python 生态",
+      "description": "pip / uv 等 Python 工具链的内网接入脚本",
+      "icon": "Box"
+    },
+    "ops": {
+      "name": "运维脚本",
+      "description": "巡检、备份、日志等日常运维脚本",
+      "icon": "Tools"
+    },
+    "net": {
+      "name": "网络与镜像",
+      "description": "代理、镜像源与网络诊断脚本",
+      "icon": "Connection"
+    },
+    "misc": {
+      "name": "杂项",
+      "description": "环境变量模板等零散文件",
+      "icon": "Files"
+    }
+  },
+  "tools": {
+    "python/pip-intranet.sh": {
+      "name": "pip 内网源配置",
+      "description": "把 pip 的 index-url / trusted-host 指向内网 openfish",
+      "tags": ["python", "pip"]
+    },
+    "python/uv-mirror.sh": {
+      "name": "uv CPython 镜像",
+      "description": "导出 UV_PYTHON_INSTALL_MIRROR，让 uv 从内网下载解释器",
+      "tags": ["python", "uv"]
+    },
+    "ops/check-openfish-health.sh": {
+      "name": "openfish 健康巡检",
+      "description": "调用 /health 并打印结果",
+      "tags": ["ops", "health"]
+    },
+    "net/npm-intranet.sh": {
+      "name": "npm 内网源配置",
+      "description": "把 npm registry 指向内网（代理接入后生效）",
+      "tags": ["npm", "network"]
+    },
+    "misc/dsh-intranet.env.example": {
+      "name": "DSH 环境变量模板",
+      "description": "内网 DSH / openfish 常用环境变量示例",
+      "tags": ["dsh", "env"]
+    }
+  }
+}

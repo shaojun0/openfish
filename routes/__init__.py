@@ -7,6 +7,8 @@ Layout
 ``/api/v1/*``         JSON contract consumed by the Vue SPA and by API-key clients
 ``/simple/*``         PEP 503 / PEP 691 — consumed by pip, uv, twine
 ``/python-builds/*``  uv CPython mirror
+``/tools/*``          tool index + downloads (``/api/v1/tools`` for JSON)
+``/npm/*``            npm index, ``/-/all``, ``/-/ping`` + tarball downloads
 ``/openapi.json``     OpenAPI 3.1 description; ``/docs`` and ``/llms.txt`` alongside
 ``/auth/*``           OAuth2 login flow
 ``/*``                the SPA shell (see ``routes/spa.py``)
@@ -29,6 +31,7 @@ def register_all(app):
     from routes.discovery import discovery_bp
     from routes.spa import spa_bp
     from routes.access import access_bp
+    from routes.hub import hub_bp
 
     prefix = settings.server.route_prefix
     api = prefix + "/api/v1"
@@ -65,6 +68,13 @@ def register_all(app):
     app.register_blueprint(api_keys_bp, url_prefix=api)
     app.register_blueprint(admin_bp, url_prefix=api + "/admin")
     app.register_blueprint(access_bp, url_prefix=api + "/admin")
+
+    # ── Artifact hub: tools / npm / model routing ───────────────────
+    # A single blueprint carries both the JSON catalog under `/api/v1/*` and
+    # the browser-facing `/tools/<path>` download link, so it is registered at
+    # the bare prefix and declares its full paths internally.  Each view keeps
+    # its own `@require_permission` guard — there is no blueprint-wide guard.
+    app.register_blueprint(hub_bp, url_prefix=prefix)
 
     # ── SPA shell. Machine routes above win by rule specificity, so this
     #    only ever handles browser-facing URLs.

@@ -62,6 +62,27 @@ const shortcuts = computed(() => [
     to: '/packages',
   },
   {
+    key: 'npm',
+    title: t('home.quickNpm'),
+    description: t('home.quickNpmDesc'),
+    icon: 'ShoppingBag',
+    to: '/npm',
+  },
+  {
+    key: 'tools',
+    title: t('home.quickTools'),
+    description: t('home.quickToolsDesc'),
+    icon: 'Tools',
+    to: '/tools',
+  },
+  {
+    key: 'models',
+    title: t('home.quickModels'),
+    description: t('home.quickModelsDesc'),
+    icon: 'Cpu',
+    to: '/models',
+  },
+  {
     key: 'keys',
     title: t('home.quickKeys'),
     description: t('home.quickKeysDesc'),
