@@ -5,12 +5,14 @@
 #   调试容器:  docker compose --profile debug up -d
 #              docker exec -it openfish-backend-debug bash
 #   可选数据库: docker compose --profile db up -d
+#              （要让应用真正切到 PostgreSQL，见 docker/README.md 的
+#                "PostgreSQL" 一节；仅起容器不会改变后端行为）
 #
 #   四个服务，各自独立构建：
 #     frontend  Vue 3 SPA（node 构建 → nginx 静态托管）   ← frontend/Dockerfile
 #     backend   Flask + gunicorn（API 与各生态协议）      ← backend/Dockerfile
 #     nginx     边缘网关：唯一对外入口，按路径分流          ← docker/nginx/nginx.conf
-#     db        PostgreSQL（profile: db，预留，应用暂未接入）
+#     db        PostgreSQL（profile: db，可选后端）
 #
 #   所有密钥/口令都通过同目录下的 .env 注入（见 .env.example），
 #   不要把真实凭据写进本文件或提交到仓库。
@@ -25,6 +27,11 @@ x-backend-env: &backend-env
   PORT: "8080"
   PACKAGES_DIR: ${PACKAGES_DIR:-/app/share/cpypiserver_public/packages}
   PYTHON_BUILDS_DIR: ${PYTHON_BUILDS_DIR:-/app/share/cpypiserver_public/cpython}
+  # 数据库：留空 = 使用 API_KEYS_FILE 指向的 SQLite 文件（默认，见下）。
+  # 设为 PostgreSQL URL（postgresql+psycopg://user:pass@db:5432/openfish）
+  # 即把 API key / 用户 / 角色 / 统计整体切到 db 服务。改这里的同时请用
+  # --profile db 启动数据库，参考 docker/README.md。
+  DATABASE_URL: ${DATABASE_URL:-}
   API_KEYS_FILE: /app/data/cpypiserver.db
   # 对本机可达的绝对基址；设备授权流程用它拼 verification_uri。
   # 走本 compose 的 nginx 时留空即可（从 X-Forwarded-* 推导）。
@@ -178,9 +185,13 @@ services:
       retries: 3
 
   # ── 可选数据库（profile: db）────────────────────────────────────
-  # 目前**应用并未接入**：授权/API key/统计仍存在 backend/data 下的 SQLite。
-  # 这个服务是给后续多实例/高可用扩展预留的，启用它不会改变应用行为。
+  # 应用**默认不连它**：授权/API key/统计仍存在 backend/data 下的 SQLite。
+  # 要让后端真正切到 PostgreSQL，除了启动本服务，还必须把 DATABASE_URL 指过来
+  # （在 docker/.env 里设置，compose 会注入 backend 容器）：
+  #   DATABASE_URL=postgresql+psycopg://openfish:<口令>@db:5432/openfish
   #   docker compose --profile db up -d
+  # 迁移现有 SQLite 数据用 backend 的 cli.py，见 docker/README.md。
+  # 也可以加 -f docker-compose.postgres.yml 让 backend 等 db 健康后再启动。
   db:
     image: postgres:16-alpine
     container_name: openfish-db

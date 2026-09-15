@@ -1,6 +1,7 @@
 """API Key Manager — CRUD for Bearer tokens used by pip/uv/twine.
 
-Storage: SQLite via SQLAlchemy.  Keys SHA256-hashed; raw key only revealed once.
+Storage: SQLAlchemy — SQLite by default, PostgreSQL when ``DATABASE_URL`` is
+set.  Keys SHA256-hashed; raw key only revealed once.
 """
 
 from __future__ import annotations

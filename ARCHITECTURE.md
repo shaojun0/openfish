@@ -29,7 +29,7 @@ openfish/
 app.py                     创建 Flask 应用，禁用内置 static handler
   └─ extensions/           插件注册表（拓扑序初始化）
        ├─ error_handlers   401 → OAuth 跳转 / Basic 挑战
-       ├─ database         SQLAlchemy + SQLite（WAL）
+       ├─ database         SQLAlchemy（SQLite WAL / PostgreSQL）
        ├─ cache            flask-caching
        ├─ index_ext        watchdog 维护内存包索引
        └─ stats_refresh    后台统计刷新线程
@@ -50,7 +50,7 @@ app.py                     创建 Flask 应用，禁用内置 static handler
 | 模型 | `models/` | SQLAlchemy 表：users / roles / permissions / user_roles / role_permissions / api_keys / stats |
 | 描述 | `openapi/` | OpenAPI 3.1 元数据注册表、spec 生成、渲染器 |
 | 模板 | `static/<生态>/*.html` | **机器面** Jinja 模板（`pip`/`uv`/`nvm` 直接解析，不跑 JS），由 Flask 自带模板加载器（`template_folder="static"`）渲染，**不对外公开** |
-| 门禁 | `scripts/check_*.py` | 12 个离线回归门禁 |
+| 门禁 | `scripts/check_*.py` | 13 个离线回归门禁 |
 
 ### 代码约定（熵减规则）
 
@@ -138,7 +138,7 @@ app.py                     创建 Flask 应用，禁用内置 static handler
 | `nginx` | `nginx:1.27-alpine` | `20416 → 80` | **唯一对外入口**，按路径分流 |
 | `backend` | `openfish-backend:latest` | 不发布（`expose 8080`） | Flask + gunicorn，API 与各生态协议 |
 | `frontend` | `openfish-frontend:latest` | 不发布（`expose 80`） | SPA 静态托管 |
-| `db` | `postgres:16-alpine` | 不发布（`expose 5432`） | `profile: db`，**预留，应用尚未接入** |
+| `db` | `postgres:16-alpine` | 不发布（`expose 5432`） | `profile: db`，可选后端；设 `DATABASE_URL` 后应用整体切过去 |
 
 另有 `backend-debug`（`profile: debug`，空闲 bash 容器，端口 20417）。
 
@@ -243,13 +243,15 @@ npm run dev                         # http://127.0.0.1:5173，代理到后端
 npm run build                       # → frontend/dist
 npm run smoke                       # jsdom 全路由冒烟
 
-# ── 门禁（11 个，均可从任意目录运行）───────────────────────────
+# ── 门禁（13 个，均可从任意目录运行）───────────────────────────
 backend/.venv/bin/python backend/scripts/check_openapi.py
 #   check_openapi / check_auth_guards / check_auth_disabled / check_rbac /
-#   check_markdown / check_permission_catalog / check_permission_labels /
-#   check_device_flow / check_npm_proxy / check_docker_proxy / check_debian_proxy /
-#   check_lint（pyflakes：未定义名 / 死导入）
+#   check_database / check_markdown / check_permission_catalog /
+#   check_permission_labels / check_device_flow / check_npm_proxy /
+#   check_docker_proxy / check_debian_proxy / check_lint
+#   （pyflakes：未定义名 / 死导入）
 #   另有 check_contract.py，需要对着活服务跑（--base-url + --api-key）
+#   check_database.py 还支持 --url <PostgreSQL URL> --yes，对任一后端回归
 
 # ── 容器（需要 Docker Compose v2；仓库自带的 docker-compose 1.25 解析不了）──
 cd docker
@@ -267,9 +269,18 @@ docker build -t openfish-frontend frontend/
 
 ## 验证证据
 
-* **12 个离线门禁全部通过**（从仓库根运行，与迁移前基线一致；`check_openapi`
-  现在还会执行完整的 OpenAPI 3.1 结构校验，新增的 `check_lint` 用 pyflakes
-  兜住"改名后漏改调用点"这类只有单条路由才炸的静默错误）。
+* **13 个离线门禁全部通过**（从仓库根运行，与迁移前基线一致；`check_openapi`
+  现在还会执行完整的 OpenAPI 3.1 结构校验，`check_lint` 用 pyflakes
+  兜住"改名后漏改调用点"这类只有单条路由才炸的静默错误，新增的
+  `check_database` 覆盖引擎选择、旧库补列迁移与目标后端的完整往返）。
+* **PostgreSQL 后端端到端验证**：用真实 `postgres:16-alpine`（16.15）实例，
+  `check_database.py --url postgresql+psycopg://…` 与 `check_rbac.py`
+  （`DATABASE_URL` 指向该实例）全部通过——建表、superuser 冷启动、用户 /
+  角色 / 权限、API key 的创建与校验、统计计数自增、删除级联，行为与 SQLite
+  一致；`/health` 报告 `{"dialect": "postgresql", "driver": "psycopg"}`。
+  另在一个只建了旧版 `api_keys`（无 `user_id`）的 PostgreSQL 库里验证了
+  轻量迁移：`ALTER TABLE … ADD COLUMN user_id INTEGER REFERENCES users(id)`、
+  索引与外键均正确建立，重复执行为幂等无操作。
 * **两个镜像构建成功**：`backend/Dockerfile`（pip 依赖 + gunicorn）、
   `frontend/Dockerfile`（`npm ci` + vite build → nginx）。
 * **两个 nginx 配置 `nginx -t` 通过**，包括 `limit_except POST` 的根路由写法和
@@ -287,9 +298,15 @@ docker build -t openfish-frontend frontend/
 
 ## 已知取舍与后续
 
-1. **`db` 服务尚未接线。** 授权、API key、统计仍走 `backend/data/cpypiserver.db`
-   （SQLite）。启用 `--profile db` 不改变应用行为。要真正切换，需要引入
-   按引擎可选的连接层并迁移 `models/` 与 `authz` 的会话管理。
+1. **两个数据库后端由 URL 选择。** 留空 `DATABASE_URL` 时仍是
+   `backend/data/cpypiserver.db`（SQLite，WAL）；设为 PostgreSQL URL 后，
+   users / roles / permissions / api_keys / api_key_stats 整体搬到服务端，
+   没有"两张表在 SQLite、三张在 PostgreSQL"的混合模式（跨库删除无法回滚）。
+   切换不搬运数据：新库首次启动建空表，账号与角色用 `cli.py` 重建，API key
+   只能重发（库里只有 SHA-256）。`scripts/check_database.py` 对任一后端跑
+   完整的 bootstrap / 用户 / 角色 / key / 统计回归。
+   `docker-compose.postgres.yml` 只是让 backend 等 db 健康检查的覆盖层；
+   应用自身有最多 60s 的连接重试，不用它也起得来。
 2. **SPA 壳匿名可取。** 见上文"安全取舍"，恢复旧行为的改法已写在边缘配置注释里。
 3. **gunicorn 单 worker 是刻意的。** 每个 worker 各自缓存 RBAC 授权集，多 worker
    会把"改角色立即生效"变成最多 30s 的最终一致；要提高并发优先加 `--threads`。

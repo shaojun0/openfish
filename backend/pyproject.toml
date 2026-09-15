@@ -13,6 +13,10 @@ dependencies = [
     "flask>=3.1",
     "flask-pydantic>=0.14.0",
     "markdown-it-py>=3.0",
+    # PostgreSQL driver (psycopg 3).  The ``binary`` extra bundles libpq, so the
+    # image needs no libpq-dev / build toolchain.  Never imported while
+    # DATABASE_URL is empty and SQLite is in use.
+    "psycopg[binary]>=3.1",
     "pydantic-settings>=2.14.2",
     "python-magic>=0.4.27",
     "requests>=2.34.2",

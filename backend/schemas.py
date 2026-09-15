@@ -303,6 +303,13 @@ class AdminStats(BaseModel):
     keys: list[AdminKeyEntry]
 
 
+class DatabaseInfo(BaseModel):
+    """Which backend the API keys / RBAC / statistics layer is bound to."""
+
+    dialect: str = Field(description="sqlite | postgresql")
+    driver: str = Field(description="SQLAlchemy driver, e.g. pysqlite / psycopg")
+
+
 class HealthInfo(BaseModel):
     """Result of `GET /health`."""
 
@@ -310,6 +317,7 @@ class HealthInfo(BaseModel):
     server: str
     package_count: int
     packages_dir: str
+    database: DatabaseInfo
 
 
 class BuildMirrorHealth(BaseModel):

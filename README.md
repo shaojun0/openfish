@@ -34,7 +34,7 @@ the codebase.
   through the **in-browser Markdown editor** (formatting toolbar + live
   preview). See [Ecosystem documentation](#ecosystem-documentation).
 - **API keys** — issue, list, revoke and track per-key usage from a web
-  dashboard; keys are stored hashed in SQLite.
+  dashboard; keys are stored hashed, in SQLite or PostgreSQL.
 - **Pluggable authentication** — HTTP Basic, twine-style `__token__` Basic,
   Bearer API keys, and OAuth2 token introspection.
 - **Database-backed RBAC** — the five classic tables (`users`, `roles`,
@@ -171,7 +171,7 @@ Four services are defined, each built from its own directory:
 | `nginx`          | `openfish-nginx`        | `20416` → 80       | `docker/nginx/`       | **The only public entry point** — routes by path             |
 | `backend`        | `openfish-backend`      | *(internal 8080)*  | `backend/Dockerfile`  | Flask + gunicorn: JSON API, registry and mirror protocols    |
 | `frontend`       | `openfish-frontend`     | *(internal 80)*    | `frontend/Dockerfile` | Vue SPA built by node, served as static files by nginx       |
-| `db`             | `openfish-db`           | *(internal 5432)*  | `postgres:16-alpine`  | `profile: db` — **reserved**, the app does not use it yet    |
+| `db`             | `openfish-db`           | *(internal 5432)*  | `postgres:16-alpine`  | `profile: db` — optional PostgreSQL backend; set `DATABASE_URL` to use it |
 
 Reach the whole application through the edge port:
 
@@ -209,13 +209,17 @@ Optional profiles:
 docker compose --profile debug up -d          # idle backend bash box on 20417
 docker exec -it openfish-backend-debug bash
 
-docker compose --profile db up -d             # PostgreSQL, reserved for later
+docker compose --profile db up -d             # + PostgreSQL (see below to switch)
 ```
 
-> **About the `db` service.** It is defined so the layout is ready for a future
-> multi-instance deployment, but **the application does not connect to it**:
-> authorization, API keys and statistics still live in the SQLite database at
-> `backend/data/cpypiserver.db`. Enabling the profile changes nothing today.
+> **About the `db` service.** Starting it alone changes nothing: the backend uses
+> SQLite until `DATABASE_URL` points at PostgreSQL. Set
+> `DATABASE_URL=postgresql+psycopg://openfish:<password>@db:5432/openfish` in
+> `docker/.env` and the whole users / RBAC / API-key / statistics layer moves to
+> the server together. SQLite (the file at `API_KEYS_FILE`, default
+> `backend/data/cpypiserver.db`) stays the default, so an existing deployment is
+> unaffected. `docker/README.md` has the switch and data-migration walkthrough;
+> `backend/scripts/check_database.py` proves a target backend end to end.
 
 ## Configuration
 
@@ -242,7 +246,8 @@ Templates are provided at `backend/.env.example` (local development) and
 | `PACKAGES_DIR`          | `<backend>/packages`   | Where uploaded packages live                       |
 | `PYTHON_BUILDS_DIR`     | `<project>/docker/python-build-standalone` | Prebuilt CPython releases    |
 | `NODE_BUILDS_DIR`       | `<project>/docker/node-builds` | Prebuilt Node.js mirror (`nodejs.org/dist` layout) |
-| `API_KEYS_FILE`         | `<backend>/data/cpypiserver.db` | SQLite database for API keys and stats     |
+| `DATABASE_URL`          | *(empty)* = SQLite at `API_KEYS_FILE` | SQLAlchemy URL for users / RBAC / API keys / statistics. Set to `postgresql+psycopg://user:pass@host:5432/openfish` to run on PostgreSQL. A bare `postgresql://` is upgraded to the bundled psycopg driver; an explicit `+psycopg2`/`+pg8000` is respected |
+| `API_KEYS_FILE`         | `<backend>/data/cpypiserver.db` | SQLite database for API keys and stats — used only while `DATABASE_URL` is empty |
 | `FRONTEND_DIST_DIR`     | *(empty)* = `<backend>/static/dist` | Directory holding the built SPA for Flask to serve. In the split Docker deployment the `frontend` container serves it instead, so this stays empty |
 | `STORAGE__OVERWRITE`    | `false`                | Allow re-uploading an existing filename            |
 | `MAX_CONTENT_LENGTH`    | `104857600` (100 MiB)  | Maximum upload size                                |
@@ -314,7 +319,8 @@ are non-empty, so an unconfigured deployment cannot be entered with `":"`.
 
 ## Roles and permissions
 
-Authorization is five tables in the same SQLite file as the API keys:
+Authorization is five tables, in the same database as the API keys (SQLite by
+default, PostgreSQL when `DATABASE_URL` is set):
 
 ```
 users ──< user_roles >── roles ──< role_permissions >── permissions
@@ -1014,6 +1020,30 @@ the tables; and that neither of the two escalation guards can be talked around
 Both scripts exit non-zero on failure and were each verified to fail when the
 bug they guard against is reintroduced.
 
+### Keeping the database honest
+
+The schema runs on two engines — SQLite (default) and PostgreSQL — so the engine
+choice and the one hand-written migration are pinned by a gate of their own:
+
+```bash
+# SQLite (default): URL selection, legacy migration, a full round trip
+python backend/scripts/check_database.py
+
+# The same round trip against a real PostgreSQL server
+python backend/scripts/check_database.py \
+    --url postgresql+psycopg://openfish:…@127.0.0.1:5432/openfish --yes
+```
+
+With no arguments it is an offline gate: it checks that `resolve_database_url`
+maps a bare path to SQLite and upgrades a bare `postgresql://` to the driver we
+ship, builds a legacy-shaped SQLite file to prove the `api_keys.user_id`
+migration still applies, then drives bootstrap / user / role / API key /
+statistics against a throwaway file. A non-SQLite `--url` runs that same round
+trip against a real server, and `--yes` acknowledges that it writes (it seeds a
+superuser and a test account) so it cannot be aimed at production by accident.
+`check_rbac.py` honours `DATABASE_URL` as well, so the whole authorization model
+can be replayed against PostgreSQL without changing a line.
+
 ### Keeping the code itself honest
 
 The gates above check behaviour. One more checks the source, because a refactor
@@ -1121,8 +1151,9 @@ backend/                        the Flask application — one build unit
 │                               validation
 ├── schemas.py                  request + response models (single source for /openapi.json)
 ├── scripts/                    verification gates (check_openapi, check_contract,
-│                               check_auth_guards, check_rbac, check_markdown, and
-│                               one offline conformance gate per proxy)
+│                               check_auth_guards, check_rbac, check_database,
+│                               check_markdown, and one offline conformance gate
+│                               per proxy)
 ├── static/                     machine-facing Jinja templates grouped by ecosystem
 │                               (python/ node/ tools/ npm/ docker/ debian/ docs/).
 │                               Not a public directory — see Security notes.
@@ -1156,7 +1187,7 @@ docker/                         orchestration — no application code
     ├── node-builds/            nodejs.org/dist-shaped Node.js mirror
     ├── docker-images/          image tarballs + compose/Dockerfile
     ├── debian/                 local .deb files + apt snippets
-    ├── data                    SQLite DB + proxy caches (→ backend/data)
+    ├── data                    DB + proxy caches (→ backend/data)
     └── config/model_routes.json  (→ backend/config/model_routes.json)
 
 integrations/                   downstream *client* code, versioned here because it is

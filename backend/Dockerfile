@@ -31,9 +31,13 @@ ENV PYTHONUNBUFFERED=1 \
 # pyproject.toml itself changes.
 WORKDIR /app
 COPY pyproject.toml .
-RUN pip install -i https://mirrors.aliyun.com/pypi/simple/ --no-cache-dir \
-    $(python -c "import tomllib; deps = tomllib.loads(open('/app/pyproject.toml','r').read())['project']['dependencies']; print(' '.join(deps))") \
-    "gunicorn>=22"
+# Dependencies go through a generated requirements file rather than an unquoted
+# `$(python -c …)` expansion: `psycopg[binary]>=3.1` contains shell-glob
+# metacharacters, and a requirements file is immune to word-splitting and
+# pathname expansion.
+RUN python -c "import tomllib; deps = tomllib.loads(open('/app/pyproject.toml').read())['project']['dependencies']; open('/tmp/requirements.txt', 'w').write('\n'.join([*deps, 'gunicorn>=22']) + '\n')" \
+    && pip install -i https://mirrors.aliyun.com/pypi/simple/ --no-cache-dir \
+       -r /tmp/requirements.txt
 
 # ── Application code ────────────────────────────────────────────────
 # Everything not excluded by backend/.dockerignore lands here.

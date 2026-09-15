@@ -1,0 +1,33 @@
+# ── openfish PostgreSQL 覆盖层 ──────────────────────────────────────
+# 在 docker-compose.yml 之上，只做一件事：把 backend / backend-debug 的启动
+# 顺序绑定到 db 容器的健康检查。
+#
+# 应用本身已经内置了最多 60s 的连接重试（extensions/database.py），即使不加
+# 这一层，POSTGRES 晚几秒就绪也不会让后端崩溃；这一层让依赖关系是声明式的，
+# 启动日志更干净，也避免编排器的 restart 计数被无谓地消耗。
+#
+# 用法（--profile db 是必须的：否则 backend 依赖的 db 不在 compose 模型里，
+#        compose 会直接报 "depends on undefined service"）：
+#
+#   1) docker/.env 里设置数据库口令，并把 DATABASE_URL 指向 db 服务：
+#        POSTGRES_DB=openfish
+#        POSTGRES_USER=openfish
+#        POSTGRES_PASSWORD=<强口令>
+#        DATABASE_URL=postgresql+psycopg://openfish:<强口令>@db:5432/openfish
+#   2) 启动：
+#        docker compose --profile db \
+#          -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
+#
+# 现有 SQLite 里的账号 / 角色 / API key 不会自动搬过去：用 cli.py 把两边对齐，
+# 见 docker/README.md 的 “PostgreSQL” 一节。
+
+services:
+  backend:
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend-debug:
+    depends_on:
+      db:
+        condition: service_healthy

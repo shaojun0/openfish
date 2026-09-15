@@ -2,8 +2,10 @@
 """Administrative CLI — roles, grants and the superuser escape hatch.
 
 Runs without a Flask app: no watchdog indexes, no stats-refresh thread, no
-network listener.  It talks to the SQLite file directly through the same
-``AuthzService`` the server uses, so the two can never disagree about a rule.
+network listener.  It talks to the configured database directly — the SQLite
+file at ``API_KEYS_FILE``, or the PostgreSQL server named by ``DATABASE_URL`` —
+through the same ``AuthzService`` the server uses, so the two can never
+disagree about a rule.
 
 Typical first run on a fresh deployment::
 
@@ -13,6 +15,12 @@ Typical first run on a fresh deployment::
 Or inside Docker::
 
     docker exec openfish-backend python /app/cli.py create-admin zhangsan
+
+``--db`` overrides the target.  It accepts either a SQLite file path (the
+historical form) or any SQLAlchemy URL, including a PostgreSQL one::
+
+    python cli.py --db data/other.db list-users
+    python cli.py --db postgresql+psycopg://openfish:pass@db:5432/openfish list-users
 
 Every command is idempotent, so running one twice is harmless.
 """
@@ -32,9 +40,9 @@ from extensions.database import Session, init_engine  # noqa: E402
 from services.authz import AuthzService, bootstrap  # noqa: E402
 
 
-def build_authz(db_path: str | None) -> AuthzService:
+def build_authz(database: str | None) -> AuthzService:
     """Engine + session + seeded authorization tables, with no Flask app."""
-    engine = init_engine(db_path or settings.storage.api_keys_file)
+    engine = init_engine(database)
     Session.configure(bind=engine)
     authz = AuthzService(Session)
     # Seed the permission catalog and the built-in roles so the commands below
@@ -213,7 +221,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--db", default=None,
-        help="Path to the SQLite file (default: the configured API_KEYS_FILE).",
+        help=(
+            "What to operate on: a SQLite file path, or a SQLAlchemy URL such "
+            "as postgresql+psycopg://user:pass@host:5432/openfish.  Defaults to "
+            "DATABASE_URL, or the SQLite file "
+            f"{settings.storage.api_keys_file} when DATABASE_URL is unset."
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

@@ -134,7 +134,8 @@ class AuthzService:
 
     #: How often ``last_login_at`` is allowed to cost a write.  This runs on
     #: the request path for HTTP Basic and session cookies; committing every
-    #: time would take a SQLite write lock for each `pip` download.
+    #: time would take a write lock (SQLite) or a round trip (PostgreSQL) for
+    #: each `pip` download.
     LOGIN_TOUCH_INTERVAL_SECONDS = 300.0
 
     def __init__(self, session_factory: scoped_session) -> None:
@@ -438,8 +439,9 @@ class AuthzService:
     def _should_touch_login(cls, last_login_at: datetime | None) -> bool:
         """True when ``last_login_at`` is stale enough to be worth a write.
 
-        SQLite has no timezone type, so a value read back from the database is
-        naive while a freshly assigned one is aware — normalise before
+        The two backends disagree about timezones: SQLite has no timezone type,
+        so a value read back is naive, while PostgreSQL returns an aware value
+        for the same ``DateTime(timezone=True)`` column.  Normalise before
         subtracting rather than trusting either.
         """
         if last_login_at is None:

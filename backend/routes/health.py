@@ -14,9 +14,11 @@ health_bp = Blueprint("health", __name__)
 @api_operation(
     summary="Liveness probe",
     description=(
-        "Reports the server name, the number of indexed packages and the package "
-        "directory. Needs no credentials and does no work beyond reading an "
-        "in-memory index, so it doubles as an orchestrator health check."
+        "Reports the server name, the number of indexed packages, the package "
+        "directory and which database backend the API keys / RBAC / statistics "
+        "layer is bound to. Needs no credentials and does no work beyond "
+        "reading an in-memory index, so it doubles as an orchestrator health "
+        "check."
     ),
     tags=["Session"],
     security=[],
@@ -29,4 +31,7 @@ def health():
         "server": settings.server.server_name,
         "package_count": len(packages),
         "packages_dir": settings.storage.packages_dir,
+        # Dialect + driver only: /health is anonymous, so this must never leak
+        # a host, user or password.
+        "database": current_app.extensions.get("database_info", {}),
     })

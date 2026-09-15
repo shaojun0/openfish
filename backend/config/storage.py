@@ -49,7 +49,22 @@ class StorageConfig(BaseSettings):
             "and node-gyp through NODEJS_ORG_MIRROR"
         ),
     )
+    database_url: str | None = Field(
+        default=None,
+        description=(
+            "SQLAlchemy database URL for API keys, users, RBAC and statistics. "
+            "Empty (the default) keeps the historical single-file SQLite "
+            "database at API_KEYS_FILE. Set it to a PostgreSQL URL — e.g. "
+            "postgresql+psycopg://user:pass@db:5432/openfish — to run the whole "
+            "authorization/API-key/statistics layer on PostgreSQL instead. "
+            "A bare postgresql:// URL is upgraded to the psycopg (v3) driver."
+        ),
+    )
     api_keys_file: str = Field(
         default=backend_path("data", "cpypiserver.db"),
-        description="SQLite database path for API keys and stats",
+        description=(
+            "SQLite database path for API keys and stats. Used only when "
+            "DATABASE_URL is empty; it is the file that is migrated in place by "
+            "the lightweight ALTERs in extensions/database.py."
+        ),
     )
