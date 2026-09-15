@@ -28,7 +28,7 @@ editing one JSON file.  No schema migration, no restart.
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from config.paths import backend_path, project_path
+from config.paths import backend_path, catalog_path
 
 
 class HubConfig(BaseSettings):
@@ -41,14 +41,14 @@ class HubConfig(BaseSettings):
     )
 
     tools_dir: str = Field(
-        default=project_path("tools"),
+        default=catalog_path("tools"),
         description=(
             "Root of the tools catalog. Each immediate sub-directory is a "
             "category; files below a category are downloadable tools."
         ),
     )
     docs_dir: str = Field(
-        default=project_path("docs"),
+        default=catalog_path("docs"),
         description=(
             "Root of the per-ecosystem Markdown documentation. Each immediate "
             "sub-directory is one ecosystem (python/, npm/, docker/, debian/, "
@@ -60,7 +60,7 @@ class HubConfig(BaseSettings):
         ),
     )
     npm_dir: str = Field(
-        default=project_path("npm"),
+        default=catalog_path("npm"),
         description="Directory holding the local npm catalog (tarballs and/or catalog.json)",
     )
     npm_upstream: str = Field(
@@ -111,7 +111,7 @@ class HubConfig(BaseSettings):
         ),
     )
     docker_dir: str = Field(
-        default=project_path("docker-images"),
+        default=catalog_path("docker-images"),
         description=(
             "Directory holding `docker save` tarballs and compose/Dockerfile "
             "snippets. Named with a suffix so it never collides with the "
@@ -173,7 +173,7 @@ class HubConfig(BaseSettings):
         ),
     )
     debian_dir: str = Field(
-        default=project_path("debian"),
+        default=catalog_path("debian"),
         description="Directory holding local .deb files and apt config snippets",
     )
     debian_mirror: str = Field(

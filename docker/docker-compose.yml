@@ -75,16 +75,20 @@ x-backend-env: &backend-env
   # ── 上传限制（需与 nginx client_max_body_size 保持一致）──
   MAX_CONTENT_LENGTH: "104857600"
 
-# 制品库与运行态：backend/ 内是运行态，项目根是操作员投放制品的目录。
+# 制品库与运行态：backend/ 内是运行态，制品库目录与本文件同级（docker/ 下）。
+# 每个制品库的**宿主机来源**都可用 .env 覆盖（默认取本目录内随仓库提交的
+# 目录），因此大件镜像数据可以留在 /media 之类的数据盘上，只把挂载路径指过去，
+# 不必搬进仓库：
+#   TOOLS_SRC  NPM_SRC  NODE_BUILDS_SRC  DOCKER_IMAGES_SRC  DEBIAN_SRC  DOCS_SRC
 x-backend-volumes: &backend-volumes
   - ${SHARE_DIR:-/data/share}:/app/share
   # ── 内网制品中心：丢文件即生效，无需重建镜像 ──────────────
-  - ../tools:/app/tools
-  - ../npm:/app/npm
-  - ../node-builds:/app/node-builds
-  - ../docker-images:/app/docker-images
-  - ../debian:/app/debian
-  - ../docs:/app/docs
+  - ${TOOLS_SRC:-./tools}:/app/tools
+  - ${NPM_SRC:-./npm}:/app/npm
+  - ${NODE_BUILDS_SRC:-./node-builds}:/app/node-builds
+  - ${DOCKER_IMAGES_SRC:-./docker-images}:/app/docker-images
+  - ${DEBIAN_SRC:-./debian}:/app/debian
+  - ${DOCS_SRC:-./docs}:/app/docs
   # 模型路由表：改完刷新页面即可；管理员在 /models 页可在线编辑，故需可写
   - ../backend/config/model_routes.json:/app/config/model_routes.json
   # SQLite 库与回源缓存，容器重建后不丢

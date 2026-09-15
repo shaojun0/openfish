@@ -68,8 +68,8 @@ The repository is split so that each half builds on its own:
 ```
 backend/     Flask application, its own Dockerfile, its own venv and tests/gates
 frontend/    Vue 3 + Vite SPA, its own Dockerfile (node build → nginx)
-docker/      Compose orchestration, the edge nginx config and the .env template
-tools/ npm/ node-builds/ docker-images/ debian/ docs/   artifact-hub catalogs
+docker/      Compose orchestration, edge nginx, .env template and the catalogs:
+             tools/ npm/ node-builds/ docker-images/ debian/ docs/
 integrations/   downstream client code (never part of an image)
 ```
 
@@ -230,22 +230,22 @@ Templates are provided at `backend/.env.example` (local development) and
 | `SERVER_NAME`           | `cpypiserver`          | Branding name                                      |
 | `ROUTE_PREFIX`          | *(empty)*              | Global URL prefix for every route                  |
 | `PACKAGES_DIR`          | `<backend>/packages`   | Where uploaded packages live                       |
-| `PYTHON_BUILDS_DIR`     | `<project>/python-build-standalone` | Prebuilt CPython releases             |
-| `NODE_BUILDS_DIR`       | `<project>/node-builds` | Prebuilt Node.js mirror (`nodejs.org/dist` layout) |
+| `PYTHON_BUILDS_DIR`     | `<project>/docker/python-build-standalone` | Prebuilt CPython releases    |
+| `NODE_BUILDS_DIR`       | `<project>/docker/node-builds` | Prebuilt Node.js mirror (`nodejs.org/dist` layout) |
 | `API_KEYS_FILE`         | `<backend>/data/cpypiserver.db` | SQLite database for API keys and stats     |
 | `FRONTEND_DIST_DIR`     | *(empty)* = `<backend>/static/dist` | Directory holding the built SPA for Flask to serve. In the split Docker deployment the `frontend` container serves it instead, so this stays empty |
 | `STORAGE__OVERWRITE`    | `false`                | Allow re-uploading an existing filename            |
 | `MAX_CONTENT_LENGTH`    | `104857600` (100 MiB)  | Maximum upload size                                |
 | `ADMIN_USERS`           | `[]`                   | Admin whitelist — **JSON array**, e.g. `["alice"]` |
-| `TOOLS_DIR`             | `<project>/tools`      | Tools catalog root — each sub-directory is a category |
-| `NPM_DIR`               | `<project>/npm`        | Local npm catalog (`*.tgz` / `catalog.json`)       |
+| `TOOLS_DIR`             | `<project>/docker/tools` | Tools catalog root — each sub-directory is a category |
+| `NPM_DIR`               | `<project>/docker/npm` | Local npm catalog (`*.tgz` / `catalog.json`)       |
 | `NPM_UPSTREAM`          | `https://registry.npmmirror.com` | Upstream npm registry — both the advertised `npm config set registry` target and the read-through source |
 | `NPM_PROXY_ENABLED`     | `true`                 | Serve the npm registry protocol; `false` answers only for already-cached packages |
 | `NPM_UPSTREAM_TOKEN`    | *(empty)*              | Bearer token for a private upstream npm registry   |
 | `NPM_TIMEOUT`           | `30`                   | Upstream npm read timeout (seconds)                |
 | `NPM_CACHE_DIR`         | `<backend>/data/cache/npm` | Packument + tarball cache                      |
 | `NPM_CACHE_MAX_MB`      | `512`                  | Byte budget for the npm cache (LRU eviction)       |
-| `DOCKER_DIR`            | `<project>/docker-images` | `docker save` tarballs + compose/Dockerfile     |
+| `DOCKER_DIR`            | `<project>/docker/docker-images` | `docker save` tarballs + compose/Dockerfile |
 | `DOCKER_REGISTRY`       | *(empty)*              | Intranet registry advertised on the docker page    |
 | `DOCKER_UPSTREAM`       | *(empty)*              | Registry v2 endpoint to proxy pulls from (`https://registry-1.docker.io`, or an intranet registry); empty = cached-only |
 | `DOCKER_UPSTREAM_USERNAME` / `DOCKER_UPSTREAM_PASSWORD` | *(empty)* | HTTP Basic credentials for that registry |
@@ -253,7 +253,7 @@ Templates are provided at `backend/.env.example` (local development) and
 | `DOCKER_TIMEOUT`        | `60`                   | Upstream registry read timeout (seconds)           |
 | `DOCKER_CACHE_DIR`      | `<backend>/data/cache/docker` | Manifest + blob cache                       |
 | `DOCKER_CACHE_MAX_MB`   | `1024`                 | Byte budget for the docker cache                   |
-| `DEBIAN_DIR`            | `<project>/debian`     | Local `.deb` files + apt config snippets           |
+| `DEBIAN_DIR`            | `<project>/docker/debian` | Local `.deb` files + apt config snippets        |
 | `DEBIAN_MIRROR`         | *(empty)*              | Intranet apt mirror advertised on the debian page  |
 | `DEBIAN_UPSTREAM`       | *(empty)*              | apt mirror to proxy `dists/` and `pool/` from; empty = flat local repository only |
 | `DEBIAN_TIMEOUT`        | `60`                   | Upstream apt mirror read timeout (seconds)         |
@@ -263,18 +263,20 @@ Templates are provided at `backend/.env.example` (local development) and
 | `MODELS_FILE`           | `<backend>/config/model_routes.json` | Model-routing table for downstream DSH; editable from `/models` by `model:write`, so it must be writable |
 | `MODEL_HEALTH_FILE`     | `<backend>/data/model_health.json` | Last connectivity probe per route (kept out of `MODELS_FILE`) |
 | `MODEL_PROBE_TIMEOUT`   | `5`                    | Seconds allowed for one route connectivity probe    |
-| `DOCS_DIR`              | `<project>/docs`       | Per-ecosystem Markdown documentation root — one sub-directory per ecosystem, one folder project per document |
+| `DOCS_DIR`              | `<project>/docker/docs` | Per-ecosystem Markdown documentation root — one sub-directory per ecosystem, one folder project per document |
 
 Nested fields can also be addressed with the `__` delimiter, e.g.
 `SERVER__PORT=9091`.
 
-> **`<backend>` and `<project>`.** Path defaults are anchored to the two roots
+> **`<backend>` and `<project>`.** Path defaults are anchored to the repository
 > rather than to the working directory, so they are correct wherever the server
 > is started from: `<backend>` is the `backend/` directory (code, templates and
 > local state — `data/`, `packages/`, `certs/`, `config/`), and `<project>` is
-> the repository root, which holds the operator-managed artifact catalogs
-> (`tools/`, `npm/`, `node-builds/`, `docker-images/`, `debian/`, `docs/`).
-> Docker Compose overrides every one of them with an absolute `/app/…` path.
+> the repository root. The operator-managed artifact catalogs
+> (`tools/`, `npm/`, `node-builds/`, `docker-images/`, `debian/`, `docs/`) live
+> under `<project>/docker/`, so the repository root stays a short list of build
+> units. Docker Compose overrides every one of them with an absolute `/app/…`
+> path.
 
 > **Note:** list-valued variables must be JSON. Writing `ADMIN_USERS=` (empty)
 > raises a settings error at startup — leave the line commented out instead.
@@ -609,7 +611,7 @@ and its own `assets/` directory, so screenshots belong to the document that uses
 them instead of every ecosystem sharing one flat pile:
 
 ```
-docs/
+docker/docs/
   python/
     getting-started/
       document.md          # the Markdown source
@@ -737,8 +739,8 @@ mirrored alongside the archives it is served as-is; otherwise it is generated
 from the files on disk (hashed on first access, then cached). An authentic
 `index.json` at the mirror root is read as an overlay for the metadata a filename
 cannot carry (`lts`, `date`, `npm`, …) without ever inventing a release. See
-`node-builds/README.txt` for the layout and `tools/net/node-builds-mirror.sh`
-for a sync helper.
+`docker/node-builds/README.txt` for the layout and
+`docker/tools/net/node-builds-mirror.sh` for a sync helper.
 
 **CPython.** `GET /python-builds/` returns the release listing `uv` expects when
 `UV_PYTHON_INSTALL_MIRROR` points here; each release directory is a date tag and
@@ -1116,14 +1118,14 @@ docker/                         orchestration — no application code
 ├── docker-compose.yml          backend + frontend + nginx + db (profiles)
 ├── nginx/nginx.conf            the edge gateway: path routing, upload size
 ├── .env.example                Compose variable template (copied to docker/.env)
-└── certs/                      optional TLS material, git-ignored
-
-tools/                          artifact hub — tools/<category>/<file> + catalog.json
-npm/                            artifact hub — local npm tarballs + catalog.json
-node-builds/                    artifact hub — nodejs.org/dist-shaped Node.js mirror
-docker-images/                  artifact hub — image tarballs + compose/Dockerfile
-debian/                         artifact hub — local .deb files + apt snippets
-docs/                           artifact hub — docs/<ecosystem>/<id>/document.md (+ assets/)
+├── certs/                      optional TLS material, git-ignored
+└── artifact-hub catalogs       operator data, bind-mounted — no rebuild needed
+    ├── tools/                  tools/<category>/<file> + catalog.json
+    ├── npm/                    local npm tarballs + catalog.json
+    ├── node-builds/            nodejs.org/dist-shaped Node.js mirror
+    ├── docker-images/          image tarballs + compose/Dockerfile
+    ├── debian/                 local .deb files + apt snippets
+    └── docs/                   docs/<ecosystem>/<id>/document.md (+ assets/)
 
 integrations/                   downstream *client* code, versioned here because it is
                                 tightly coupled to this server's contract. Currently:
@@ -1139,9 +1141,13 @@ blueprint in `backend/routes/`, and two lines of registration — see the
 docstring in `backend/extensions/__init__.py`.
 
 The artifact-hub catalogs (`tools/`, `npm/`, `node-builds/`, `docker-images/`,
-`debian/`, `docs/`) stay at the project root on purpose: they are operator data,
-not code. Compose bind-mounts them into the backend container, so dropping a
-file in one takes effect without rebuilding anything.
+`debian/`, `docs/`) live under `docker/` on purpose: they are operator data, not
+code, and keeping them in the Compose directory leaves the repository root a
+short list of build units. Compose bind-mounts them into the backend container,
+so dropping a file in one takes effect without rebuilding anything. Each mount
+source can be overridden in `docker/.env` with `TOOLS_SRC`, `NPM_SRC`,
+`NODE_BUILDS_SRC`, `DOCKER_IMAGES_SRC`, `DEBIAN_SRC` or `DOCS_SRC`, so a large
+mirror can stay on a data disk and simply be pointed at instead of moved.
 
 ## Security notes
 

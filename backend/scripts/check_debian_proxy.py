@@ -46,9 +46,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-# The artifact-hub catalogs (debian/, tools/, npm/, …) live at the project
-# root, one level above the backend package.
+# The artifact-hub catalogs (debian/, tools/, npm/, …) live under the Compose
+# bundle: <project>/docker/, one level above the backend package.
 PROJECT_ROOT = REPO_ROOT.parent
+CATALOGS_ROOT = PROJECT_ROOT / "docker"
 sys.path.insert(0, str(REPO_ROOT))
 os.chdir(REPO_ROOT)
 
@@ -60,7 +61,7 @@ os.environ["AUTH_USERNAME"] = "dev"
 os.environ["AUTH_ASSERT"] = "devpass"
 os.environ["ADMIN_USERS"] = '["dev"]'
 os.environ["API_KEYS_FILE"] = str(_TMP / "keys.db")
-os.environ["DEBIAN_DIR"] = str(PROJECT_ROOT / "debian")
+os.environ["DEBIAN_DIR"] = str(CATALOGS_ROOT / "debian")
 os.environ["DEBIAN_UPSTREAM"] = ""
 os.environ["DEBIAN_MIRROR"] = ""
 

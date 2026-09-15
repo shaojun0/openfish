@@ -3,7 +3,7 @@
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from config.paths import backend_path, project_path
+from config.paths import backend_path, catalog_path
 
 
 class StorageConfig(BaseSettings):
@@ -36,11 +36,11 @@ class StorageConfig(BaseSettings):
         description="Use watchdog to maintain in-memory index",
     )
     python_builds_dir: str = Field(
-        default=project_path("python-build-standalone"),
+        default=catalog_path("python-build-standalone"),
         description="Path to python-build-standalone releases directory",
     )
     node_builds_dir: str = Field(
-        default=project_path("node-builds"),
+        default=catalog_path("node-builds"),
         description=(
             "Path to a nodejs.org/dist-shaped mirror of prebuilt Node.js "
             "archives (release directories named vX.Y.Z), consumed by nvm, fnm "

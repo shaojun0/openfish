@@ -1,8 +1,9 @@
-"""Filesystem anchors — the two roots this repository distinguishes.
+"""Filesystem anchors — the roots this repository distinguishes.
 
-The project tree has two levels that mean different things::
+The tree has three levels that mean different things::
 
-    <project>/                artifact-hub catalogs: tools/, npm/, node-builds/,
+    <project>/                deploy bundle: docker/ plus the two build units
+    <project>/docker/         artifact-hub catalogs: tools/, npm/, node-builds/,
                               docker-images/, debian/, docs/ — operator data,
                               bind-mounted into the container at run time
     <project>/backend/        this application: code, Jinja templates, local
@@ -23,8 +24,12 @@ from pathlib import Path
 #: ``<project>/backend`` — the application package root.
 BACKEND_ROOT: Path = Path(__file__).resolve().parent.parent
 
-#: ``<project>`` — one level up; holds the operator-managed artifact catalogs.
+#: ``<project>`` — one level up; holds the Compose bundle and both build units.
 PROJECT_ROOT: Path = BACKEND_ROOT.parent
+
+#: ``<project>/docker`` — the Compose bundle; the artifact catalogs live here so
+#: the repository root stays a small, readable index of build units.
+CATALOGS_ROOT: Path = PROJECT_ROOT / "docker"
 
 
 def backend_path(*parts: str) -> str:
@@ -33,8 +38,20 @@ def backend_path(*parts: str) -> str:
 
 
 def project_path(*parts: str) -> str:
-    """Absolute path inside the project tree (artifact-hub catalogs)."""
+    """Absolute path inside the project tree (the whole repository)."""
     return str(PROJECT_ROOT.joinpath(*parts))
 
 
-__all__ = ["BACKEND_ROOT", "PROJECT_ROOT", "backend_path", "project_path"]
+def catalog_path(*parts: str) -> str:
+    """Absolute path inside the artifact-hub catalogs (``<project>/docker/``)."""
+    return str(CATALOGS_ROOT.joinpath(*parts))
+
+
+__all__ = [
+    "BACKEND_ROOT",
+    "PROJECT_ROOT",
+    "CATALOGS_ROOT",
+    "backend_path",
+    "project_path",
+    "catalog_path",
+]

@@ -7,8 +7,10 @@
 openfish/
 ├── backend/          ① Flask 后端         → openfish-backend 镜像
 ├── frontend/         ② Vue 3 SPA          → openfish-frontend 镜像
-├── docker/           ③ 编排与边缘网关      → 4 容器拓扑
-├── tools/ npm/ node-builds/ docker-images/ debian/ docs/   ④ 制品库（操作员数据）
+├── docker/           ③ 编排、边缘网关与制品库 → 4 容器拓扑
+│   ├── tools/ npm/ node-builds/ docker-images/ debian/ docs/   ④ 制品库（操作员数据）
+│   ├── docker-compose.yml  .env.example
+│   └── nginx/nginx.conf
 ├── integrations/     ⑤ 下游客户端代码（不进任何镜像）
 └── README.md  本文件
 ```
@@ -71,13 +73,14 @@ app.py                     创建 Flask 应用，禁用内置 static handler
 
 ### 路径锚定（本次重组新引入）
 
-`config/paths.py` 定义两个根，所有路径默认值由 `__file__` 解析，与启动时的
+`config/paths.py` 定义三个根，所有路径默认值由 `__file__` 解析，与启动时的
 工作目录无关：
 
 | 根 | 含义 | 谁用它 |
 | --- | --- | --- |
 | `BACKEND_ROOT` = `backend/` | 代码、模板、本机状态 | `packages/` `data/` `certs/` `config/model_routes.json` `static/<生态>/` |
-| `PROJECT_ROOT` = 仓库根 | 操作员投放的制品库 | `tools/` `npm/` `node-builds/` `docker-images/` `debian/` `docs/` `python-build-standalone/` |
+| `PROJECT_ROOT` = 仓库根 | 部署包与两个构建单元 | `docker/` `backend/` `frontend/` `integrations/` |
+| `CATALOGS_ROOT` = `docker/` | 操作员投放的制品库 | `tools/` `npm/` `node-builds/` `docker-images/` `debian/` `docs/` `python-build-standalone/` |
 
 环境变量永远优先；Docker Compose 把它们全部覆盖成 `/app/…` 绝对路径。
 
@@ -149,10 +152,12 @@ registry 数据）；所有数据端点、`/docs/*`、`/api/v1` 仍各自鉴权�
 
 ---
 
-## ④ 制品库目录（仓库根）
+## ④ 制品库目录（docker/ 下）
 
-刻意留在仓库根：它们是**操作员数据**而非代码，Compose 以 bind mount 注入容器，
-丢文件即生效、无需重建镜像。
+刻意收进 Compose 目录 `docker/`：它们是**操作员数据**而非代码，Compose 以
+bind mount 注入容器，丢文件即生效、无需重建镜像；收在 `docker/` 下则是为了让
+仓库根只保留构建单元。每个目录的宿主机来源都可用 `.env` 里的 `*_SRC` 覆盖，
+因此大件数据可以留在数据盘上、只把挂载路径指过去，不必搬进仓库。
 
 | 目录 | 内容 | 主要环境变量 |
 | --- | --- | --- |

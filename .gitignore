@@ -54,9 +54,9 @@ backend/data/cache/
 packages/
 python-build-standalone/
 # The Node.js mirror holds multi-gigabyte archives; commit only the README that
-# documents the layout it expects.
-node-builds/*
-!node-builds/README.txt
+# documents the layout it expects.  Catalogs live under docker/.
+docker/node-builds/*
+!docker/node-builds/README.txt
 
 # ── TLS material (private CA / certs / keys) ────────────────────────
 *.pem
