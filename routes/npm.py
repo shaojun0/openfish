@@ -367,9 +367,11 @@ def npm_search():
         "install form, anything else the full form.\n\n"
         "Every `dist.tarball` is rewritten to an absolute URL on this server, so "
         "installs resolve here and never need the upstream mirror. Sources are "
-        "layered: a local `*.tgz`, then `NPM_DIR/catalog.json`, then — when the "
-        "proxy is enabled — the upstream registry (cached briefly). An unknown "
-        "package is a JSON `404`."
+        "merged: the upstream registry (when the proxy is enabled) supplies the "
+        "full version list and a local `*.tgz` wins for the exact version it "
+        "carries, so a partially synced mirror cannot hide a version npm needs "
+        "to resolve a dependency range. An unknown package is a JSON `404`; an "
+        "unreachable upstream degrades to the local mirror."
     ),
     tags=["npm"],
     parameters=[_PACKAGE_PARAM],
@@ -431,7 +433,7 @@ def npm_version(package: str, version: str):
 )
 def npm_tarball(package: str, filename: str):
     registry = _registry()
-    local = registry.local_tarball(filename)
+    local = registry.local_tarball(package, filename)
     if local is not None:
         return send_file(local, mimetype="application/octet-stream", conditional=True)
     path, reason = registry.upstream_tarball(package, filename)

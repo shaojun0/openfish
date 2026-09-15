@@ -15,15 +15,26 @@ this server* (``{prefix}/npm/<package>/-/<basename>``), which is the whole point
 of the proxy: a client that can reach this host never has to reach the upstream
 mirror, and the second request for a tarball is served from local disk.
 
-Sources are layered, cheapest first and **the first source that knows a package
-wins**:
+Sources are layered, cheapest first, but when the proxy is enabled they are
+**merged** rather than taken from the first source that knows the package, because
+a package's *whole* ``versions`` map is what npm resolves dependency ranges
+against:
 
-1. a real ``*.tgz`` in ``NPM_DIR`` (hashes computed from the file, metadata read
-   from the ``package/package.json`` inside it);
-2. ``NPM_DIR/catalog.json`` entries (metadata-only listings);
-3. the upstream registry, when ``npm_proxy_enabled`` and ``npm_upstream`` are
+1. the upstream registry, when ``npm_proxy_enabled`` and ``npm_upstream`` are
    set — packuments cached for :data:`PACKUMENT_TTL` seconds and tarballs cached
-   until the ``DiskCache`` byte budget evicts them.
+   until the ``DiskCache`` byte budget evicts them;
+2. a real ``*.tgz`` in ``NPM_DIR`` (hashes computed from the file, metadata read
+   from the ``package/package.json`` inside it) — it *wins for its own version*
+   (this server serves those bytes) but must not hide the upstream's other
+   versions;
+3. ``NPM_DIR/catalog.json`` entries (metadata-only listings), used only when
+   neither of the above knows the version.
+
+Taking the local mirror alone would be enough for a fully synced package, but a
+mirror that synced only ``accepts@1.3.8`` would then answer `GET /npm/accepts`
+with that single version — and every ``accepts@^2.0.0`` dependency (express 5.x,
+for one) would die with ``ETARGET``.  So an upstream packument is the base and
+local versions are overlaid on top of it.
 
 A missing package is a ``None`` return, never an exception, so the route layer
 can answer the clean ``404 {"error": ...}`` npm expects.  An *unreachable*
@@ -37,6 +48,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import re
 import tarfile
 import time
@@ -331,6 +343,54 @@ def _rewrite_packument(
     return out
 
 
+def _merge_packuments(
+    upstream: Mapping[str, Any], local: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Overlay the local mirror's versions on an upstream packument.
+
+    The upstream document supplies the complete ``versions`` map npm resolves
+    dependency ranges against; a local ``*.tgz`` replaces the manifest of the
+    exact version it carries (so ``dist.tarball`` points at this server) and is
+    added when upstream does not know the version at all (a private package).
+    Upstream owns the dist-tags — a mirror syncs a *subset* of upstream, so its
+    ``latest`` is the true one — and a local-only version stays reachable by its
+    exact version or a local tag.  A metadata-only local entry (``catalog.json``
+    with no tarball) never clobbers an upstream version, because its
+    ``dist.tarball`` is empty.
+    """
+    versions: dict[str, Any] = dict(upstream.get("versions") or {})
+    for version, manifest in (local.get("versions") or {}).items():
+        dist = manifest.get("dist") if isinstance(manifest, dict) else None
+        tarball = dist.get("tarball") if isinstance(dist, dict) else None
+        # A local tarball wins; a bare catalog listing only fills a gap.
+        if version not in versions or tarball:
+            versions[version] = manifest
+
+    dist_tags: dict[str, Any] = {
+        str(tag): version
+        for tag, version in (upstream.get("dist-tags") or {}).items()
+        if version in versions
+    }
+    for tag, version in (local.get("dist-tags") or {}).items():
+        if tag not in dist_tags and version in versions:
+            dist_tags[str(tag)] = version
+    if "latest" not in dist_tags and versions:
+        dist_tags["latest"] = max(versions, key=_version_key)
+
+    merged: dict[str, Any] = dict(local)
+    merged.update(upstream)
+    merged["name"] = upstream.get("name") or local.get("name")
+    merged["versions"] = versions
+    merged["dist-tags"] = dist_tags
+
+    # Keep a local-only version's timestamp even though upstream owns `time`.
+    times = dict(local.get("time") or {})
+    times.update(upstream.get("time") or {})
+    if times:
+        merged["time"] = times
+    return merged
+
+
 def clamp_search_size(value: Any) -> int:
     """Clamp npm's ``size`` to 1..250, defaulting to 20 when unusable."""
     try:
@@ -402,26 +462,45 @@ class NpmRegistry:
     # -- local index --------------------------------------------------
 
     def _signature(self) -> tuple:
-        """A cheap (path, mtime, size) fingerprint of everything local."""
+        """A cheap fingerprint of the local tree, from *directory* metadata.
+
+        Adding, removing or renaming a tarball updates its directory's mtime, so
+        stat-ing every directory is enough to notice a changed mirror.  Stat-ing
+        every ``.tgz`` instead is what made this expensive: on a large mirror on
+        slow storage the walk cost seconds, and because ``local_index`` runs on
+        every packument request that latency was paid once per dependency in an
+        install.  ``catalog.json`` is edited in place (which leaves the directory
+        mtime alone), so that one file is still stat-ed explicitly.
+        """
         if not self.root.is_dir():
             return ()
         items: list[tuple] = []
-        for path in sorted(self.root.rglob("*.tgz")):
-            if not _visible(path):
-                continue
+        pending = [self.root]
+        while pending:
+            directory = pending.pop()
             try:
-                stat = path.stat()
+                stat = directory.stat()
             except OSError:
                 continue
-            items.append((str(path), stat.st_mtime, stat.st_size))
+            items.append((str(directory), stat.st_mtime, stat.st_size))
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                pending.append(Path(entry.path))
+                        except OSError:
+                            continue
+            except OSError:
+                continue
         overlay = self.root / hub._OVERLAY_FILENAME
-        if overlay.is_file():
-            try:
-                stat = overlay.stat()
-                items.append((str(overlay), stat.st_mtime, stat.st_size))
-            except OSError:
-                pass
-        return tuple(items)
+        try:
+            stat = overlay.stat()
+        except OSError:
+            pass
+        else:
+            items.append((str(overlay), stat.st_mtime, stat.st_size))
+        return tuple(sorted(items))
 
     def local_index(self) -> dict[str, dict[str, Any]]:
         """Every locally-known package, keyed by name, cached on the tree's mtime.
@@ -452,10 +531,11 @@ class NpmRegistry:
                 if not name or not version:
                     continue
                 record = index.setdefault(name, {
-                    "versions": {}, "filenames": {}, "times": {},
+                    "versions": {}, "filenames": {}, "paths": {}, "times": {},
                     "description": None, "tags": [], "modified": 0.0,
                 })
                 record["filenames"][version] = path.name
+                record["paths"][version] = path
                 try:
                     mtime = path.stat().st_mtime
                 except OSError:
@@ -482,6 +562,16 @@ class NpmRegistry:
         for entry in catalog.get("packages", []):
             name = entry.get("name")
             if not name or name in index:
+                continue
+            # `scan_npm` also lists every tarball by parsing its *filename*, and
+            # a scoped tarball's filename has no scope: ``react-0.27.20.tgz``
+            # really holds ``@floating-ui/react@0.27.20``. Those files are
+            # already indexed above under their real name, so re-adding the
+            # filename-derived name here would invent a bogus unscoped package
+            # whose manifest has no ``dist.tarball``. A tarball listing always
+            # carries a ``download_url``; only genuine catalog.json entries
+            # (metadata only, null download_url) are added from this view.
+            if entry.get("download_url") is not None:
                 continue
             version = entry.get("version") or LATEST_TAG
             index[name] = {
@@ -517,8 +607,8 @@ class NpmRegistry:
         dist.setdefault("shasum", "")
         dist.setdefault("integrity", "")
         if not dist["shasum"] and filename:
-            path = self._path_for(filename)
-            if path is not None:
+            path = (record.get("paths") or {}).get(version) or self._path_for(filename)
+            if path is not None and path.is_file():
                 sha1, integrity = _digests(path)
                 dist["shasum"] = sha1
                 dist["integrity"] = integrity
@@ -606,26 +696,42 @@ class NpmRegistry:
     def packument(
         self, name: str, *, tarball_url: TarballUrl, abbreviated: bool = False,
     ) -> tuple[dict[str, Any] | None, str | None]:
-        """Resolve a packument from local disk first, then the upstream registry.
+        """Resolve a packument, merging the local mirror with the upstream registry.
 
         Returns ``(document, error)``.  ``document`` is None on a miss; ``error``
         is then ``"notfound"`` or a short upstream-failure reason the route maps
         to a non-500 status.
+
+        When the proxy is enabled the upstream document is the base and local
+        versions are overlaid on top of it (see :func:`_merge_packuments`), so a
+        partially synced mirror cannot hide the versions npm needs to resolve a
+        dependency range.  A local-only answer is returned when the upstream is
+        disabled, does not know the package, or is unreachable — a proxy outage
+        must never turn a mirrored package into a 404.
         """
         local = self.local_packument(name, tarball_url=tarball_url, abbreviated=abbreviated)
-        if local is not None:
-            return local, None
+
         if not self.proxying:
+            if local is not None:
+                return local, None
             return None, "proxy-disabled"
+
         document, error = self._upstream_packument(name, abbreviated)
         if document is None:
+            if local is not None:
+                return local, None
             return None, error
+
         rewritten = _rewrite_packument(
             document, name=name, abbreviated=abbreviated, tarball_url=tarball_url,
         )
         if rewritten is None:
+            if local is not None:
+                return local, None
             return None, "notfound"
-        return rewritten, None
+        if local is None:
+            return rewritten, None
+        return _merge_packuments(rewritten, local), None
 
     def version_manifest(
         self, name: str, version: str, *, tarball_url: TarballUrl,
@@ -644,8 +750,27 @@ class NpmRegistry:
 
     # -- tarballs -----------------------------------------------------
 
-    def local_tarball(self, filename: str) -> Path | None:
-        return self._path_for(filename)
+    def local_tarball(self, package: str, filename: str) -> Path | None:
+        """The local file for *package*'s tarball, or None when the mirror lacks it.
+
+        The basename alone is not a safe key: npm drops the scope from a scoped
+        tarball's filename, so ``react-19.3.0.tgz`` can belong to
+        ``@types/react`` while the real ``react@19.3.0`` has the same basename.
+        Serving the wrong bytes would fail npm's integrity check (EINTEGRITY),
+        so the *package's own* index record is the authority; a filename it does
+        not own is left for the upstream to answer.
+        """
+        record = self.local_index().get(package)
+        if record is None:
+            return None
+        for version, name in (record.get("filenames") or {}).items():
+            if name != filename:
+                continue
+            path = (record.get("paths") or {}).get(version)
+            if path is not None and path.is_file():
+                return path
+            return self._path_for(name)
+        return None
 
     def upstream_tarball(self, package: str, filename: str) -> tuple[Path | None, str | None]:
         """Fetch (once) and cache a tarball; ``(path, error)`` like packuments."""

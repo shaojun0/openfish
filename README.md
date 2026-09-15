@@ -376,11 +376,16 @@ the `tool:download` permission; the listing requires `tool:read`.
 server answers the registry protocol: a packument per package (abbreviated when
 the client sends `Accept: application/vnd.npm.install-v1+json`, full
 otherwise), one version manifest, the tarball itself, `npm ping` and the modern
-`/-/v1/search`. Tarballs found in `NPM_DIR` and entries declared in
-`NPM_DIR/catalog.json` are the local truth; anything else is fetched from
-`NPM_UPSTREAM` and cached. Every `dist.tarball` URL a client receives is
-rewritten to point back at this server, so a client never needs to reach the
-upstream registry itself.
+`/-/v1/search`. A `*.tgz` in `NPM_DIR` and an entry in `NPM_DIR/catalog.json` are
+the **local** source for that exact version, but they are *merged with* the
+`NPM_UPSTREAM` packument rather than replacing it — npm resolves a dependency
+range such as `accepts@^2.0.0` against the whole `versions` map, so a partially
+synced mirror must still advertise every upstream version. Locally synced
+versions keep their local `dist.tarball` (served from this server); every other
+version's tarball is fetched from `NPM_UPSTREAM` and cached. Every `dist.tarball`
+URL a client receives is rewritten to point back at this server, so a client
+never needs to reach the upstream registry itself. If `NPM_UPSTREAM` is empty,
+unknown or unreachable, a mirrored package is served from the local files alone.
 
 **Docker.** `GET /docker/v2/` is the API version probe every client makes
 first; from there the usual pull sequence works — `tags/list`, then a manifest

@@ -126,15 +126,31 @@ def write_tarball(directory: Path, filename: str, data: bytes) -> Path:
 DEMO_NAME, DEMO_VERSION = "openfish-demo", "1.2.3"
 DEMO_NEWER = "1.3.0"
 SCOPED_NAME, SCOPED_VERSION = "@openfish/scoped", "0.5.0"
+#: A package the mirror has *partially* synced: only ``1.0.0`` is on disk while
+#: the upstream also publishes ``2.0.0``.  The proxy must merge the two, or a
+#: dependency on ``^2.0.0`` would be unresolvable (the express/accepts ETARGET).
+MERGE_NAME, MERGE_LOCAL, MERGE_UPSTREAM = "openfish-partial", "1.0.0", "2.0.0"
 
 DEMO_123 = build_tarball_bytes(DEMO_NAME, DEMO_VERSION, "Openfish protocol fixture")
 DEMO_130 = build_tarball_bytes(DEMO_NAME, DEMO_NEWER, "Openfish protocol fixture")
 SCOPED = build_tarball_bytes(SCOPED_NAME, SCOPED_VERSION, "Scoped protocol fixture")
+MERGE_BYTES = build_tarball_bytes(MERGE_NAME, MERGE_LOCAL, "Partial-sync fixture")
 
 write_tarball(_NPM_DIR, f"{DEMO_NAME}-{DEMO_VERSION}.tgz", DEMO_123)
 write_tarball(_NPM_DIR, f"{DEMO_NAME}-{DEMO_NEWER}.tgz", DEMO_130)
 # npm's scoped tarball naming drops the scope from the file name.
 write_tarball(_NPM_DIR, f"scoped-{SCOPED_VERSION}.tgz", SCOPED)
+write_tarball(_NPM_DIR, f"{MERGE_NAME}-{MERGE_LOCAL}.tgz", MERGE_BYTES)
+# A catalog.json entry with no tarball on disk: metadata only, but still listed.
+META_NAME, META_VERSION = "openfish-meta", "0.1.0"
+(_NPM_DIR / "catalog.json").write_text(json.dumps({
+    "packages": [{
+        "name": META_NAME,
+        "version": META_VERSION,
+        "description": "catalog metadata fixture",
+        "tags": ["meta"],
+    }],
+}), encoding="utf-8")
 
 settings.hub.npm_dir = str(_NPM_DIR)
 settings.hub.npm_cache_dir = str(_CACHE_DIR)
@@ -210,6 +226,13 @@ def main() -> int:
     check(scoped_dist.get("tarball", "").endswith(
         f"/npm/{SCOPED_NAME}/-/{SCOPED_NAME.split('/')[-1]}-{SCOPED_VERSION}.tgz"),
         "scoped dist.tarball keeps the scope in the URL")
+    # The file is named `scoped-0.5.0.tgz` (npm drops the scope from the
+    # basename). Parsing that filename must not invent a package called
+    # `scoped` whose manifest has no tarball — the react/@floating-ui/react
+    # collision that made `npm install react` fail with an invalid manifest.
+    basename_pkg = get(client, f"/npm/{SCOPED_NAME.split('/')[-1]}")
+    check(basename_pkg.status_code == 404,
+          "a scoped tarball's scope-less basename is not invented as a package")
 
     section("Tarballs")
     downloaded = get(client, f"/npm/{DEMO_NAME}/-/{DEMO_NAME}-{DEMO_VERSION}.tgz")
@@ -223,6 +246,23 @@ def main() -> int:
     )
     check(scoped_download.status_code == 200 and scoped_download.data == SCOPED,
           "scoped tarball streams the right bytes")
+    # The scoped file is `scoped-0.5.0.tgz`. An unscoped package called `scoped`
+    # does not exist, so asking for that basename as `scoped` must not hand back
+    # another package's bytes — it is a miss, not a silent EINTEGRITY later.
+    colliding = get(client, f"/npm/scoped/-/{SCOPED_NAME.split('/')[-1]}-{SCOPED_VERSION}.tgz")
+    check(colliding.status_code == 404,
+          "a tarball basename is not served for a package that does not own it")
+
+    section("Local tree changes are noticed")
+    # Adding a file must invalidate the cached index; the cheap directory-mtime
+    # signature has to see it just as the old per-file stat walk did.
+    LATE_NAME, LATE_VERSION = "openfish-late", "9.9.9"
+    write_tarball(_NPM_DIR, f"{LATE_NAME}-{LATE_VERSION}.tgz",
+                  build_tarball_bytes(LATE_NAME, LATE_VERSION, "Late fixture"))
+    late_doc = get(client, f"/npm/{LATE_NAME}")
+    check(late_doc.status_code == 200 and LATE_VERSION in
+          ((late_doc.get_json() or {}).get("versions") or {}),
+          "a tarball added after the first index build is picked up")
 
     section("Search (/-/v1/search)")
     found = get(client, "/npm/-/v1/search?text=demo")
@@ -283,6 +323,10 @@ def main() -> int:
     legacy = get(client, f"/npm/files/{DEMO_NAME}-{DEMO_VERSION}.tgz")
     check(legacy.status_code == 200 and legacy.data == DEMO_123,
           "/npm/files/<filename> still serves the tarball")
+    meta = get(client, f"/npm/{META_NAME}")
+    check(meta.status_code == 200 and META_VERSION in
+          ((meta.get_json() or {}).get("versions") or {}),
+          "a catalog.json metadata-only entry is still listed")
 
     section("Read-through proxy against a fake upstream")
     _run_proxy_checks()
@@ -328,6 +372,41 @@ class FakeUpstream:
                             "tarball": f"https://upstream.invalid{PROXY_TARBALL_PATH}",
                             "shasum": "0" * 40,
                             "integrity": "sha512-AAAA",
+                        },
+                    },
+                },
+                "modified": "2024-01-01T00:00:00.000Z",
+                "time": {"modified": "2024-01-01T00:00:00.000Z"},
+            }).encode("utf-8")
+            start_response("200 OK", [
+                ("Content-Type", "application/json"),
+                ("Content-Length", str(len(body))),
+            ])
+            return [body]
+        if path == f"/{MERGE_NAME}":
+            # The upstream knows two versions of a package the mirror has only
+            # partially synced; 2.0.0 exists *only* upstream.
+            body = json.dumps({
+                "name": MERGE_NAME,
+                "dist-tags": {"latest": MERGE_UPSTREAM},
+                "versions": {
+                    MERGE_LOCAL: {
+                        "name": MERGE_NAME,
+                        "version": MERGE_LOCAL,
+                        "dist": {
+                            "tarball": f"https://upstream.invalid/{MERGE_NAME}/-/{MERGE_NAME}-{MERGE_LOCAL}.tgz",
+                            "shasum": "1" * 40,
+                            "integrity": "sha512-BBBB",
+                        },
+                    },
+                    MERGE_UPSTREAM: {
+                        "name": MERGE_NAME,
+                        "version": MERGE_UPSTREAM,
+                        "dependencies": {"accepts": "^2.0.0"},
+                        "dist": {
+                            "tarball": f"https://upstream.invalid/{MERGE_NAME}/-/{MERGE_NAME}-{MERGE_UPSTREAM}.tgz",
+                            "shasum": "2" * 40,
+                            "integrity": "sha512-CCCC",
                         },
                     },
                 },
@@ -398,6 +477,25 @@ def _run_proxy_checks() -> None:
 
         missing = get(client, "/npm/no-such-proxied-pkg")
         check(missing.status_code == 404, "upstream 404 propagates as 404, not 500")
+
+        section("Partially synced package merges the upstream versions")
+        merged = get(client, f"/npm/{MERGE_NAME}")
+        check(merged.status_code == 200, f"GET /npm/{MERGE_NAME} -> 200")
+        merged_doc = merged.get_json() or {}
+        merged_versions = merged_doc.get("versions") or {}
+        check(MERGE_LOCAL in merged_versions,
+              "the locally synced version is still present")
+        check(MERGE_UPSTREAM in merged_versions,
+              "an upstream-only version is *not* hidden by the local mirror")
+        local_dist = (merged_versions.get(MERGE_LOCAL) or {}).get("dist") or {}
+        check(local_dist.get("tarball", "").endswith(
+            f"/npm/{MERGE_NAME}/-/{MERGE_NAME}-{MERGE_LOCAL}.tgz"),
+            "the synced version's dist.tarball points at this server")
+        check((merged_doc.get("dist-tags") or {}).get("latest") == MERGE_UPSTREAM,
+              "upstream dist-tags survive the merge")
+        local_tar = get(client, f"/npm/{MERGE_NAME}/-/{MERGE_NAME}-{MERGE_LOCAL}.tgz")
+        check(local_tar.status_code == 200 and local_tar.data == MERGE_BYTES,
+              "the synced version still streams the local bytes")
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -416,6 +514,11 @@ def _run_proxy_checks() -> None:
         packument = get(outage_client, "/npm/some-package-from-a-dead-upstream")
         check(packument.status_code != 500 and packument.is_json,
               "dead upstream: packument miss is a JSON non-500")
+
+        local_only = get(outage_client, f"/npm/{MERGE_NAME}")
+        check(local_only.status_code == 200 and MERGE_LOCAL in
+              ((local_only.get_json() or {}).get("versions") or {}),
+              "dead upstream: a locally mirrored package still resolves (200)")
 
         tarball = get(outage_client, "/npm/some-package/-/some-package-1.0.0.tgz")
         check(tarball.status_code != 500 and tarball.is_json,
