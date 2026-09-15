@@ -14,6 +14,10 @@ handled differently, which is the whole reason this service exists:
   streamed straight through, never cached, with ``Range`` forwarded upstream so
   a resumed ``apt install`` works.
 
+Both trees are *local-first*: a regular file under ``DEBIAN_DIR/dists`` or
+``DEBIAN_DIR/pool`` is served directly (a synced archive tree makes the intranet
+work offline), and only a local miss falls through to the upstream logic above.
+
 The shared machinery lives in :mod:`services.upstream` (``Upstream``,
 ``DiskCache``, ``passthrough``); what is added here is the apt-specific policy:
 which URL is the effective upstream, what a safe mirror-relative path is, how a
@@ -37,7 +41,7 @@ import struct
 from pathlib import Path
 from typing import Iterator
 
-from flask import Response, jsonify, request
+from flask import Response, jsonify, request, send_from_directory
 from requests import RequestException
 from urllib3.exceptions import HTTPError as Urllib3HTTPError
 
@@ -159,6 +163,30 @@ def safe_mirror_path(path: str) -> str:
     return "/".join(segments)
 
 
+def _local_mirror_file(kind: str, safe: str) -> Response | None:
+    """Serve ``<DEBIAN_DIR>/<kind>/<safe>`` from the local mirror tree.
+
+    ``kind`` is ``"dists"`` or ``"pool"``.  Returns ``None`` when the local tree
+    has no such regular file, so the caller can fall back to the upstream
+    mirror.  ``send_from_directory(..., conditional=True)`` supplies the
+    ``Range`` / ``HEAD`` / ``Content-Length`` / ``Last-Modified`` handling.
+
+    ``safe`` is already normalised by :func:`safe_mirror_path`; the resolved
+    path is checked against the resolved root once more so a symlink inside the
+    tree cannot point outside it.
+    """
+    root = Path(settings.hub.debian_dir) / kind
+    try:
+        resolved = (root / safe).resolve()
+        resolved.relative_to(root.resolve())
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise PathError(f"refusing local mirror path outside {kind}/: {safe!r}") from exc
+    if not resolved.is_file():
+        return None
+    log.debug("apt local mirror hit for %s/%s", kind, safe)
+    return send_from_directory(root, safe, conditional=True)
+
+
 # ── Cache envelope ───────────────────────────────────────────────────
 
 def _encode_envelope(header: dict[str, str], status: int = 200) -> bytes:
@@ -253,14 +281,23 @@ def _local_only() -> Response:
 # ── dists/: cached metadata ──────────────────────────────────────────
 
 def dists_response(path: str) -> Response:
-    """Proxy one apt metadata document, caching it for ``debian_metadata_ttl``."""
-    if not configured():
-        return _local_only()
+    """Serve apt metadata locally, else proxy it and cache it for the TTL."""
     try:
-        target = f"dists/{safe_mirror_path(path)}"
+        safe = safe_mirror_path(path)
     except PathError as exc:
         return _error(400, str(exc))
 
+    try:
+        local = _local_mirror_file("dists", safe)
+    except PathError as exc:
+        return _error(400, str(exc))
+    if local is not None:
+        return local
+
+    if not configured():
+        return _local_only()
+
+    target = f"dists/{safe}"
     store = cache()
     key = f"apt:{effective_upstream()}|{target}"
 
@@ -341,14 +378,23 @@ def _fetch_metadata(store: DiskCache, key: str, target: str) -> Response:
 # ── pool/: streamed packages ─────────────────────────────────────────
 
 def pool_response(path: str, method: str = "GET") -> Response:
-    """Proxy a package file, streaming it and forwarding ``Range`` upstream."""
-    if not configured():
-        return _local_only()
+    """Serve a package locally, else proxy it and forward ``Range`` upstream."""
     try:
-        target = f"pool/{safe_mirror_path(path)}"
+        safe = safe_mirror_path(path)
     except PathError as exc:
         return _error(400, str(exc))
 
+    try:
+        local = _local_mirror_file("pool", safe)
+    except PathError as exc:
+        return _error(400, str(exc))
+    if local is not None:
+        return local
+
+    if not configured():
+        return _local_only()
+
+    target = f"pool/{safe}"
     upstream_headers: dict[str, str] = {}
     byte_range = request.headers.get("Range")
     if byte_range:

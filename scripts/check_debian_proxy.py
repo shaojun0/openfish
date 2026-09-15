@@ -21,6 +21,11 @@ What is asserted:
   ``Content-Range`` and body; ``HEAD`` fetches headers only;
 * an upstream ``404`` is forwarded; an unreachable upstream is a JSON ``502``;
 * no upstream configured is a JSON ``404``;
+* a synced local mirror under ``DEBIAN_DIR/dists`` and ``DEBIAN_DIR/pool`` is
+  served directly, byte-for-byte and with working ``Range``/``HEAD``, even with
+  no upstream configured or an unreachable one, and it wins over the upstream;
+  a local miss still falls back to the upstream;
+* ``..`` and a symlink escaping the local mirror are refused (``4xx``);
 * anonymous access is a ``401``;
 * the pre-existing flat repository routes still work.
 
@@ -440,6 +445,136 @@ def main() -> int:
             traversal.status_code in (400, 404),
             f"status={traversal.status_code}",
         )
+
+        # ── Local mirror tree is preferred over the upstream ─────────
+        print()
+        print("── local dists/ + pool/ mirror ─────────────────────────────────")
+        LOCAL_RELEASE = (
+            b"Origin: OpenFish synced mirror\n"
+            b"Label: OpenFish\n"
+            b"Suite: stable\n"
+            b"Codename: bookworm\n"
+        )
+        LOCAL_PACKAGES = (
+            b"Package: local\n"
+            b"Version: 2.0\n"
+            b"Architecture: amd64\n"
+            b"Filename: pool/main/l/local/local_2.0_amd64.deb\n"
+        )
+        LOCAL_DEB = bytes(range(256)) * 4
+        mirror_root = _TMP / "mirror"
+        (mirror_root / "dists/bookworm/main/binary-amd64").mkdir(parents=True)
+        (mirror_root / "dists/bookworm/Release").write_bytes(LOCAL_RELEASE)
+        (mirror_root / "dists/bookworm/main/binary-amd64/Packages").write_bytes(
+            LOCAL_PACKAGES
+        )
+        (mirror_root / "pool/main/l/local").mkdir(parents=True)
+        local_deb_path = "/debian/pool/main/l/local/local_2.0_amd64.deb"
+        (mirror_root / "pool/main/l/local/local_2.0_amd64.deb").write_bytes(LOCAL_DEB)
+
+        saved_dir = settings.hub.debian_dir
+        saved_cache = settings.hub.debian_cache_dir
+        saved_upstream = settings.hub.debian_upstream
+        settings.hub.debian_dir = str(mirror_root)
+        settings.hub.debian_cache_dir = str(_TMP / "cache-local")
+
+        # Upstream is configured and would answer: the local copy must win and
+        # the mirror must not be contacted.
+        settings.hub.debian_upstream = mirror
+        before = _MirrorHandler.count(release_path)
+        response = client_get(client, "/debian/dists/bookworm/Release")
+        after = _MirrorHandler.count(release_path)
+        check(
+            "local Release wins over a configured upstream",
+            response.status_code == 200
+            and response.data == LOCAL_RELEASE
+            and after == before,
+            f"status={response.status_code} bytes={len(response.data)} "
+            f"mirror_before={before} mirror_after={after}",
+        )
+
+        # Upstream would fail: the local copy must still be served.
+        settings.hub.debian_upstream = f"http://127.0.0.1:{_free_port()}"
+        response = client_get(client, local_deb_path)
+        check(
+            "local pool .deb served while the upstream is unreachable",
+            response.status_code == 200 and response.data == LOCAL_DEB,
+            f"status={response.status_code} bytes={len(response.data)}",
+        )
+
+        # No upstream at all: the local copy must still be served.
+        settings.hub.debian_upstream = ""
+        response = client_get(
+            client, "/debian/dists/bookworm/main/binary-amd64/Packages"
+        )
+        check(
+            "local Packages served with no upstream configured",
+            response.status_code == 200 and response.data == LOCAL_PACKAGES,
+            f"status={response.status_code} bytes={len(response.data)}",
+        )
+
+        response = client_get(client, local_deb_path, headers={"Range": "bytes=10-19"})
+        check(
+            "local pool Range -> 206 with the right Content-Range",
+            response.status_code == 206
+            and response.data == LOCAL_DEB[10:20]
+            and response.headers.get("Content-Range")
+            == f"bytes 10-19/{len(LOCAL_DEB)}",
+            f"status={response.status_code} bytes={len(response.data)} "
+            f"Content-Range={response.headers.get('Content-Range')!r}",
+        )
+
+        response = client.open(local_deb_path, method="HEAD", headers=AUTH)
+        check(
+            "local pool HEAD returns headers without a body",
+            response.status_code == 200
+            and response.data == b""
+            and response.headers.get("Content-Length") == str(len(LOCAL_DEB)),
+            f"status={response.status_code} bytes={len(response.data)} "
+            f"Content-Length={response.headers.get('Content-Length')!r}",
+        )
+
+        response = client_get(client, "/debian/dists/%2e%2e/%2e%2e/etc/passwd")
+        check(
+            "local traversal path is refused",
+            400 <= response.status_code < 500,
+            f"status={response.status_code} body={response.data[:60]!r}",
+        )
+
+        # A symlink inside the tree pointing outside it must not be served.
+        secret = _TMP / "outside-secret"
+        secret.write_bytes(b"TOP SECRET\n")
+        (mirror_root / "dists/bookworm/leak").symlink_to(secret)
+        response = client_get(client, "/debian/dists/bookworm/leak")
+        check(
+            "symlink escaping the local mirror is refused",
+            400 <= response.status_code < 500 and b"TOP SECRET" not in response.data,
+            f"status={response.status_code} body={response.data[:60]!r}",
+        )
+
+        # A local miss must still fall back to the upstream.
+        settings.hub.debian_upstream = mirror
+        settings.hub.debian_cache_dir = str(_TMP / "cache-fallback")
+        response = client_get(
+            client, "/debian/dists/bookworm/main/binary-arm64/Packages"
+        )
+        check(
+            "local dists miss falls back to the upstream",
+            response.status_code == 200 and response.data == PACKAGES,
+            f"status={response.status_code} bytes={len(response.data)}",
+        )
+        response = client_get(
+            client, "/debian/pool/main/t/tiny/tiny_1.0_arm64.deb"
+        )
+        check(
+            "local pool miss falls back to the upstream",
+            response.status_code == 200 and response.data == POOL_BLOB,
+            f"status={response.status_code} bytes={len(response.data)}",
+        )
+
+        settings.hub.debian_dir = saved_dir
+        settings.hub.debian_cache_dir = saved_cache
+        settings.hub.debian_upstream = saved_upstream
 
         # ── Anonymous access ─────────────────────────────────────────
         print()
