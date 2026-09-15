@@ -1,10 +1,11 @@
 """Per-ecosystem Markdown documentation — folder projects, assets, editing.
 
 Each ecosystem group in the sidebar has its own **documentation leaf**
-(``/docs/<ecosystem>``) whose documents live as folder projects under
-``DOCS_DIR/<ecosystem>/<id>/`` — each with its own ``document.md``, a
-``meta.json`` title record and an ``assets/`` directory for the images the
-document uses.  This blueprint is the whole surface of that feature:
+(``/documentation/<ecosystem>`` — the SPA page) whose documents live as folder
+projects under ``DOCS_DIR/<ecosystem>/<id>/`` — each with its own
+``document.md``, a ``meta.json`` title record and an ``assets/`` directory for
+the images the document uses.  This blueprint is the whole surface of that
+feature:
 
 =========================================  ==========================
 ``GET    /api/v1/docs``                    every ecosystem + doc count
@@ -17,15 +18,22 @@ document uses.  This blueprint is the whole surface of that feature:
 ``GET    /api/v1/docs/<eco>/<id>/assets``  list a document's assets
 ``POST   /api/v1/docs/<eco>/<id>/assets``  upload an asset — ``doc:upload``
 ``DELETE /api/v1/docs/<eco>/<id>/assets/<name>``  delete an asset — ``doc:upload``
+``GET    /docs/<eco>``                     permanent redirect to ``/docs/<eco>/``
 ``GET    /docs/<eco>/``                    server-rendered index (HTML or JSON)
 ``GET    /docs/<eco>/<id>``                raw Markdown download
 ``GET    /docs/<eco>/<id>/assets/<name>``  one asset (image inline, rest as attachment)
 =========================================  ==========================
 
-**The split is deliberate.**  Reading and downloading require ``doc:read``,
-which the built-in ``authenticated`` role holds, so every signed-in user can
-read the handbook.  Changing anything requires ``doc:upload``, which only the
-built-in ``admin`` role holds.
+**The URL split is deliberate, and so is the boundary.**  Every ``/docs/*`` URL
+requires ``doc:read`` — there is no path under it that a trailing slash can
+flip to a different permission, because the human page lives one namespace over
+at ``/documentation/<eco>`` (served by the SPA shell).  ``/docs/<eco>`` exists
+only to redirect to the canonical slashed form, so old bookmarks keep working.
+
+**Reading and downloading** require ``doc:read``, which the built-in
+``authenticated`` role holds, so every signed-in user can read the handbook.
+Changing anything requires ``doc:upload``, which only the built-in ``admin``
+role holds.
 
 ⚠ Decorator order is load-bearing (see ``routes/python_build.py``): the
 ``@docs_bp.route`` decorator must be the topmost line, or the guard is applied
@@ -38,7 +46,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from flask import (
-    Blueprint, abort, jsonify, render_template_string, request,
+    Blueprint, abort, jsonify, redirect, render_template_string, request,
     send_from_directory, url_for,
 )
 
@@ -584,6 +592,29 @@ def docs_asset_delete(ecosystem: str, doc_id: str, name: str):
 
 # ── Machine-facing index, raw download and assets ────────────────────
 
+@docs_bp.route("/docs/<ecosystem>")
+@require_permission(DOC_READ)
+@api_operation(
+    summary="Canonical documentation index URL",
+    description=(
+        "Permanent redirect (308) to `/docs/<ecosystem>/`, so the docs "
+        "namespace has exactly one URL per resource. Before this route existed "
+        "the SPA shell claimed the unslashed form, which meant `/docs/<eco>` "
+        "and `/docs/<eco>/` answered with different content **and different "
+        "permissions** — a trailing slash silently changed who could read it."
+    ),
+    tags=["Docs"],
+    parameters=[_ECOSYSTEM_PARAM],
+    responses={
+        "308": {"description": "Redirect to `/docs/<ecosystem>/`"},
+        **errors("401", "403", "404"),
+    },
+)
+def docs_index_redirect(ecosystem: str):
+    _require_ecosystem(ecosystem)
+    return redirect(url_for("docs.docs_index", ecosystem=ecosystem), code=308)
+
+
 @docs_bp.route("/docs/<ecosystem>/")
 @require_permission(DOC_READ)
 @api_operation(
@@ -616,7 +647,7 @@ def docs_index(ecosystem: str):
         templates.docs_index(),
         server_name=settings.server.server_name,
         base_url=url_for("docs.docs_index", ecosystem=ecosystem, _external=True),
-        spa_url=spa_url(f"/docs/{ecosystem}"),
+        spa_url=spa_url(f"/documentation/{ecosystem}"),
         ecosystem=ecosystem,
         documents=payload["documents"],
         doc_count=payload["doc_count"],

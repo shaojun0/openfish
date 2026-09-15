@@ -129,6 +129,7 @@ EXPECTED: dict[tuple[str, str], str] = {
     ("docs", "docs_assets"): "DOC_READ",
     ("docs", "docs_asset_upload"): "DOC_UPLOAD",
     ("docs", "docs_asset_delete"): "DOC_UPLOAD",
+    ("docs", "docs_index_redirect"): "DOC_READ",
     ("docs", "docs_index"): "DOC_READ",
     ("docs", "docs_raw"): "DOC_READ",
     ("docs", "docs_asset_raw"): "DOC_READ",

@@ -49,7 +49,7 @@ interface NavGroup {
  *
  * "文档" is a **leaf node inside each ecosystem group**, not one shared entry at
  * the top of the menu: each ecosystem owns its own Markdown documentation
- * (`/docs/<ecosystem>`) and the server stores it under `DOCS_DIR/<ecosystem>/`.
+ * (`/documentation/<ecosystem>`) and the server stores it under `DOCS_DIR/<ecosystem>/`.
  * Reading needs `doc:read`; uploading to change the content needs `doc:upload`.
  *
  * Items with an `href` are machine-facing (no JavaScript) and open in a new
@@ -60,7 +60,7 @@ const home: NavItem = { index: '/', titleKey: 'nav.home', icon: 'Odometer' }
 /** The documentation leaf every ecosystem group carries. */
 function docItem(ecosystem: string): NavItem {
   return {
-    index: `/docs/${ecosystem}`,
+    index: `/documentation/${ecosystem}`,
     titleKey: 'nav.doc',
     icon: 'Document',
     permission: 'doc:read',

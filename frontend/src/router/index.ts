@@ -60,8 +60,10 @@ const routes: RouteRecordRaw[] = [
       },
       {
         // One documentation leaf per ecosystem — the sidebar adds
-        // `/docs/<ecosystem>` to every ecosystem group.
-        path: 'docs/:ecosystem',
+        // `/documentation/<ecosystem>` to every ecosystem group.  The SPA page
+        // lives outside `/docs/*` on purpose: every guarded docs URL needs
+        // `doc:read`, so a trailing slash can never flip the permission.
+        path: 'documentation/:ecosystem',
         name: 'docs',
         component: () => import('@/views/DocsView.vue'),
         meta: { titleKey: 'nav.doc', icon: 'Document', requiresPermission: 'doc:read' },

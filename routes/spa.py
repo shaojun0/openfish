@@ -76,7 +76,7 @@ def index():
 @spa_bp.route("/docker")
 @spa_bp.route("/debian")
 @spa_bp.route("/models")
-@spa_bp.route("/docs/<ecosystem>")
+@spa_bp.route("/documentation/<ecosystem>")
 def page(ecosystem: str | None = None):
     return _shell()
 

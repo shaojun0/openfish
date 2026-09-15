@@ -20,8 +20,11 @@ import { useSessionStore } from '@/stores/session'
 /**
  * One ecosystem's documentation leaf.
  *
- * The route parameter picks the ecosystem (`/docs/python`, `/docs/npm`, …), so
- * every sidebar group reuses this single view.  A document is a folder project
+ * The route parameter picks the ecosystem (`/documentation/python`,
+ * `/documentation/npm`, …), so every sidebar group reuses this single view.
+ * The server-rendered index and the raw Markdown stay under `/docs/<eco>/`
+ * (both `doc:read`); this page is the public SPA shell one namespace over.
+ * A document is a folder project
  * with its own assets: readers can view and download it, and an administrator
  * (`doc:upload`) can create one from the list's "+" control, edit it in the
  * browser, or delete it.  The server enforces the same rule regardless of what

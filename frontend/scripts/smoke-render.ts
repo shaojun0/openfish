@@ -108,7 +108,7 @@ const EXPECTED = {
   '/debian': ['page__title', 'card-title', 'setup'],
   '/tools': ['page__title', 'toolbar__search'],
   '/models': ['page__title', 'stat-row'],
-  '/docs/npm': ['page__title', 'docs-view'],
+  '/documentation/npm': ['page__title', 'docs-view'],
   '/api-keys': ['create-row', 'card-title'],
   '/admin': ['stat-grid', 'card-title'],
   '/access': ['access-view', 'card-title'],

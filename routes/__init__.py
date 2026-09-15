@@ -12,7 +12,8 @@ Layout
 ``/npm/*``            npm index, ``/-/all``, ``/-/ping`` + tarball downloads
 ``/docker/*``         docker index, ``/v2/_catalog`` + image tarball downloads
 ``/debian/*``         debian index, flat ``Packages`` + .deb downloads
-``/docs/<eco>/*``     per-ecosystem Markdown documentation (index + downloads)
+``/docs/<eco>/*``     per-ecosystem Markdown documentation — every URL needs ``doc:read``
+``/documentation/<eco>`` the SPA page that browses it (a public shell, one namespace over)
 ``/openapi.json``     OpenAPI 3.1 description; ``/docs`` and ``/llms.txt`` alongside
 ``/auth/*``           OAuth2 login flow
 ``/*``                the SPA shell (see ``routes/spa.py``)

@@ -26,7 +26,8 @@ the codebase.
   source, an optional upstream mirror is fetched on demand and cached — see
   [Artifact hub](#artifact-hub-tools--npm--docker--debian--model-routing).
 - **Ecosystem documentation** — every ecosystem group owns its own
-  documentation leaf (`/docs/python`, `/docs/npm`, `/docs/docker`, …) holding
+  documentation leaf (`/documentation/python`, `/documentation/npm`,
+  `/documentation/docker`, …) holding
   that ecosystem's Markdown documents, stored as folder projects under
   `DOCS_DIR/<ecosystem>/` with their own assets. Any signed-in user can read
   and download them; only an administrator can create, edit or delete one —
@@ -285,7 +286,7 @@ The permission points shipped today, and the routes that enforce them:
 | `admin:roles` | `/api/v1/admin/{roles,permissions,users}` |
 | `model:read` | `GET /api/v1/models` |
 | `model:write` | `POST /api/v1/models`, `PUT`/`DELETE /api/v1/models/<name>`, `POST /api/v1/models/probe`, `POST /api/v1/models/<name>/check` — adds, edits, removes and re-probes model routes |
-| `doc:read` | `GET /api/v1/docs*`, `/docs/<ecosystem>/`, `/docs/<ecosystem>/<id>`, `/docs/<ecosystem>/<id>/assets/<name>` |
+| `doc:read` | `GET /api/v1/docs*`, `/docs/<ecosystem>` (308 → `/docs/<ecosystem>/`), `/docs/<ecosystem>/`, `/docs/<ecosystem>/<id>`, `/docs/<ecosystem>/<id>/assets/<name>` — **everything under `/docs/`** |
 | `doc:upload` | `POST`/`PUT`/`DELETE` on `/api/v1/docs/<ecosystem>[/<id>[/assets/<name>]]` and `POST /api/v1/docs/<ecosystem>/<id>/preview` — creates, edits and deletes documents and their assets |
 
 > **Adding a point is a migration.** The per-role seed data above applies only
@@ -375,7 +376,7 @@ first, and an optional upstream mirror is fetched on demand and cached:
 | Debian       | `/debian`  | `DEBIAN_DIR`         | `DEBIAN_UPSTREAM`   | flat `Packages` + apt mirror proxy (`dists/`, `pool/`) |
 | 工具 / Tools | `/tools`   | `TOOLS_DIR`          | —                   | direct file downloads |
 | 模型路由     | `/models`  | `MODELS_FILE` + `MODEL_HEALTH_FILE` | —    | JSON route table — read by everyone, **added/edited/probed by admins** |
-| 文档 / Docs  | `/docs/<eco>` | `DOCS_DIR/<eco>/<id>/` | —                | Markdown folder projects — read by everyone, **created/edited by admins** |
+| 文档 / Docs  | `/documentation/<eco>` | `DOCS_DIR/<eco>/<id>/` | —                | Markdown folder projects — read by everyone, **created/edited by admins** |
 
 The Python and npm pages each carry a **dropdown** that switches the page
 between its two sub-elements — packages vs. prebuilt builds for Python, npm
@@ -485,8 +486,9 @@ not use `:ro`.
 ### Ecosystem documentation
 
 Every ecosystem group in the sidebar carries a **documentation leaf of its own**
-— `/docs/python`, `/docs/npm`, `/docs/docker`, `/docs/debian`, `/docs/tools` and
-`/docs/models` — rather than one shared entry at the top of the menu. A document
+— `/documentation/python`, `/documentation/npm`, `/documentation/docker`,
+`/documentation/debian`, `/documentation/tools` and `/documentation/models` —
+rather than one shared entry at the top of the menu. A document
 is a small **folder project**: its Markdown source, a `meta.json` title record,
 and its own `assets/` directory, so screenshots belong to the document that uses
 them instead of every ecosystem sharing one flat pile:
@@ -520,8 +522,14 @@ conversion with a small, dependency-free renderer (`services/markdown.py`) that
 HTML-escapes the source *before* emitting any markup, so raw HTML in a document
 can never become live markup. A document's relative `assets/…` references are
 rewritten to their absolute URL only while rendering, so the stored Markdown
-stays portable. Each document also has raw forms:
+stays portable. The URL layout follows the permission boundary exactly: the
+browser page is a public SPA shell at `/documentation/<ecosystem>`, while
+**every URL under `/docs/` requires `doc:read`** — one URL per resource, so
+appending a trailing slash can never change who is allowed to read it. Each
+document also has raw forms:
 
+* `GET /docs/<ecosystem>` — a 308 redirect to the canonical slashed form, so
+  bookmarks made before the split keep working.
 * `GET /docs/<ecosystem>/` — the server-rendered index (HTML, or JSON with
   `?format=json`), the docs counterpart of `/tools/`.
 * `GET /docs/<ecosystem>/<id>` — the raw `.md` (`?download=1` for an
@@ -558,7 +566,7 @@ in a new tab. Templates are grouped by ecosystem under `static/`:
 | npm    | `/npm/` | `npm/index.html` lists local packages | `?format=json` → the `/-/all` document |
 | Docker | `/docker/` | `docker/index.html` lists images and config snippets | `?format=json` → the `/api/v1/docker` document |
 | Debian | `/debian/` | `debian/index.html` lists `.deb` files | `?format=json` → the `/api/v1/debian` document |
-| Docs   | `/docs/<eco>/` | `docs/index.html` lists an ecosystem's document projects | `?format=json` → the `/api/v1/docs/<eco>` document |
+| Docs   | `/docs/<eco>/` | `docs/index.html` lists an ecosystem's document projects | `?format=json` → the `/api/v1/docs/<eco>` document (the browser page is `/documentation/<eco>`) |
 
 Python and tools follow the content-negotiation convention already used by
 `/simple/`. npm has no official HTML index, so the JSON side follows the two
@@ -725,7 +733,7 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 ### Browser-facing
 
 `/`, `/packages`, `/npm`, `/docker`, `/debian`, `/tools`, `/models`,
-`/docs/<ecosystem>`, `/api-keys`,
+`/documentation/<ecosystem>`, `/api-keys`,
 `/admin` and `/access` all serve the SPA shell. A deep link such as `/api-keys`
 is handled by Flask's history-mode fallback, so links can be shared and
 bookmarked.
