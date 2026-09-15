@@ -3,6 +3,8 @@
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from config.paths import backend_path
+
 
 class ServerConfig(BaseSettings):
     # Read the project-level .env directly so flat names such as HOST / PORT /
@@ -50,8 +52,19 @@ class ServerConfig(BaseSettings):
         ge=60,
         description="Admin stats background refresh interval in seconds",
     )
+    frontend_dist_dir: str = Field(
+        default="",
+        description=(
+            "Directory holding the built Vue SPA (index.html plus assets/). "
+            "Empty = <backend>/static/dist, which is where a single-container "
+            "build drops it. In the split Docker deployment the SPA is served "
+            "by the frontend container instead, so this normally stays empty; "
+            "set it to ../frontend/dist to let Flask serve the SPA during local "
+            "development without running the Vite dev server."
+        ),
+    )
     tls_ca_file: str = Field(
-        default="certs/ca_chain.pem",
+        default=backend_path("certs", "ca_chain.pem"),
         description=(
             "Private-CA chain published at GET /certs/ca_chain.pem so intranet "
             "clients can install it. Deliberately outside the web root: exactly "

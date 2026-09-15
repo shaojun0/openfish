@@ -12,7 +12,7 @@ Typical first run on a fresh deployment::
 
 Or inside Docker::
 
-    docker exec cpypiserver-std python /app/cli.py create-admin zhangsan
+    docker exec openfish-backend python /app/cli.py create-admin zhangsan
 
 Every command is idempotent, so running one twice is harmless.
 """

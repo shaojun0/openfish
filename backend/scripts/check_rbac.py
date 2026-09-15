@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Gate: the RBAC tables must actually decide access.
 
-Run from the repository root::
+Run from the backend directory (`backend/`)::
 
     python scripts/check_rbac.py
 

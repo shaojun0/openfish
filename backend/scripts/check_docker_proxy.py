@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Gate: the Docker Registry v2 pull flow must work end-to-end, offline.
 
-Run from the repository root::
+Run from the backend directory (`backend/`)::
 
     python scripts/check_docker_proxy.py
 

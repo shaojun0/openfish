@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Gate: ``AUTH_ENABLED=false`` really does fall through to the `anonymous` role.
 
-Run from the repository root::
+Run from the backend directory (`backend/`)::
 
     python scripts/check_auth_disabled.py
 

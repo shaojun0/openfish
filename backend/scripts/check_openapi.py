@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Gate: `/openapi.json` must describe exactly what the server actually serves.
 
-Run from the repository root::
+Run from the backend directory (`backend/`)::
 
     python scripts/check_openapi.py
 

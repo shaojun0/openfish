@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Gate: the dependency-free Markdown renderer stays safe and correct.
 
-Run from the repository root::
+Run from the backend directory (`backend/`)::
 
     python scripts/check_markdown.py
 

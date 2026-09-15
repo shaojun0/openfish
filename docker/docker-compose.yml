@@ -1,185 +1,223 @@
-# ── cpypiserver docker-compose ──────────────────────────────────────
-#   准备配置:  cp .env.example .env  然后编辑 .env 填入真实值
-#   正常启动:  docker compose up -d
-#   调试模式:  docker compose --profile debug up -d
-#              docker exec -it cpypiserver-debug bash
-#   构建:      docker compose build --no-cache
+# ── openfish docker-compose ─────────────────────────────────────────
+#   准备配置:  cp .env.example .env   然后编辑 .env 填入真实值
+#   构建+启动: docker compose up -d --build
+#   仅重建某个: docker compose build backend   /   docker compose build frontend
+#   调试容器:  docker compose --profile debug up -d
+#              docker exec -it openfish-backend-debug bash
+#   可选数据库: docker compose --profile db up -d
+#
+#   四个服务，各自独立构建：
+#     frontend  Vue 3 SPA（node 构建 → nginx 静态托管）   ← frontend/Dockerfile
+#     backend   Flask + gunicorn（API 与各生态协议）      ← backend/Dockerfile
+#     nginx     边缘网关：唯一对外入口，按路径分流          ← docker/nginx/nginx.conf
+#     db        PostgreSQL（profile: db，预留，应用暂未接入）
 #
 #   所有密钥/口令都通过同目录下的 .env 注入（见 .env.example），
 #   不要把真实凭据写进本文件或提交到仓库。
 
+name: openfish
+
+# ── 后端共享配置（两个后端服务复用，避免逐项复制）──────────────────
+x-backend-env: &backend-env
+  # ── 服务器 ──────────────────────────────────────────────
+  SERVER_NAME: cpypiserver
+  HOST: 0.0.0.0
+  PORT: "8080"
+  PACKAGES_DIR: ${PACKAGES_DIR:-/app/share/cpypiserver_public/packages}
+  PYTHON_BUILDS_DIR: ${PYTHON_BUILDS_DIR:-/app/share/cpypiserver_public/cpython}
+  API_KEYS_FILE: /app/data/cpypiserver.db
+  # 对本机可达的绝对基址；设备授权流程用它拼 verification_uri。
+  # 走本 compose 的 nginx 时留空即可（从 X-Forwarded-* 推导）。
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+  # ── 内网制品中心 ────────────────────────────────────────
+  TOOLS_DIR: /app/tools
+  NPM_DIR: /app/npm
+  NODE_BUILDS_DIR: /app/node-builds
+  DOCKER_DIR: /app/docker-images
+  DEBIAN_DIR: /app/debian
+  DOCS_DIR: /app/docs
+  MODELS_FILE: /app/config/model_routes.json
+  NPM_UPSTREAM: ${NPM_UPSTREAM:-https://registry.npmmirror.com}
+  DOCKER_REGISTRY: ${DOCKER_REGISTRY:-}
+  DEBIAN_MIRROR: ${DEBIAN_MIRROR:-}
+  # ── 只读穿透代理（回源地址留空则仅服务本地制品）──────────
+  NPM_PROXY_ENABLED: ${NPM_PROXY_ENABLED:-true}
+  NPM_UPSTREAM_TOKEN: ${NPM_UPSTREAM_TOKEN:-}
+  NPM_TIMEOUT: ${NPM_TIMEOUT:-30}
+  NPM_CACHE_DIR: /app/data/cache/npm
+  NPM_CACHE_MAX_MB: ${NPM_CACHE_MAX_MB:-512}
+  DOCKER_UPSTREAM: ${DOCKER_UPSTREAM:-}
+  DOCKER_UPSTREAM_USERNAME: ${DOCKER_UPSTREAM_USERNAME:-}
+  DOCKER_UPSTREAM_PASSWORD: ${DOCKER_UPSTREAM_PASSWORD:-}
+  DOCKER_DEFAULT_NAMESPACE: ${DOCKER_DEFAULT_NAMESPACE:-library}
+  DOCKER_TIMEOUT: ${DOCKER_TIMEOUT:-60}
+  DOCKER_CACHE_DIR: /app/data/cache/docker
+  DOCKER_CACHE_MAX_MB: ${DOCKER_CACHE_MAX_MB:-1024}
+  DEBIAN_UPSTREAM: ${DEBIAN_UPSTREAM:-}
+  DEBIAN_TIMEOUT: ${DEBIAN_TIMEOUT:-60}
+  DEBIAN_CACHE_DIR: /app/data/cache/debian
+  DEBIAN_CACHE_MAX_MB: ${DEBIAN_CACHE_MAX_MB:-256}
+  DEBIAN_METADATA_TTL: ${DEBIAN_METADATA_TTL:-300}
+  DEBUG: "false"
+  # ── 安全（值来自 docker/.env，未设置则启动报错）─────────
+  SECRET_KEY: ${SECRET_KEY:?请在 docker/.env 中设置 SECRET_KEY}
+  # ── 认证 ────────────────────────────────────────────────
+  AUTH_USERNAME: ${AUTH_USERNAME:-admin}
+  AUTH_ASSERT: ${AUTH_ASSERT:-}
+  OAUTH2_PRODUCT_ID: ${OAUTH2_PRODUCT_ID:-0}
+  OAUTH2_CLIENT_ID: ${OAUTH2_CLIENT_ID:-}
+  OAUTH2_CLIENT_SECRET: ${OAUTH2_CLIENT_SECRET:-}
+  OAUTH2_TOKEN_URL: ${OAUTH2_TOKEN_URL:-}
+  OAUTH2_AUTHORIZE_URL: ${OAUTH2_AUTHORIZE_URL:-}
+  OAUTH2_INTROSPECT_URL: ${OAUTH2_INTROSPECT_URL:-}
+  OAUTH2_CA_BUNDLE: ${OAUTH2_CA_BUNDLE:-}
+  IS_4A: ${IS_4A:-false}
+  # ── 上传限制（需与 nginx client_max_body_size 保持一致）──
+  MAX_CONTENT_LENGTH: "104857600"
+
+# 制品库与运行态：backend/ 内是运行态，项目根是操作员投放制品的目录。
+x-backend-volumes: &backend-volumes
+  - ${SHARE_DIR:-/data/share}:/app/share
+  # ── 内网制品中心：丢文件即生效，无需重建镜像 ──────────────
+  - ../tools:/app/tools
+  - ../npm:/app/npm
+  - ../node-builds:/app/node-builds
+  - ../docker-images:/app/docker-images
+  - ../debian:/app/debian
+  - ../docs:/app/docs
+  # 模型路由表：改完刷新页面即可；管理员在 /models 页可在线编辑，故需可写
+  - ../backend/config/model_routes.json:/app/config/model_routes.json
+  # SQLite 库与回源缓存，容器重建后不丢
+  - ../backend/data:/app/data
+  # 自备 TLS 证书（可选）：把 CA 链放到 docker/certs/ca_chain.pem 后取消注释。
+  # 挂载点是 /app/certs（**不在** web 根目录）：服务端只匿名供应
+  # GET /certs/ca_chain.pem 这一个文件，同目录下的私钥不会被暴露。
+  # - ./certs/ca_chain.pem:/app/certs/ca_chain.pem:ro
+
 services:
-  pypiserver:
-    image: cpypiserver:latest
-    container_name: cpypiserver-std
-    ports:
-      - "${PYPISERVER_PORT:-20416}:8080"
-    volumes:
-      - ${SHARE_DIR:-/data/share}:/app/share
-      # ── 内网制品中心：工具 / npm / 模型路由 ──────────────────
-      # 工具目录 tools/<分类>/<文件>，丢文件即生效，无需重建镜像
-      - ./../tools:/app/tools
-      # 本地 npm 目录（*.tgz 与 catalog.json）
-      - ./../npm:/app/npm
-      # Node.js 预编译镜像（nodejs.org/dist 布局，供 nvm / fnm 使用）
-      - ./../node-builds:/app/node-builds
-      # Docker 离线制品（镜像 tar 与 compose/Dockerfile）
-      - ./../docker-images:/app/docker-images
-      # Debian 本地包与 apt 配置片段
-      - ./../debian:/app/debian
-      # 各生态 Markdown 文档：docs/<生态>/<文档标识>/document.md（另有 meta.json 与 assets/）。
-      # 只有管理员（doc:upload）能在浏览器中在线编辑、新增/删除文档并上传附件，其他人只能查看/下载。
-      - ./../docs:/app/docs
-      # 模型路由表：只读挂载，改完刷新页面即可
-      - ./../config/model_routes.json:/app/config/model_routes.json:ro
-      # 持久化 keyring/公开包，放在主 packages 目录统一管理
-      # - ./../packages/keyring*.whl:/app/packages/
-      # API keys 持久化
-      - ./api_keys_data:/app/data
-      # 自备 TLS 证书（可选）：把 CA 链放到 docker/certs/ca_chain.pem 后取消注释。
-      # 证书文件已被 .gitignore 忽略，不会进入仓库。
-      # 注意挂载点是 /app/certs（**不在** web 根目录）：服务端只会匿名供应
-      # GET /certs/ca_chain.pem 这一个文件，同目录下的私钥不会被暴露。
-      # - ./certs/ca_chain.pem:/app/certs/ca_chain.pem:ro
-      # 持久化包文件，容器删除后数据不丢失
-      # - ${SHARE_DIR:-/data/share}/cpypiserver_public/packages:/app/packages
-      # - ${SHARE_DIR:-/data/share}/cpypiserver_public/python-build-standalone:/app/cpython
+  # ── 后端：Flask + gunicorn，只在内网暴露 8080 ───────────────────
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    image: openfish-backend:latest
+    container_name: openfish-backend
+    restart: unless-stopped
+    expose:
+      - "8080"
     environment:
-      # ── 服务器 ──────────────────────────────────────────────
-      - SERVER_NAME=cpypiserver
-      - HOST=0.0.0.0
-      - PORT=8080                        # Flask 内部端口（nginx 代理到 80）
-      - PACKAGES_DIR=${PACKAGES_DIR:-/app/share/cpypiserver_public/packages}
-      - PYTHON_BUILDS_DIR=${PYTHON_BUILDS_DIR:-/app/share/cpypiserver_public/cpython}
-      - API_KEYS_FILE=/app/data/cpypiserver.db
-      # ── 内网制品中心 ────────────────────────────────────────
-      - TOOLS_DIR=/app/tools
-      - NPM_DIR=/app/npm
-      - NODE_BUILDS_DIR=/app/node-builds
-      - DOCKER_DIR=/app/docker-images
-      - DEBIAN_DIR=/app/debian
-      - DOCS_DIR=/app/docs
-      - MODELS_FILE=/app/config/model_routes.json
-      - NPM_UPSTREAM=${NPM_UPSTREAM:-https://registry.npmmirror.com}
-      - DOCKER_REGISTRY=${DOCKER_REGISTRY:-}
-      - DEBIAN_MIRROR=${DEBIAN_MIRROR:-}
-      # ── 只读穿透代理（回源地址留空则仅服务本地制品）──────────
-      # npm：packument / tarball / /-/v1/search 由 NPM_UPSTREAM 回源
-      - NPM_PROXY_ENABLED=${NPM_PROXY_ENABLED:-true}
-      - NPM_UPSTREAM_TOKEN=${NPM_UPSTREAM_TOKEN:-}
-      - NPM_TIMEOUT=${NPM_TIMEOUT:-30}
-      - NPM_CACHE_DIR=/app/data/cache/npm
-      - NPM_CACHE_MAX_MB=${NPM_CACHE_MAX_MB:-512}
-      # Docker Registry v2：留空则只服务已缓存的 manifest/blob
-      - DOCKER_UPSTREAM=${DOCKER_UPSTREAM:-}
-      - DOCKER_UPSTREAM_USERNAME=${DOCKER_UPSTREAM_USERNAME:-}
-      - DOCKER_UPSTREAM_PASSWORD=${DOCKER_UPSTREAM_PASSWORD:-}
-      - DOCKER_DEFAULT_NAMESPACE=${DOCKER_DEFAULT_NAMESPACE:-library}
-      - DOCKER_TIMEOUT=${DOCKER_TIMEOUT:-60}
-      - DOCKER_CACHE_DIR=/app/data/cache/docker
-      - DOCKER_CACHE_MAX_MB=${DOCKER_CACHE_MAX_MB:-1024}
-      # apt：dists/ 与 pool/ 由 DEBIAN_UPSTREAM 回源，元数据带 TTL 缓存
-      - DEBIAN_UPSTREAM=${DEBIAN_UPSTREAM:-}
-      - DEBIAN_TIMEOUT=${DEBIAN_TIMEOUT:-60}
-      - DEBIAN_CACHE_DIR=/app/data/cache/debian
-      - DEBIAN_CACHE_MAX_MB=${DEBIAN_CACHE_MAX_MB:-256}
-      - DEBIAN_METADATA_TTL=${DEBIAN_METADATA_TTL:-300}
-      - DEBUG=false
+      <<: *backend-env
+    volumes: *backend-volumes
+    networks:
+      - openfish
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
 
-      # ── 安全（值来自 docker/.env，未设置则启动报错）─────────
-      - SECRET_KEY=${SECRET_KEY:?请在 docker/.env 中设置 SECRET_KEY}
+  # ── 前端：Vue SPA 构建产物，由自己的 nginx 静态托管 ──────────────
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        # 内网可换成镜像源，例如 https://registry.npmmirror.com
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
+    image: openfish-frontend:latest
+    container_name: openfish-frontend
+    restart: unless-stopped
+    expose:
+      - "80"
+    networks:
+      - openfish
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
 
-      # ── 认证（根据需要配置）─────────────────────────────────
-      # Basic Auth
-      - AUTH_USERNAME=${AUTH_USERNAME:-admin}
-      - AUTH_ASSERT=${AUTH_ASSERT:-}
+  # ── 边缘网关：唯一对外入口，按路径分流到 frontend / backend ──────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: openfish-nginx
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    ports:
+      - "${PYPISERVER_PORT:-20416}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # 可选 TLS：把证书放进 docker/certs/ 后取消注释，并在 nginx.conf 中
+      # 打开 443 监听块。
+      # - ./certs:/etc/nginx/certs:ro
+    networks:
+      - openfish
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
 
-      # OAuth2（如需启用 OAuth2 登录；留空则自动禁用）
-      - OAUTH2_PRODUCT_ID=${OAUTH2_PRODUCT_ID:-0}
-      - OAUTH2_CLIENT_ID=${OAUTH2_CLIENT_ID:-}
-      - OAUTH2_CLIENT_SECRET=${OAUTH2_CLIENT_SECRET:-}
-      - OAUTH2_TOKEN_URL=${OAUTH2_TOKEN_URL:-}
-      - OAUTH2_AUTHORIZE_URL=${OAUTH2_AUTHORIZE_URL:-}
-      - OAUTH2_INTROSPECT_URL=${OAUTH2_INTROSPECT_URL:-}
-      # 私有 CA 证书路径；留空 = 系统信任库。没有关闭校验的开关。
-      - OAUTH2_CA_BUNDLE=${OAUTH2_CA_BUNDLE:-}
-      - IS_4A=${IS_4A:-false}
-      # ── 上传限制 ────────────────────────────────────────────
-      - MAX_CONTENT_LENGTH=104857600      # 100MB
+  # ── 可选数据库（profile: db）────────────────────────────────────
+  # 目前**应用并未接入**：授权/API key/统计仍存在 backend/data 下的 SQLite。
+  # 这个服务是给后续多实例/高可用扩展预留的，启用它不会改变应用行为。
+  #   docker compose --profile db up -d
+  db:
+    image: postgres:16-alpine
+    container_name: openfish-db
+    profiles:
+      - db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-openfish}
+      POSTGRES_USER: ${POSTGRES_USER:-openfish}
+      # 默认值仅用于本地试用；对外或有真实数据时必须覆盖。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-openfish-dev-only}
+    volumes:
+      - openfish_db_data:/var/lib/postgresql/data
+    networks:
+      - openfish
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-openfish} -d ${POSTGRES_DB:-openfish}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  # ── 调试容器：只起 bash，不进服务，方便改代码排查 ──────────────
-  pypiserver-debug:
-    image: cpypiserver:latest
-    container_name: cpypiserver-debug
+  # ── 调试容器：只起 bash，方便改代码排查（profile: debug）─────────
+  backend-debug:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    image: openfish-backend:latest
+    container_name: openfish-backend-debug
     profiles:
       - debug
     ports:
       - "${PYPISERVER_DEBUG_PORT:-20417}:8080"
-    volumes:
-      - ${SHARE_DIR:-/data/share}:/app/share
-      - api_keys_data:/app/data
-      - ./../tools:/app/tools
-      - ./../npm:/app/npm
-      - ./../node-builds:/app/node-builds
-      - ./../docker-images:/app/docker-images
-      - ./../debian:/app/debian
-      - ./../docs:/app/docs
-      - ./../config/model_routes.json:/app/config/model_routes.json:ro
     environment:
-      - SERVER_NAME=cpypiserver
-      - HOST=0.0.0.0
-      - PORT=8080
-      - PACKAGES_DIR=${PACKAGES_DIR:-/app/share/cpypiserver_public/packages}
-      - PYTHON_BUILDS_DIR=${PYTHON_BUILDS_DIR:-/app/share/cpypiserver_public/cpython}
-      - API_KEYS_FILE=/app/data/cpypiserver.db
-      - TOOLS_DIR=/app/tools
-      - NPM_DIR=/app/npm
-      - NODE_BUILDS_DIR=/app/node-builds
-      - DOCKER_DIR=/app/docker-images
-      - DEBIAN_DIR=/app/debian
-      - DOCS_DIR=/app/docs
-      - MODELS_FILE=/app/config/model_routes.json
-      - NPM_UPSTREAM=${NPM_UPSTREAM:-https://registry.npmmirror.com}
-      - DOCKER_REGISTRY=${DOCKER_REGISTRY:-}
-      - DEBIAN_MIRROR=${DEBIAN_MIRROR:-}
-      - NPM_PROXY_ENABLED=${NPM_PROXY_ENABLED:-true}
-      - NPM_UPSTREAM_TOKEN=${NPM_UPSTREAM_TOKEN:-}
-      - NPM_TIMEOUT=${NPM_TIMEOUT:-30}
-      - NPM_CACHE_DIR=/app/data/cache/npm
-      - NPM_CACHE_MAX_MB=${NPM_CACHE_MAX_MB:-512}
-      - DOCKER_UPSTREAM=${DOCKER_UPSTREAM:-}
-      - DOCKER_UPSTREAM_USERNAME=${DOCKER_UPSTREAM_USERNAME:-}
-      - DOCKER_UPSTREAM_PASSWORD=${DOCKER_UPSTREAM_PASSWORD:-}
-      - DOCKER_DEFAULT_NAMESPACE=${DOCKER_DEFAULT_NAMESPACE:-library}
-      - DOCKER_TIMEOUT=${DOCKER_TIMEOUT:-60}
-      - DOCKER_CACHE_DIR=/app/data/cache/docker
-      - DOCKER_CACHE_MAX_MB=${DOCKER_CACHE_MAX_MB:-1024}
-      - DEBIAN_UPSTREAM=${DEBIAN_UPSTREAM:-}
-      - DEBIAN_TIMEOUT=${DEBIAN_TIMEOUT:-60}
-      - DEBIAN_CACHE_DIR=/app/data/cache/debian
-      - DEBIAN_CACHE_MAX_MB=${DEBIAN_CACHE_MAX_MB:-256}
-      - DEBIAN_METADATA_TTL=${DEBIAN_METADATA_TTL:-300}
-      - DEBUG=true
-      - SECRET_KEY=${SECRET_KEY:?请在 docker/.env 中设置 SECRET_KEY}
-      - AUTH_USERNAME=${AUTH_USERNAME:-admin}
-      - AUTH_ASSERT=${AUTH_ASSERT:-}
-      - OAUTH2_PRODUCT_ID=${OAUTH2_PRODUCT_ID:-0}
-      - OAUTH2_CLIENT_ID=${OAUTH2_CLIENT_ID:-}
-      - OAUTH2_CLIENT_SECRET=${OAUTH2_CLIENT_SECRET:-}
-      - OAUTH2_TOKEN_URL=${OAUTH2_TOKEN_URL:-}
-      - OAUTH2_AUTHORIZE_URL=${OAUTH2_AUTHORIZE_URL:-}
-      - OAUTH2_INTROSPECT_URL=${OAUTH2_INTROSPECT_URL:-}
-      # 私有 CA 证书路径；留空 = 系统信任库。没有关闭校验的开关。
-      - OAUTH2_CA_BUNDLE=${OAUTH2_CA_BUNDLE:-}
-      - IS_4A=${IS_4A:-false}
-      - MAX_CONTENT_LENGTH=104857600
+      <<: *backend-env
+      DEBUG: "true"
+    volumes: *backend-volumes
+    networks:
+      - openfish
     command: >
       bash -c "echo '🔧 调试容器已启动';
-               echo '   进入: docker exec -it cpypiserver-debug bash';
+               echo '   进入: docker exec -it openfish-backend-debug bash';
                echo '   手动启服务: cd /app && python app.py';
                sleep infinity"
     stdin_open: true
     tty: true
 
+networks:
+  openfish:
+    driver: bridge
+
 volumes:
-  api_keys_data:
+  openfish_db_data:

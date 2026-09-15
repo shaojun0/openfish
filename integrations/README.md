@@ -1,8 +1,9 @@
 # integrations/
 
-面向**本平台下游客户端**的集成代码。这些不是服务端的一部分，不会进入
-`cpypiserver` 镜像（见 `.dockerignore` 里的 `integrations/`），但它们与平台
-的接口是强耦合的，所以和平台放在同一个仓库里一起版本化。
+面向**本平台下游客户端**的集成代码。这些不是服务端的一部分，不会进入任何
+镜像：`integrations/` 位于 `backend/` 与 `frontend/` 两个构建上下文之外，
+所以服务端镜像根本看不到它。但它与平台的接口是强耦合的，所以和平台放在
+同一个仓库里一起版本化。
 
 ## `dsh-plugin-enterprise-intranet/`
 
@@ -27,9 +28,9 @@ DSH（DeepSeek Harness）的**企业内网模式**插件。它让 DSH：
 | 工具 / 文档目录 | `GET /api/v1/tools`、`GET /api/v1/docs` | `tool:read` / `doc:read` |
 | 身份探测 | `GET /api/v1/session` | 匿名（返回 `authenticated:false`） |
 
-这些接口由 `routes/device.py`、`services/device_auth.py` 和
-`services/model_routes.py::resolve` 提供，回归门槛是
-`scripts/check_device_flow.py`。
+这些接口由 `backend/routes/device.py`、`backend/services/device_auth.py` 和
+`backend/services/model_routes.py::resolve` 提供，回归门槛是
+`backend/scripts/check_device_flow.py`。
 
 ### 安装
 

@@ -13,11 +13,11 @@ venv/
 
 # ── Frontend ────────────────────────────────────────────────────────
 # Dependencies are installed locally; the bundle is produced by `npm run build`
-# (or by the Docker frontend stage) and is not committed.
+# (or by the frontend image build) and is not committed.
 frontend/node_modules/
 frontend/dist/
 frontend/.smoke/
-static/dist/
+backend/static/dist/
 *.tsbuildinfo
 
 # ── Local end-to-end scratch space ──────────────────────────────────
@@ -29,7 +29,7 @@ static/dist/
 .env.local
 docker/.env
 !docker/.env.example
-!/.env.example
+!backend/.env.example
 
 # ── Private test-environment bundle ─────────────────────────────────
 # Plaintext passwords, the deployment handbook, TLS cert and runtime data
@@ -39,15 +39,18 @@ docker/.env
 # ── Local runtime data ──────────────────────────────────────────────
 # The trailing * also covers the sidecar files SQLite creates in WAL mode
 # (`.db-wal`, `.db-shm`, `.db-journal`), which the engine turns on explicitly.
-data/*.db*
-data/*.sqlite*
-data/*.sqlite3*
+backend/data/*.db*
+backend/data/*.sqlite*
+backend/data/*.sqlite3*
 # Upstream read-through caches (npm packuments/tarballs, docker manifests and
 # blobs, apt metadata). Derived data, potentially hundreds of megabytes —
 # never committed.
-data/cache/
-api_keys_data/
-docker/api_keys_data/
+backend/data/cache/
+# Safety net: the runtime database belongs in backend/data/. A stray root-level
+# data/ (stale env file, a command run from the wrong directory) must never be
+# committed — it is a live SQLite file, not a fixture.
+/data/
+# Uploaded packages (volume in the container, working directory locally).
 packages/
 python-build-standalone/
 # The Node.js mirror holds multi-gigabyte archives; commit only the README that

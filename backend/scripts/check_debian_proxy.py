@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Gate: the apt mirror proxy (`dists/` + `pool/`) works without a network.
 
-Run from the repository root::
+Run from the backend directory (`backend/`)::
 
     python scripts/check_debian_proxy.py
 
@@ -46,6 +46,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# The artifact-hub catalogs (debian/, tools/, npm/, …) live at the project
+# root, one level above the backend package.
+PROJECT_ROOT = REPO_ROOT.parent
 sys.path.insert(0, str(REPO_ROOT))
 os.chdir(REPO_ROOT)
 
@@ -57,7 +60,7 @@ os.environ["AUTH_USERNAME"] = "dev"
 os.environ["AUTH_ASSERT"] = "devpass"
 os.environ["ADMIN_USERS"] = '["dev"]'
 os.environ["API_KEYS_FILE"] = str(_TMP / "keys.db")
-os.environ["DEBIAN_DIR"] = str(REPO_ROOT / "debian")
+os.environ["DEBIAN_DIR"] = str(PROJECT_ROOT / "debian")
 os.environ["DEBIAN_UPSTREAM"] = ""
 os.environ["DEBIAN_MIRROR"] = ""
 

@@ -20,15 +20,21 @@ namespaces, so a new index element goes next to the siblings it belongs to::
 """
 
 from functools import lru_cache
+from pathlib import Path
+
+#: The backend package root (``backend/``).  Anchored to this file rather than
+#: to the process working directory, so the machine-facing templates are found
+#: no matter where the server was started from.
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent
 
 #: ``static/<ecosystem>/<file>`` — one place to change if the tree moves.
-_PYTHON = "static/python"
-_NODE = "static/node"
-_TOOLS = "static/tools"
-_NPM = "static/npm"
-_DOCKER = "static/docker"
-_DEBIAN = "static/debian"
-_DOCS = "static/docs"
+_PYTHON = str(_BACKEND_ROOT / "static" / "python")
+_NODE = str(_BACKEND_ROOT / "static" / "node")
+_TOOLS = str(_BACKEND_ROOT / "static" / "tools")
+_NPM = str(_BACKEND_ROOT / "static" / "npm")
+_DOCKER = str(_BACKEND_ROOT / "static" / "docker")
+_DEBIAN = str(_BACKEND_ROOT / "static" / "debian")
+_DOCS = str(_BACKEND_ROOT / "static" / "docs")
 
 
 @lru_cache(maxsize=16)

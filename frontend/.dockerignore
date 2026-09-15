@@ -1,0 +1,21 @@
+# ── Build context = frontend/ ───────────────────────────────────────
+# Keep the context tiny and reproducible: dependencies are installed inside the
+# image from the lockfile, and the bundle is produced there too.
+
+node_modules/
+dist/
+.smoke/
+*.tsbuildinfo
+
+# ── VCS / editors / OS ──────────────────────────────────────────────
+.git
+.gitignore
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# ── Secrets / local config ──────────────────────────────────────────
+.env
+.env.*
+!.env.example

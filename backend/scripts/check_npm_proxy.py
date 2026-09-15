@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Gate: the npm registry protocol must actually work against the real routes.
 
-Run from the repository root, with **no network** required::
+Run from the backend directory (`backend/`), with **no network** required::
 
     python scripts/check_npm_proxy.py
 

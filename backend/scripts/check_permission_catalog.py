@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Gate: the permission catalogue, the guards and the docs must describe one set.
 
-Run from the repository root::
+Run from the backend directory (`backend/`)::
 
     python scripts/check_permission_catalog.py
 
@@ -53,6 +53,9 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# README.md documents the project as a whole and stays at the project root,
+# one level above the backend package.
+PROJECT_ROOT = REPO_ROOT.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from auth import permissions as P  # noqa: E402
@@ -186,7 +189,7 @@ def collect_guard_codes() -> tuple[dict[str, set[str]], list[str]]:
 
 def read_readme_codes() -> tuple[set[str], list[str]]:
     """Permission codes documented in README's permission table."""
-    text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    text = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
     marker = "The permission points shipped today"
     problems: list[str] = []
     start = text.find(marker)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Gate: the device-authorization flow hands out a working key, exactly once.
 
-Run from the repository root::
+Run from the backend directory (`backend/`)::
 
     python scripts/check_device_flow.py
 

@@ -1,0 +1,49 @@
+# ── Build context = backend/ ────────────────────────────────────────
+# Only the Flask application belongs in this image.  The SPA, the artifact
+# catalogs and the downstream integrations live outside backend/ and are
+# therefore never part of this build context at all.
+
+# ── Python / build artifacts ────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+uv.lock
+
+# ── Local runtime state (volumes at run time, never baked in) ───────
+data/
+packages/
+certs/
+*.db
+*.db-shm
+*.db-wal
+
+# ── Secrets / local config ──────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# ── Built SPA ───────────────────────────────────────────────────────
+# The frontend image owns the bundle; if Flask is asked to serve the SPA the
+# directory is mounted or FRONTEND_DIST_DIR points at frontend/dist.
+static/dist/
+
+# ── Editors / OS / VCS ──────────────────────────────────────────────
+.git
+.gitignore
+.idea/
+.vscode/
+*.swp
+.DS_Store
+*.md

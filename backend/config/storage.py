@@ -3,6 +3,8 @@
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from config.paths import backend_path, project_path
+
 
 class StorageConfig(BaseSettings):
     # See ServerConfig.model_config — flat .env names are supported.
@@ -13,7 +15,7 @@ class StorageConfig(BaseSettings):
     )
 
     packages_dir: str = Field(
-        default="packages",
+        default=backend_path("packages"),
         description="Path to the packages directory",
     )
     overwrite: bool = Field(
@@ -34,11 +36,11 @@ class StorageConfig(BaseSettings):
         description="Use watchdog to maintain in-memory index",
     )
     python_builds_dir: str = Field(
-        default="python-build-standalone",
+        default=project_path("python-build-standalone"),
         description="Path to python-build-standalone releases directory",
     )
     node_builds_dir: str = Field(
-        default="node-builds",
+        default=project_path("node-builds"),
         description=(
             "Path to a nodejs.org/dist-shaped mirror of prebuilt Node.js "
             "archives (release directories named vX.Y.Z), consumed by nvm, fnm "
@@ -46,6 +48,6 @@ class StorageConfig(BaseSettings):
         ),
     )
     api_keys_file: str = Field(
-        default="data/cpypiserver.db",
+        default=backend_path("data", "cpypiserver.db"),
         description="SQLite database path for API keys and stats",
     )

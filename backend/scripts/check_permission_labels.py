@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Gate: a guarded route must carry the *semantically correct* permission point.
 
-Run from the repository root::
+Run from the backend directory (`backend/`)::
 
     python scripts/check_permission_labels.py
 

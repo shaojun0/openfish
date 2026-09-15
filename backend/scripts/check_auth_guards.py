@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Gate: every protected endpoint must actually require credentials.
 
-Run from the repository root::
+Run from the backend directory (`backend/`)::
 
     python scripts/check_auth_guards.py
 

@@ -37,6 +37,8 @@ from pathlib import Path
 
 from flask import Blueprint, abort, current_app, send_from_directory
 
+from config import settings
+
 spa_bp = Blueprint("spa", __name__)
 
 #: Paths that must never fall through to the SPA shell, even when no route
@@ -65,6 +67,16 @@ _RESERVED_PREFIXES = (
 
 
 def _dist_dir() -> Path:
+    """Where the built SPA lives.
+
+    Defaults to ``<backend>/static/dist``; ``FRONTEND_DIST_DIR`` points it
+    somewhere else (``../frontend/dist`` for a local build).  In the split
+    Docker deployment the frontend container serves the SPA and never reaches
+    this code path.
+    """
+    configured = settings.server.frontend_dist_dir
+    if configured:
+        return Path(configured).expanduser().resolve()
     return Path(current_app.root_path) / "static" / "dist"
 
 
@@ -74,9 +86,12 @@ def _shell():
     if not (dist / "index.html").is_file():
         return (
             "<h1>Frontend bundle not found</h1>"
-            "<p>The Vue frontend has not been built yet. Build it with:</p>"
+            "<p>This process is not serving the SPA. In the split deployment "
+            "the <code>frontend</code> container serves it; for a local build:</p>"
             "<pre><code>cd frontend\nnpm install\nnpm run build</code></pre>"
-            "<p>The Docker image performs this step automatically.</p>",
+            "<p>Then either run the frontend container, or set "
+            "<code>FRONTEND_DIST_DIR=../frontend/dist</code> and start Flask "
+            "from <code>backend/</code>.</p>",
             503,
         )
     return send_from_directory(dist, "index.html")

@@ -28,6 +28,8 @@ editing one JSON file.  No schema migration, no restart.
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from config.paths import backend_path, project_path
+
 
 class HubConfig(BaseSettings):
     # Flat .env names (TOOLS_DIR, NPM_DIR, MODELS_FILE, ...) work as well as
@@ -39,14 +41,14 @@ class HubConfig(BaseSettings):
     )
 
     tools_dir: str = Field(
-        default="tools",
+        default=project_path("tools"),
         description=(
             "Root of the tools catalog. Each immediate sub-directory is a "
             "category; files below a category are downloadable tools."
         ),
     )
     docs_dir: str = Field(
-        default="docs",
+        default=project_path("docs"),
         description=(
             "Root of the per-ecosystem Markdown documentation. Each immediate "
             "sub-directory is one ecosystem (python/, npm/, docker/, debian/, "
@@ -58,7 +60,7 @@ class HubConfig(BaseSettings):
         ),
     )
     npm_dir: str = Field(
-        default="npm",
+        default=project_path("npm"),
         description="Directory holding the local npm catalog (tarballs and/or catalog.json)",
     )
     npm_upstream: str = Field(
@@ -92,7 +94,7 @@ class HubConfig(BaseSettings):
         description="Upstream npm registry read timeout in seconds",
     )
     npm_cache_dir: str = Field(
-        default="data/cache/npm",
+        default=backend_path("data", "cache", "npm"),
         description=(
             "Disk cache for packuments and tarballs fetched from npm_upstream. "
             "Tarballs are content-addressed and survive restarts; packuments are "
@@ -109,7 +111,7 @@ class HubConfig(BaseSettings):
         ),
     )
     docker_dir: str = Field(
-        default="docker-images",
+        default=project_path("docker-images"),
         description=(
             "Directory holding `docker save` tarballs and compose/Dockerfile "
             "snippets. Named with a suffix so it never collides with the "
@@ -155,7 +157,7 @@ class HubConfig(BaseSettings):
         description="Upstream registry read timeout in seconds (blobs can be slow)",
     )
     docker_cache_dir: str = Field(
-        default="data/cache/docker",
+        default=backend_path("data", "cache", "docker"),
         description=(
             "Disk cache for manifests and blobs fetched from docker_upstream. "
             "Blobs are digest-addressed and therefore immutable."
@@ -171,7 +173,7 @@ class HubConfig(BaseSettings):
         ),
     )
     debian_dir: str = Field(
-        default="debian",
+        default=project_path("debian"),
         description="Directory holding local .deb files and apt config snippets",
     )
     debian_mirror: str = Field(
@@ -196,7 +198,7 @@ class HubConfig(BaseSettings):
         description="Upstream apt mirror read timeout in seconds",
     )
     debian_cache_dir: str = Field(
-        default="data/cache/debian",
+        default=backend_path("data", "cache", "debian"),
         description=(
             "Disk cache for proxied apt metadata (Release, Packages and their "
             "compressed variants). Package files are streamed, not cached."
@@ -217,7 +219,7 @@ class HubConfig(BaseSettings):
         ),
     )
     models_file: str = Field(
-        default="config/model_routes.json",
+        default=backend_path("config", "model_routes.json"),
         description=(
             "JSON file describing the model routes for downstream DSH. Read by "
             "everyone holding `model:read`; written by administrators holding "
@@ -226,7 +228,7 @@ class HubConfig(BaseSettings):
         ),
     )
     model_health_file: str = Field(
-        default="data/model_health.json",
+        default=backend_path("data", "model_health.json"),
         description=(
             "Where the result of the last connectivity probe of each model "
             "route is remembered, keyed by route name. Kept out of models_file "
@@ -243,7 +245,7 @@ class HubConfig(BaseSettings):
         ),
     )
     device_codes_file: str = Field(
-        default="data/device_codes.json",
+        default=backend_path("data", "device_codes.json"),
         description=(
             "Where pending device-authorization requests (the flow the DSH "
             "enterprise-intranet plugin uses to obtain an API key without a "

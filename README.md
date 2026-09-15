@@ -21,7 +21,7 @@ the codebase.
   (packuments, manifests, tarballs, `/-/v1/search`), a **Docker Registry v2**
   pull endpoint, an **apt repository** (flat local index plus a mirror proxy), a
   downloadable **tools** directory (`tools/<category>/`) and a
-  **model-routing** table for downstream DSH (`config/model_routes.json`). npm,
+  **model-routing** table for downstream DSH (`backend/config/model_routes.json`). npm,
   Docker and Debian are read-through proxies: the local directory is the first
   source, an optional upstream mirror is fetched on demand and cached — see
   [Artifact hub](#artifact-hub-tools--npm--docker--debian--model-routing).
@@ -48,46 +48,75 @@ the codebase.
   in-memory index kept fresh by `watchdog`.
 - **Optional ClamAV scanning** on upload.
 - **Vue 3 admin console** — the browser-facing UI is a Vue 3 + Vite + Element
-  Plus SPA in `frontend/`, built into `static/dist/` and served by Flask. Every
+  Plus SPA in `frontend/`, built to `frontend/dist/` and served by its own nginx
+  container (or by Flask when `FRONTEND_DIST_DIR` points at the build). Every
   machine-facing endpoint stays server-rendered, so `pip` and `uv` never need
   JavaScript — see [Frontend architecture](#frontend-architecture).
 
 ## Requirements
 
-- Python **3.12+**
-- Node **20+** — *build-time only*, to compile the SPA. Not needed at runtime.
+- Python **3.12+** — backend only.
+- Node **20+** — frontend build only. Not needed at runtime.
 - Docker + **Docker Compose v2** (`docker compose`) for the container workflow.
   The legacy `docker-compose` 1.25 binary does **not** understand the variable
   syntax or `profiles:` used here.
 
+## Layout
+
+The repository is split so that each half builds on its own:
+
+```
+backend/     Flask application, its own Dockerfile, its own venv and tests/gates
+frontend/    Vue 3 + Vite SPA, its own Dockerfile (node build → nginx)
+docker/      Compose orchestration, the edge nginx config and the .env template
+tools/ npm/ node-builds/ docker-images/ debian/ docs/   artifact-hub catalogs
+integrations/   downstream client code (never part of an image)
+```
+
+The full tree and what each directory owns is in
+[Project layout](#project-layout).
+
 ## Quick start (local)
+
+Two processes, two terminals. The backend is the only one that needs Python.
 
 ```bash
 git clone https://github.com/shaojun0/openfish.git
 cd openfish
 
+# ── Backend ────────────────────────────────────────────────────────
+cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
-
-# Build the SPA (once; re-run after changing anything under frontend/)
-cd frontend && npm install && npm run build && cd ..
-
 cp .env.example .env      # then edit .env — see "Configuration" below
 
 # Designate the first administrator — see "Roles and permissions"
 python cli.py create-admin <your-login>
 
-python app.py
+python app.py             # http://127.0.0.1:9090
+
+# ── Frontend (second terminal) ─────────────────────────────────────
+cd frontend
+npm install
+npm run dev               # http://127.0.0.1:5173, proxies to the backend
 ```
 
-The server listens on `http://0.0.0.0:9090` by default. Health check:
+The backend listens on `http://0.0.0.0:9090` by default. Health check:
 
 ```bash
 curl -fsS http://127.0.0.1:9090/health
 ```
 
-If you skip the build step the API and the machine-facing endpoints still work;
-only `/` returns a "frontend bundle not found" hint.
+Running the backend on its own is enough for the API and every machine-facing
+endpoint — `pip`, `uv`, `npm`, `docker` and `apt` never need the SPA. Only `/`
+(a browser page) needs the frontend; without it, `/` returns a
+"frontend bundle not found" hint. To have Flask serve a built bundle instead of
+running Vite, build once and point `FRONTEND_DIST_DIR` at it:
+
+```bash
+cd frontend && npm run build          # writes frontend/dist
+cd ../backend && FRONTEND_DIST_DIR=../frontend/dist python app.py
+```
 
 ### Frontend development (hot reload)
 
@@ -95,7 +124,7 @@ Run Flask and Vite side by side. Vite proxies the API and the machine-facing
 endpoints to Flask, so everything is reachable on one origin:
 
 ```bash
-python app.py                  # terminal 1 — http://127.0.0.1:9090
+cd backend && python app.py    # terminal 1 — http://127.0.0.1:9090
 cd frontend && npm run dev     # terminal 2 — http://127.0.0.1:5173
 ```
 
@@ -125,28 +154,70 @@ cp .env.example .env      # REQUIRED: set SECRET_KEY, otherwise compose aborts
 docker compose up -d --build
 ```
 
-Two services are defined:
+Four services are defined, each built from its own directory:
 
-| Service             | Container           | Port (host) | Purpose                          |
-| ------------------- | ------------------- | ----------- | -------------------------------- |
-| `pypiserver`        | `cpypiserver-std`   | `20416`     | The server                       |
-| `pypiserver-debug`  | `cpypiserver-debug` | `20417`     | `profile: debug` — idle bash box |
+| Service          | Container               | Port (host)        | Built from            | Purpose                                                     |
+| ---------------- | ----------------------- | ------------------ | --------------------- | ----------------------------------------------------------- |
+| `nginx`          | `openfish-nginx`        | `20416` → 80       | `docker/nginx/`       | **The only public entry point** — routes by path             |
+| `backend`        | `openfish-backend`      | *(internal 8080)*  | `backend/Dockerfile`  | Flask + gunicorn: JSON API, registry and mirror protocols    |
+| `frontend`       | `openfish-frontend`     | *(internal 80)*    | `frontend/Dockerfile` | Vue SPA built by node, served as static files by nginx       |
+| `db`             | `openfish-db`           | *(internal 5432)*  | `postgres:16-alpine`  | `profile: db` — **reserved**, the app does not use it yet    |
+
+Reach the whole application through the edge port:
+
+```
+http://127.0.0.1:20416/
+```
+
+The edge splits traffic like this — the backend and frontend containers are not
+published to the host at all:
+
+| Path | Upstream | Why |
+| ---- | -------- | --- |
+| `/` (GET) | frontend | the SPA shell |
+| `/` (POST) | backend | `twine` / `pip` upload |
+| `/api/`, `/health`, `/openapi.json`, `/llms.txt`, `/.well-known/` | backend | JSON contract and discovery |
+| `/simple/`, `/packages/`, `/legacy/`, `/python-builds/`, `/node-builds/` | backend | package-manager wire protocols |
+| `/tools/`, `/npm/`, `/docker/`, `/debian/`, `/docs/`, `/certs/`, `/auth/` | backend | artifact hub, docs, login |
+| `/static/dist/` | frontend | the hashed SPA bundle |
+| everything else (`/admin`, `/models`, `/documentation/<eco>`, …) | frontend | SPA history-mode deep links |
+
+> The trailing slash is load-bearing: `/tools` is an SPA page while `/tools/` is
+> the machine-facing catalog. The same holds for `npm`, `docker`, `debian` and
+> `packages`.
+
+Rebuild one side without touching the other:
 
 ```bash
-docker compose --profile debug up -d          # start the debug container too
-docker exec -it cpypiserver-debug bash
+docker compose build backend
+docker compose build frontend
 ```
+
+Optional profiles:
+
+```bash
+docker compose --profile debug up -d          # idle backend bash box on 20417
+docker exec -it openfish-backend-debug bash
+
+docker compose --profile db up -d             # PostgreSQL, reserved for later
+```
+
+> **About the `db` service.** It is defined so the layout is ready for a future
+> multi-instance deployment, but **the application does not connect to it**:
+> authorization, API keys and statistics still live in the SQLite database at
+> `backend/data/cpypiserver.db`. Enabling the profile changes nothing today.
 
 ## Configuration
 
 Settings are [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)
-models in `config/`. They are resolved in this order (later wins):
+models in `backend/config/`. They are resolved in this order (later wins):
 
-1. field defaults in `config/*.py`
-2. the project-level `.env` file
+1. field defaults in `backend/config/*.py`
+2. the `.env` file in the working directory (i.e. `backend/.env` when the
+   backend is started from `backend/`)
 3. real environment variables
 
-Templates are provided at `.env.example` (local development) and
+Templates are provided at `backend/.env.example` (local development) and
 `docker/.env.example` (Docker Compose, which reads `docker/.env` automatically).
 
 ### Common variables
@@ -158,43 +229,52 @@ Templates are provided at `.env.example` (local development) and
 | `SECRET_KEY`            | *(empty)*              | Session signing key — **set this**                 |
 | `SERVER_NAME`           | `cpypiserver`          | Branding name                                      |
 | `ROUTE_PREFIX`          | *(empty)*              | Global URL prefix for every route                  |
-| `PACKAGES_DIR`          | `packages`             | Where uploaded packages live                       |
-| `PYTHON_BUILDS_DIR`     | `python-build-standalone` | Prebuilt CPython releases                       |
-| `NODE_BUILDS_DIR`       | `node-builds`          | Prebuilt Node.js mirror (`nodejs.org/dist` layout) |
-| `API_KEYS_FILE`         | `data/cpypiserver.db`  | SQLite database for API keys and stats             |
+| `PACKAGES_DIR`          | `<backend>/packages`   | Where uploaded packages live                       |
+| `PYTHON_BUILDS_DIR`     | `<project>/python-build-standalone` | Prebuilt CPython releases             |
+| `NODE_BUILDS_DIR`       | `<project>/node-builds` | Prebuilt Node.js mirror (`nodejs.org/dist` layout) |
+| `API_KEYS_FILE`         | `<backend>/data/cpypiserver.db` | SQLite database for API keys and stats     |
+| `FRONTEND_DIST_DIR`     | *(empty)* = `<backend>/static/dist` | Directory holding the built SPA for Flask to serve. In the split Docker deployment the `frontend` container serves it instead, so this stays empty |
 | `STORAGE__OVERWRITE`    | `false`                | Allow re-uploading an existing filename            |
 | `MAX_CONTENT_LENGTH`    | `104857600` (100 MiB)  | Maximum upload size                                |
 | `ADMIN_USERS`           | `[]`                   | Admin whitelist — **JSON array**, e.g. `["alice"]` |
-| `TOOLS_DIR`             | `tools`                | Tools catalog root — each sub-directory is a category |
-| `NPM_DIR`               | `npm`                  | Local npm catalog (`*.tgz` / `catalog.json`)       |
+| `TOOLS_DIR`             | `<project>/tools`      | Tools catalog root — each sub-directory is a category |
+| `NPM_DIR`               | `<project>/npm`        | Local npm catalog (`*.tgz` / `catalog.json`)       |
 | `NPM_UPSTREAM`          | `https://registry.npmmirror.com` | Upstream npm registry — both the advertised `npm config set registry` target and the read-through source |
 | `NPM_PROXY_ENABLED`     | `true`                 | Serve the npm registry protocol; `false` answers only for already-cached packages |
 | `NPM_UPSTREAM_TOKEN`    | *(empty)*              | Bearer token for a private upstream npm registry   |
 | `NPM_TIMEOUT`           | `30`                   | Upstream npm read timeout (seconds)                |
-| `NPM_CACHE_DIR`         | `data/cache/npm`       | Packument + tarball cache                          |
+| `NPM_CACHE_DIR`         | `<backend>/data/cache/npm` | Packument + tarball cache                      |
 | `NPM_CACHE_MAX_MB`      | `512`                  | Byte budget for the npm cache (LRU eviction)       |
-| `DOCKER_DIR`            | `docker-images`        | `docker save` tarballs + compose/Dockerfile        |
+| `DOCKER_DIR`            | `<project>/docker-images` | `docker save` tarballs + compose/Dockerfile     |
 | `DOCKER_REGISTRY`       | *(empty)*              | Intranet registry advertised on the docker page    |
 | `DOCKER_UPSTREAM`       | *(empty)*              | Registry v2 endpoint to proxy pulls from (`https://registry-1.docker.io`, or an intranet registry); empty = cached-only |
 | `DOCKER_UPSTREAM_USERNAME` / `DOCKER_UPSTREAM_PASSWORD` | *(empty)* | HTTP Basic credentials for that registry |
 | `DOCKER_DEFAULT_NAMESPACE` | `library`           | Namespace assumed for a single-segment image name  |
 | `DOCKER_TIMEOUT`        | `60`                   | Upstream registry read timeout (seconds)           |
-| `DOCKER_CACHE_DIR`      | `data/cache/docker`    | Manifest + blob cache                              |
+| `DOCKER_CACHE_DIR`      | `<backend>/data/cache/docker` | Manifest + blob cache                       |
 | `DOCKER_CACHE_MAX_MB`   | `1024`                 | Byte budget for the docker cache                   |
-| `DEBIAN_DIR`            | `debian`               | Local `.deb` files + apt config snippets           |
+| `DEBIAN_DIR`            | `<project>/debian`     | Local `.deb` files + apt config snippets           |
 | `DEBIAN_MIRROR`         | *(empty)*              | Intranet apt mirror advertised on the debian page  |
 | `DEBIAN_UPSTREAM`       | *(empty)*              | apt mirror to proxy `dists/` and `pool/` from; empty = flat local repository only |
 | `DEBIAN_TIMEOUT`        | `60`                   | Upstream apt mirror read timeout (seconds)         |
-| `DEBIAN_CACHE_DIR`      | `data/cache/debian`    | Proxied apt metadata cache                         |
+| `DEBIAN_CACHE_DIR`      | `<backend>/data/cache/debian` | Proxied apt metadata cache                  |
 | `DEBIAN_CACHE_MAX_MB`   | `256`                  | Byte budget for the apt metadata cache             |
 | `DEBIAN_METADATA_TTL`   | `300`                  | Seconds a proxied `Release`/`Packages` document is trusted |
-| `MODELS_FILE`           | `config/model_routes.json` | Model-routing table for downstream DSH; editable from `/models` by `model:write`, so it must be writable |
-| `MODEL_HEALTH_FILE`     | `data/model_health.json` | Last connectivity probe per route (kept out of `MODELS_FILE`) |
+| `MODELS_FILE`           | `<backend>/config/model_routes.json` | Model-routing table for downstream DSH; editable from `/models` by `model:write`, so it must be writable |
+| `MODEL_HEALTH_FILE`     | `<backend>/data/model_health.json` | Last connectivity probe per route (kept out of `MODELS_FILE`) |
 | `MODEL_PROBE_TIMEOUT`   | `5`                    | Seconds allowed for one route connectivity probe    |
-| `DOCS_DIR`              | `docs`                 | Per-ecosystem Markdown documentation root — one sub-directory per ecosystem, one folder project per document |
+| `DOCS_DIR`              | `<project>/docs`       | Per-ecosystem Markdown documentation root — one sub-directory per ecosystem, one folder project per document |
 
 Nested fields can also be addressed with the `__` delimiter, e.g.
 `SERVER__PORT=9091`.
+
+> **`<backend>` and `<project>`.** Path defaults are anchored to the two roots
+> rather than to the working directory, so they are correct wherever the server
+> is started from: `<backend>` is the `backend/` directory (code, templates and
+> local state — `data/`, `packages/`, `certs/`, `config/`), and `<project>` is
+> the repository root, which holds the operator-managed artifact catalogs
+> (`tools/`, `npm/`, `node-builds/`, `docker-images/`, `debian/`, `docs/`).
+> Docker Compose overrides every one of them with an absolute `/app/…` path.
 
 > **Note:** list-valued variables must be JSON. Writing `ADMIN_USERS=` (empty)
 > raises a settings error at startup — leave the line commented out instead.
@@ -289,7 +369,7 @@ The permission points shipped today, and the routes that enforce them:
 | `model:write` | `POST /api/v1/models`, `PUT`/`DELETE /api/v1/models/<name>`, `POST /api/v1/models/probe`, `POST /api/v1/models/<name>/check` — adds, edits, removes and re-probes model routes |
 | `doc:read` | `GET /api/v1/docs*`, `/docs/<ecosystem>` (308 → `/docs/<ecosystem>/`), `/docs/<ecosystem>/`, `/docs/<ecosystem>/<id>`, `/docs/<ecosystem>/<id>/assets/<name>` — **everything under `/docs/`** |
 | `doc:upload` | `POST`/`PUT`/`DELETE` on `/api/v1/docs/<ecosystem>[/<id>[/assets/<name>]]` and `POST /api/v1/docs/<ecosystem>/<id>/preview` — creates, edits and deletes documents and their assets |
-| `app:read` | the browser console itself: `/`, every SPA route, the history-mode catch-all and `/static/dist/*`. It gates the **shell only** — each view's data is still checked by that ecosystem's own point. Held by `authenticated`; deliberately absent from `anonymous`, which is what keeps the console closed while `AUTH_ENABLED=false` |
+| `app:read` | the browser console itself: `/`, every SPA route, the history-mode catch-all and `/static/dist/*` *when Flask serves them*. It gates the **shell only** — each view's data is still checked by that ecosystem's own point. Held by `authenticated`; deliberately absent from `anonymous`, which is what keeps the console closed while `AUTH_ENABLED=false`. In the split Docker deployment the frontend container serves the shell, so the guard is enforced there by the SPA's 401 → `/auth/login` redirect instead — see the note under [Browser-facing](#browser-facing) |
 
 > **Adding a point is a migration — and the server now applies it for you.**
 > The per-role seed data above applies only when a built-in role is *first
@@ -309,7 +389,7 @@ The permission points shipped today, and the routes that enforce them:
 > role holding a point proves only that the point exists, never that ordinary
 > users can reach the feature. Which points a mirror ecosystem is *supposed* to
 > give every signed-in user, and which the anonymous role gets, are deliberate
-> decisions recorded in `scripts/check_permission_catalog.py`; a new built-in
+> decisions recorded in `backend/scripts/check_permission_catalog.py`; a new built-in
 > point nobody has classified fails that gate.
 
 ### Built-in roles
@@ -337,10 +417,10 @@ preference:
 ```bash
 # 1. The normal path — works before the person has ever logged in,
 #    because the account row is created by the command itself.
-python cli.py create-admin zhangsan
+cd backend && python cli.py create-admin zhangsan
 
 #    In Docker:
-docker exec cpypiserver-std python /app/cli.py create-admin zhangsan
+docker exec openfish-backend python /app/cli.py create-admin zhangsan
 ```
 
 2. **`ADMIN_USERS` / `AUTH_USERNAME`** — applied at startup **only while the
@@ -468,8 +548,9 @@ normal `deb <server>/debian bookworm main` line works too — metadata is cached
 with `DEBIAN_METADATA_TTL`, packages are streamed through, and `Range` requests
 are forwarded so a resumed download still works.
 
-**Model routing.** `MODELS_FILE` (default `config/model_routes.json`) is a small
-JSON document describing the endpoints a downstream intranet DSH may talk to.
+**Model routing.** `MODELS_FILE` (default `config/model_routes.json`, i.e.
+`backend/config/model_routes.json` when the backend runs from `backend/`) is a
+small JSON document describing the endpoints a downstream intranet DSH may talk to.
 This server publishes the table and **lets an administrator maintain it in the
 browser**; it does not proxy inference. Reading needs `model:read` (held by the
 `authenticated` role), while adding, editing, deleting or re-probing a route
@@ -492,7 +573,7 @@ keeps the stored key (an empty value clears it).
 ```
 
 The key is then read from the process environment whenever it is needed, so
-`config/model_routes.json` can be committed and shared — which matters because
+`backend/config/model_routes.json` can be committed and shared — which matters because
 this repository's own rule is that no credentials live in it (see
 [Security notes](#security-notes)). A stored `api_key` wins over the variable;
 a variable that is set but resolves to nothing is reported as
@@ -591,7 +672,7 @@ persistent volume as the API-key database.
 Every ecosystem gets a **server-rendered index** next to its rich SPA page, so a
 script (or a browser with JavaScript off) can still enumerate it. Both live in
 the same sidebar group — the index entries carry an external-link icon and open
-in a new tab. Templates are grouped by ecosystem under `static/`:
+in a new tab. Templates are grouped by ecosystem under `backend/static/`:
 
 | Index | Path | HTML form | JSON form |
 | ----- | ---- | --------- | --------- |
@@ -819,21 +900,29 @@ server-side so it keeps working through an OAuth round trip and does not depend
 on a rebuilt frontend bundle. It is described in
 [Device authorization](#device-authorization-the-dsh-key-hand-off) below.
 
-**The console is not anonymous.** Every one of those routes, the catch-all and
-the bundle are behind `app:read`, so a visitor with no session is refused and a
-browser is redirected into the login flow. That is stronger than requiring
-authentication: with `AUTH_ENABLED=false` no credential is demanded, so
-`require_auth` would let an anonymous request through — `app:read` is a point the
-`anonymous` role does not hold, which is what actually keeps the UI shut. The
-public way to read the handbook without signing in is the server-rendered
-`/docs/<ecosystem>/` surface, not the SPA.
+**Where the console's protection lives now.** In the split Docker deployment the
+SPA *shell and bundle* are static files served by the `frontend` container, so
+they are reachable without a session: an anonymous browser loads the app, its
+first `GET /api/v1/session` answers `401`, and `frontend/src/api/client.ts`
+redirects it to `/auth/login`. Nothing behind that shell is public — every data
+endpoint, every `/docs/*` page and the whole `/api/v1` surface keep their own
+guards, and `app:read` still gates the console whenever Flask is the one serving
+it. What changes is only *where the shell is served from*, never *what data is
+reachable*; the bundle contains no registry data.
 
-The shell's JavaScript and CSS come from **`GET /static/dist/<path>`** (also
-behind `app:read`). Flask's built-in static handler is disabled
-(`static_folder=None`), so the rest of `static/` is not reachable: in particular
-the Jinja templates in `static/<ecosystem>/` that `services/templates.py`
-loads. `GET /certs/ca_chain.pem` is the one anonymous file route, because a
-client must be able to fetch the CA before it can trust the mirror at all.
+> **Want the old behaviour back** (the shell itself refusing anonymous callers)?
+> Send `/` and `/static/dist/` to the `backend` upstream instead of the
+> `frontend` one in `docker/nginx/nginx.conf`, and give the backend the build
+> by setting `FRONTEND_DIST_DIR=/app/static/dist` with the bundle mounted in.
+> Flask's `app:read` guard then answers before any JavaScript runs.
+
+When Flask does serve the bundle, it does so through **`GET
+/static/dist/<path>`** (behind `app:read`). Flask's built-in static handler is
+disabled (`static_folder=None`), so the rest of `static/` is not reachable: in
+particular the Jinja templates in `backend/static/<ecosystem>/` that
+`services/templates.py` loads. `GET /certs/ca_chain.pem` is the one anonymous
+file route, because a client must be able to fetch the CA before it can trust
+the mirror at all.
 
 ### Discovery surface (anonymous)
 
@@ -866,10 +955,10 @@ from the description — is a gate rather than a hope:
 
 ```bash
 # Static: coverage, $ref resolution, unique operationIds, OpenAPI 3.1 validity
-python scripts/check_openapi.py
+python backend/scripts/check_openapi.py
 
 # Live: validate real responses against the models the spec references
-python scripts/check_contract.py --base-url http://127.0.0.1:9090 --api-key cpypi_…
+python backend/scripts/check_contract.py --base-url http://127.0.0.1:9090 --api-key cpypi_…
 ```
 
 `check_openapi.py` exits non-zero when a machine endpoint carries no
@@ -886,10 +975,10 @@ consults is worse than none, because it looks like security.
 
 ```bash
 # Every protected route must actually refuse an anonymous request
-python scripts/check_auth_guards.py
+python backend/scripts/check_auth_guards.py
 
 # The RBAC tables must actually decide access
-python scripts/check_rbac.py
+python backend/scripts/check_rbac.py
 ```
 
 `check_auth_guards.py` runs two independent checks. Statically, it parses every
@@ -919,7 +1008,7 @@ inline passes have to compose — a code span inside bold is still a code span �
 and its output has to stay escaped:
 
 ```bash
-python scripts/check_markdown.py
+python backend/scripts/check_markdown.py
 ```
 
 It exists because that composition regressed: `**upload a `.md` file**`
@@ -938,9 +1027,9 @@ each ecosystem ships an offline conformance gate that stands a fake upstream in
 front of the proxy and drives the real wire sequence against it:
 
 ```bash
-python scripts/check_npm_proxy.py       # packuments, manifests, tarballs, search
-python scripts/check_docker_proxy.py    # token flow, manifests, blobs, Range
-python scripts/check_debian_proxy.py    # Release/Packages, gzip passthrough, Range
+python backend/scripts/check_npm_proxy.py       # packuments, manifests, tarballs, search
+python backend/scripts/check_docker_proxy.py    # token flow, manifests, blobs, Range
+python backend/scripts/check_debian_proxy.py    # Release/Packages, gzip passthrough, Range
 ```
 
 None of them needs network access: each starts a small HTTP server that plays
@@ -956,7 +1045,7 @@ The split is by **audience**, not by convenience:
 | Audience | Owned by | Why |
 | -------- | -------- | --- |
 | A human in a browser (`/`, `/packages`, `/api-keys`, `/admin`) | Vue 3 SPA in `frontend/` | Rich interaction, no crawler contract |
-| A package manager (`/simple/`, `/packages/<f>`, `/python-builds/`, `/node-builds/`) | Flask + Jinja (`static/<ecosystem>/`) | `pip`, `uv`, `nvm` and `fnm` **parse the HTML/JSON directly and never run JavaScript** — these are wire protocols, not web pages |
+| A package manager (`/simple/`, `/packages/<f>`, `/python-builds/`, `/node-builds/`) | Flask + Jinja (`backend/static/<ecosystem>/`) | `pip`, `uv`, `nvm` and `fnm` **parse the HTML/JSON directly and never run JavaScript** — these are wire protocols, not web pages |
 | A script or agent (`/api/v1/*`, `/health`) | Flask JSON | Stable contract for API-key clients |
 
 Adding a new package ecosystem (npm, Maven, …) means adding a backend adapter
@@ -978,56 +1067,86 @@ unchanged while stopping `el-table` from rendering thousands of DOM rows.
 ## Project layout
 
 ```
-app.py                 entry point — wires extensions, then routes
-cli.py                 administrative CLI (roles, grants, superuser bootstrap)
-config/                pydantic-settings models (server, storage, auth, security, hub)
-extensions/            pluggable infrastructure + topological init registry
-routes/                Flask blueprints (pypi, python_build, node_build, api_keys,
-                       admin, access, session, discovery, spa, auth) plus one per
-                       hub ecosystem: hub (tools, models), npm, docker, debian,
-                       docs (per-ecosystem Markdown documentation)
-openapi/               API description: metadata registry, spec builder, renderers
-auth/                  guards, decorators, permission points, API keys, OAuth2
-index/                 package / interpreter-build discovery and indexing
-                       (packages.py, python_build.py, node_build.py)
-models/                SQLAlchemy models (users, roles, permissions, API keys, stats)
-services/              authorization service, hub catalogs, per-ecosystem Markdown
-                       documentation (docs.py, markdown.py), build-mirror catalogs
-                       (build_mirror.py), the shared upstream proxy/cache
-                       (upstream.py) and the per-ecosystem registry adapters
-                       (npm_registry, docker_registry, debian_apt), templates,
-                       stats, validation
-schemas.py             request + response models (single source for /openapi.json)
-scripts/               verification gates (check_openapi, check_contract,
-                       check_auth_guards, check_rbac, check_markdown, and one
-                       offline conformance gate per proxy: check_npm_proxy,
-                       check_docker_proxy, check_debian_proxy)
-frontend/              Vue 3 + Vite + Element Plus SPA (build-time only)
-static/                index templates grouped by ecosystem (python/ node/ tools/
-                       npm/ docs/) + the built SPA in static/dist/
-tools/                 artifact hub — tools/<category>/<file> + catalog.json
-npm/                   artifact hub — local npm tarballs + catalog.json
-node-builds/           artifact hub — nodejs.org/dist-shaped Node.js mirror
-docker-images/         artifact hub — image tarballs + compose/Dockerfile
-debian/                artifact hub — local .deb files + apt snippets
-docs/                  artifact hub — docs/<ecosystem>/<id>/document.md (+ assets/) documentation
-docker/                docker-compose.yml and its .env template
-integrations/          downstream *client* code, versioned here because it is
-                       tightly coupled to this server's contract. Currently:
-                       dsh-plugin-enterprise-intranet (the DSH plugin that
-                       redeems a device-authorization API key, adopts the model
-                       routing table's default model and switches package
-                       sources to this server). Excluded from the image.
+backend/                        the Flask application — one build unit
+├── app.py                      entry point — wires extensions, then routes
+├── cli.py                      administrative CLI (roles, grants, superuser bootstrap)
+├── config/                     pydantic-settings models (server, storage, auth,
+│                               security, hub) + model_routes.json
+├── extensions/                 pluggable infrastructure + topological init registry
+├── routes/                     Flask blueprints (pypi, python_build, node_build,
+│                               api_keys, admin, access, session, discovery, spa,
+│                               auth) plus one per hub ecosystem: hub (tools,
+│                               models), npm, docker, debian, docs
+├── openapi/                    API description: registry, spec builder, renderers
+├── auth/                       guards, decorators, permission points, API keys, OAuth2
+├── index/                      package / interpreter-build discovery and indexing
+│                               (packages.py, python_build.py, node_build.py)
+├── models/                     SQLAlchemy models (users, roles, permissions,
+│                               API keys, stats)
+├── services/                   authorization service, hub catalogs, per-ecosystem
+│                               Markdown docs (docs.py, markdown.py), build-mirror
+│                               catalogs (build_mirror.py), the shared upstream
+│                               proxy/cache (upstream.py) and the per-ecosystem
+│                               registry adapters (npm_registry, docker_registry,
+│                               debian_apt), templates, stats, validation
+├── schemas.py                  request + response models (single source for /openapi.json)
+├── scripts/                    verification gates (check_openapi, check_contract,
+│                               check_auth_guards, check_rbac, check_markdown, and
+│                               one offline conformance gate per proxy)
+├── static/                     machine-facing Jinja templates grouped by ecosystem
+│                               (python/ node/ tools/ npm/ docker/ debian/ docs/).
+│                               Not a public directory — see Security notes.
+├── pyproject.toml, uv.lock     dependency source of truth
+├── .env.example                local-development environment template
+├── Dockerfile                  backend image (python only)
+├── packages/, data/, certs/    runtime state, git-ignored
+└── .venv/                      local virtualenv, git-ignored
+
+frontend/                       the Vue 3 SPA — one build unit
+├── src/                        api/ components/ composables/ layouts/ locales/
+│                               router/ stores/ styles/ utils/ views/
+├── index.html, vite.config.ts  Vite entry and config (outDir: dist/)
+├── package.json, .npmrc        npm toolchain (build-time only)
+├── scripts/smoke-render.ts     jsdom smoke test for every route
+├── nginx.conf                  static server for the built bundle
+├── Dockerfile                  node build stage → nginx runtime
+└── dist/                       build output, git-ignored
+
+docker/                         orchestration — no application code
+├── docker-compose.yml          backend + frontend + nginx + db (profiles)
+├── nginx/nginx.conf            the edge gateway: path routing, upload size
+├── .env.example                Compose variable template (copied to docker/.env)
+└── certs/                      optional TLS material, git-ignored
+
+tools/                          artifact hub — tools/<category>/<file> + catalog.json
+npm/                            artifact hub — local npm tarballs + catalog.json
+node-builds/                    artifact hub — nodejs.org/dist-shaped Node.js mirror
+docker-images/                  artifact hub — image tarballs + compose/Dockerfile
+debian/                         artifact hub — local .deb files + apt snippets
+docs/                           artifact hub — docs/<ecosystem>/<id>/document.md (+ assets/)
+
+integrations/                   downstream *client* code, versioned here because it is
+                                tightly coupled to this server's contract. Currently:
+                                dsh-plugin-enterprise-intranet (the DSH plugin that
+                                redeems a device-authorization API key, adopts the model
+                                routing table's default model and switches package
+                                sources to this server). Outside every build context,
+                                so it is never part of an image.
 ```
 
-Adding a feature usually means one new module in `extensions/`, one blueprint in
-`routes/`, and two lines of registration — see the docstring in
-`extensions/__init__.py`.
+Adding a feature usually means one new module in `backend/extensions/`, one
+blueprint in `backend/routes/`, and two lines of registration — see the
+docstring in `backend/extensions/__init__.py`.
+
+The artifact-hub catalogs (`tools/`, `npm/`, `node-builds/`, `docker-images/`,
+`debian/`, `docs/`) stay at the project root on purpose: they are operator data,
+not code. Compose bind-mounts them into the backend container, so dropping a
+file in one takes effect without rebuilding anything.
 
 ## Security notes
 
 - **No credentials live in this repository.** Secrets are injected through
-  environment variables; `.env` and its Docker counterpart are git-ignored.
+  environment variables; `.env` (at `backend/` or `docker/`) is git-ignored.
 - **TLS material is not shipped and is not in the web root.** `*.pem`, `*.key`
   and `certs/` are ignored. To serve a private CA to clients, drop your chain at
   `docker/certs/ca_chain.pem` and uncomment the corresponding mount in
@@ -1036,13 +1155,25 @@ Adding a feature usually means one new module in `extensions/`, one blueprint in
   serves exactly that one file: a private key sitting next to it is not
   reachable. (`static/certs/` used to be the drop point; it is gone, because
   Flask's blanket static handler would have served anything put there.)
-- **`static/` is not a public directory — only `static/dist/` is.** The built
-  Vue bundle is served by one explicit route, `GET /static/dist/<path>`
-  (`spa.dist_asset`), which a browser needs before it can log in. Everything
-  else under `static/` — the Jinja templates in `static/<ecosystem>/` that
-  `services/templates.py` reads, for instance — is **not** reachable over HTTP.
-  `scripts/check_auth_guards.py` fails the build if a blanket `static` handler
-  is ever reintroduced.
+- **`backend/static/` is not a public directory.** When Flask serves the bundle
+  it does so through one explicit route, `GET /static/dist/<path>`
+  (`spa.dist_asset`). Everything else under `backend/static/` — the Jinja
+  templates in `backend/static/<ecosystem>/` that `services/templates.py` reads,
+  for instance — is **not** reachable over HTTP.
+  `backend/scripts/check_auth_guards.py` fails the build if a blanket `static`
+  handler is ever reintroduced.
+- **The SPA bundle is static, the data behind it is not.** In the split Docker
+  deployment the shell and its hashed assets are served by the `frontend`
+  container, so they are fetchable without a session; every `/api/v1` call, every
+  `/docs/*` page and every mirror protocol still enforces its own permission
+  point. The bundle contains no registry data. See
+  [Browser-facing](#browser-facing) for the single-line way to route the shell
+  back through Flask's `app:read` guard instead.
+- **Only the edge is published.** `backend` and `frontend` are reachable solely
+  on the Compose network (`expose:`, never `ports:`), so there is exactly one
+  HTTP entry point to reason about. `client_max_body_size` in
+  `docker/nginx/nginx.conf` must stay ≥ `MAX_CONTENT_LENGTH`, or uploads are
+  rejected by nginx before Flask sees them.
 - Generate `SECRET_KEY` with:
   `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
 - **OAuth2 introspection verifies TLS.** Set `OAUTH2_CA_BUNDLE` when the

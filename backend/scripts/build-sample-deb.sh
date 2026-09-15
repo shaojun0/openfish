@@ -6,7 +6,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT_DIR="$REPO_ROOT/debian"
+# 制品库目录 debian/ 在项目根，位于 backend/ 的上一级。
+PROJECT_ROOT="$(cd "$REPO_ROOT/.." && pwd)"
+OUT_DIR="$PROJECT_ROOT/debian"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
