@@ -1,33 +1,32 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { UploadRequestOptions } from 'element-plus'
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 
 import {
+  createDoc,
   deleteDoc,
   fetchDoc,
   fetchDocCatalog,
-  uploadDoc,
   type DocCatalog,
   type DocDetail,
   type DocEntry,
 } from '@/api'
 import { apiError } from '@/api/client'
+import DocEditor from '@/components/DocEditor.vue'
 import { useSessionStore } from '@/stores/session'
 
 /**
  * One ecosystem's documentation leaf.
  *
  * The route parameter picks the ecosystem (`/docs/python`, `/docs/npm`, …), so
- * every sidebar group reuses this single view.  Documents are Markdown: the
- * server renders and escapes them, and this component only displays the result.
- * Reading and downloading needs `doc:read`; the upload and delete controls are
- * shown to `doc:upload` holders (the built-in admin role), and the server
- * enforces the same rule regardless of what the UI chose to render.
+ * every sidebar group reuses this single view.  A document is a folder project
+ * with its own assets: readers can view and download it, and an administrator
+ * (`doc:upload`) can create one from the list's "+" control, edit it in the
+ * browser, or delete it.  The server enforces the same rule regardless of what
+ * the UI chose to render.
  */
-
 const { t } = useI18n()
 const route = useRoute()
 const session = useSessionStore()
@@ -37,8 +36,14 @@ const catalog = ref<DocCatalog | null>(null)
 const detail = ref<DocDetail | null>(null)
 const loading = ref(false)
 const detailLoading = ref(false)
-const uploading = ref(false)
 const loadError = ref('')
+
+const adding = ref(false)
+const newTitle = ref('')
+const newFile = ref<File | null>(null)
+const fileInput = ref<HTMLInputElement | null>(null)
+const creating = ref(false)
+const editorVisible = ref(false)
 
 const canUpload = computed(() => session.can('doc:upload'))
 const documents = computed<DocEntry[]>(() => catalog.value?.documents ?? [])
@@ -46,26 +51,39 @@ const machineIndexUrl = computed(
   () => `/docs/${encodeURIComponent(ecosystem.value)}/`,
 )
 
-async function load(): Promise<void> {
+async function load(keepSelection = false): Promise<void> {
   loading.value = true
   loadError.value = ''
-  detail.value = null
   try {
     catalog.value = await fetchDocCatalog(ecosystem.value)
-    const first = catalog.value.documents[0]
-    if (first) await select(first)
+    const wanted = keepSelection ? detail.value?.id : undefined
+    const target =
+      catalog.value.documents.find((entry) => entry.id === wanted) ??
+      catalog.value.documents[0]
+    if (target) await select(target)
+    else detail.value = null
   } catch (e) {
     catalog.value = null
+    detail.value = null
     loadError.value = apiError(e) || t('docs.loadFailed')
   } finally {
     loading.value = false
   }
 }
 
+/** Refetch only the catalog, keeping the current document open. */
+async function refreshCatalog(): Promise<void> {
+  try {
+    catalog.value = await fetchDocCatalog(ecosystem.value)
+  } catch {
+    // The next explicit refresh will surface the error.
+  }
+}
+
 async function select(entry: DocEntry): Promise<void> {
   detailLoading.value = true
   try {
-    detail.value = await fetchDoc(ecosystem.value, entry.name)
+    detail.value = await fetchDoc(ecosystem.value, entry.id)
   } catch (e) {
     ElMessage.error(apiError(e) || t('docs.loadFailed'))
   } finally {
@@ -82,50 +100,91 @@ function openMachineIndex(): void {
   window.open(machineIndexUrl.value, '_blank', 'noopener')
 }
 
-/** `el-upload` custom request: only Markdown, and only for `doc:upload`. */
-async function onUpload(options: UploadRequestOptions): Promise<void> {
-  const file = options.file as File
-  if (!file.name.toLowerCase().endsWith('.md')) {
-    ElMessage.error(t('docs.onlyMarkdown'))
-    options.onError?.(new Error('not a markdown file'))
+// ── Create ───────────────────────────────────────────────────────────
+
+function startAdd(): void {
+  adding.value = true
+  newTitle.value = ''
+  newFile.value = null
+  void nextTick(() => {
+    const input = document.querySelector<HTMLInputElement>('.docs-view__title-input input')
+    input?.focus()
+  })
+}
+
+function cancelAdd(): void {
+  adding.value = false
+  newTitle.value = ''
+  newFile.value = null
+  if (fileInput.value) fileInput.value.value = ''
+}
+
+function onFilePick(event: Event): void {
+  const input = event.target as HTMLInputElement
+  newFile.value = input.files?.[0] ?? null
+}
+
+async function create(): Promise<void> {
+  const title = newTitle.value.trim()
+  if (!title && !newFile.value) {
+    ElMessage.warning(t('docs.needTitleOrFile'))
     return
   }
-  uploading.value = true
+  creating.value = true
   try {
-    const entry = await uploadDoc(ecosystem.value, file)
-    ElMessage.success(t('docs.uploaded', { name: entry.name }))
-    options.onSuccess?.(entry)
+    const result = await createDoc(ecosystem.value, title, newFile.value)
+    ElMessage.success(
+      result.replaced
+        ? t('docs.replaced', { title: result.document.title })
+        : t('docs.created', { title: result.document.title }),
+    )
+    const created = result.document
+    cancelAdd()
     await load()
-    await select(entry)
+    if (created) await select(created)
   } catch (e) {
-    ElMessage.error(apiError(e) || t('docs.uploadFailed'))
-    options.onError?.(e as Error)
+    ElMessage.error(apiError(e) || t('docs.createFailed'))
   } finally {
-    uploading.value = false
+    creating.value = false
   }
+}
+
+// ── Edit / delete ────────────────────────────────────────────────────
+
+function openEditor(): void {
+  if (detail.value) editorVisible.value = true
+}
+
+function onSaved(saved: DocDetail): void {
+  detail.value = saved
+  void refreshCatalog()
 }
 
 async function remove(entry: DocEntry): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      t('docs.deleteConfirm', { name: entry.name }),
+      t('docs.deleteConfirm', { title: entry.title }),
       t('common.confirm'),
-      { type: 'warning', confirmButtonText: t('common.delete'), cancelButtonText: t('common.cancel') },
+      {
+        type: 'warning',
+        confirmButtonText: t('common.delete'),
+        cancelButtonText: t('common.cancel'),
+      },
     )
   } catch {
     return
   }
   try {
-    await deleteDoc(ecosystem.value, entry.name)
+    await deleteDoc(ecosystem.value, entry.id)
     ElMessage.success(t('docs.deleted'))
-    if (detail.value?.name === entry.name) detail.value = null
+    if (detail.value?.id === entry.id) detail.value = null
     await load()
   } catch (e) {
     ElMessage.error(apiError(e) || t('docs.deleteFailed'))
   }
 }
 
-watch(ecosystem, load, { immediate: true })
+watch(ecosystem, () => load(), { immediate: true })
 </script>
 
 <template>
@@ -136,37 +195,25 @@ watch(ecosystem, load, { immediate: true })
         <p class="page__description">{{ t('docs.description') }}</p>
       </div>
       <div class="toolbar">
-        <el-upload
+        <el-button
           v-if="canUpload"
-          accept=".md,text/markdown"
-          :show-file-list="false"
-          :http-request="onUpload"
+          type="primary"
+          :disabled="!detail"
+          @click="openEditor"
         >
-          <el-button type="primary" :loading="uploading">
-            <el-icon><Upload /></el-icon>
-            <span class="btn-label">{{ t('docs.upload') }}</span>
-          </el-button>
-        </el-upload>
+          <el-icon><EditPen /></el-icon>
+          <span class="btn-label">{{ t('docs.edit') }}</span>
+        </el-button>
         <el-button @click="openMachineIndex">
           <el-icon><Link /></el-icon>
           <span class="btn-label">{{ t('docs.staticIndex') }}</span>
         </el-button>
-        <el-button :loading="loading" @click="load">
+        <el-button :loading="loading" @click="load(true)">
           <el-icon><Refresh /></el-icon>
           <span class="btn-label">{{ t('common.refresh') }}</span>
         </el-button>
       </div>
     </div>
-
-    <el-alert
-      v-if="canUpload"
-      class="docs-view__hint"
-      type="info"
-      show-icon
-      :closable="false"
-      :title="t('docs.adminHintTitle')"
-      :description="t('docs.adminHint')"
-    />
 
     <el-alert
       v-if="loadError"
@@ -178,10 +225,16 @@ watch(ecosystem, load, { immediate: true })
     />
 
     <el-empty
-      v-else-if="!loading && documents.length === 0"
+      v-else-if="!loading && documents.length === 0 && !adding"
       :description="t('docs.empty')"
     >
-      <el-button :loading="loading" @click="load">{{ t('common.refresh') }}</el-button>
+      <el-button v-if="canUpload" type="primary" @click="startAdd">
+        <el-icon><Plus /></el-icon>
+        <span class="btn-label">{{ t('docs.addDocument') }}</span>
+      </el-button>
+      <el-button v-else :loading="loading" @click="load()">
+        {{ t('common.refresh') }}
+      </el-button>
     </el-empty>
 
     <div v-else class="docs-view__body">
@@ -189,22 +242,72 @@ watch(ecosystem, load, { immediate: true })
         <template #header>
           <div class="docs-view__list-header">
             <span class="docs-view__list-title">{{ t('docs.documents') }}</span>
-            <el-tag size="small" type="info" effect="plain">
-              {{ t('common.total', { count: documents.length }) }}
-            </el-tag>
+            <span class="docs-view__list-tools">
+              <el-tag size="small" type="info" effect="plain">
+                {{ t('common.total', { count: documents.length }) }}
+              </el-tag>
+              <el-tooltip
+                v-if="canUpload"
+                :content="t('docs.addDocument')"
+                placement="top"
+              >
+                <el-button
+                  link
+                  class="docs-view__add"
+                  :disabled="adding"
+                  @click="startAdd"
+                >
+                  <el-icon><Plus /></el-icon>
+                </el-button>
+              </el-tooltip>
+            </span>
           </div>
         </template>
+
+        <div v-if="adding" class="docs-view__add-row">
+          <el-input
+            v-model="newTitle"
+            class="docs-view__title-input"
+            size="small"
+            :placeholder="t('docs.newTitlePlaceholder')"
+            @keyup.enter="create"
+          />
+          <div class="docs-view__add-actions">
+            <input
+              ref="fileInput"
+              class="docs-view__file-input"
+              type="file"
+              accept=".md,text/markdown"
+              @change="onFilePick"
+            />
+            <el-button size="small" @click="fileInput?.click()">
+              <el-icon><Upload /></el-icon>
+              <span class="btn-label docs-view__file-label">
+                {{ newFile ? newFile.name : t('docs.chooseFile') }}
+              </span>
+            </el-button>
+            <el-button size="small" type="primary" :loading="creating" @click="create">
+              {{ t('common.create') }}
+            </el-button>
+            <el-button size="small" @click="cancelAdd">
+              {{ t('common.cancel') }}
+            </el-button>
+          </div>
+          <p class="docs-view__add-hint">{{ t('docs.emptyIfNoFile') }}</p>
+        </div>
+
         <ul class="docs-view__items">
           <li
             v-for="entry in documents"
-            :key="entry.name"
+            :key="entry.id"
             class="docs-view__item"
-            :class="{ 'docs-view__item--active': detail?.name === entry.name }"
+            :class="{ 'docs-view__item--active': detail?.id === entry.id }"
           >
             <button class="docs-view__item-main" type="button" @click="select(entry)">
               <span class="docs-view__item-title">{{ entry.title }}</span>
               <span class="docs-view__item-meta">
-                {{ entry.filename }} · {{ entry.size_human }}
+                {{ entry.id }} · {{ entry.size_human }}
+                <template v-if="entry.asset_count"> · {{ t('docs.assetCount', { count: entry.asset_count }) }}</template>
               </span>
             </button>
             <span class="docs-view__item-actions">
@@ -228,9 +331,18 @@ watch(ecosystem, load, { immediate: true })
           <div class="docs-view__content-header">
             <span class="docs-view__content-title">{{ detail.title }}</span>
             <span class="docs-view__content-meta">
-              {{ detail.filename }} · {{ detail.size_human }}
+              {{ detail.id }}/document.md · {{ detail.size_human }}
               <template v-if="detail.modified"> · {{ detail.modified.slice(0, 10) }}</template>
             </span>
+            <el-button
+              v-if="canUpload"
+              class="docs-view__content-edit"
+              link
+              @click="openEditor"
+            >
+              <el-icon><EditPen /></el-icon>
+              <span class="btn-label">{{ t('docs.edit') }}</span>
+            </el-button>
             <el-button class="docs-view__content-download" link @click="download(detail)">
               <el-icon><Download /></el-icon>
               <span class="btn-label">{{ t('docs.download') }}</span>
@@ -241,17 +353,28 @@ watch(ecosystem, load, { immediate: true })
         <el-empty v-else :description="t('docs.selectOne')" />
       </el-card>
     </div>
+
+    <DocEditor
+      v-model:visible="editorVisible"
+      :ecosystem="ecosystem"
+      :doc="detail"
+      @saved="onSaved"
+      @changed="refreshCatalog"
+    />
   </div>
 </template>
 
 <style scoped>
-.docs-view__hint {
-  margin-bottom: 16px;
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .docs-view__body {
   display: grid;
-  grid-template-columns: minmax(220px, 300px) 1fr;
+  grid-template-columns: minmax(240px, 320px) 1fr;
   gap: 16px;
   align-items: start;
 }
@@ -275,6 +398,50 @@ watch(ecosystem, load, { immediate: true })
 
 .docs-view__list-title {
   font-weight: 600;
+}
+
+.docs-view__list-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.docs-view__add {
+  padding: 2px;
+}
+
+.docs-view__add-row {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  margin-bottom: 8px;
+  border: 1px dashed var(--el-border-color);
+  border-radius: 6px;
+  background: var(--el-fill-color-lighter);
+}
+
+.docs-view__add-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.docs-view__file-input {
+  display: none;
+}
+
+.docs-view__file-label {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.docs-view__add-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 
 .docs-view__items {
@@ -360,110 +527,15 @@ watch(ecosystem, load, { immediate: true })
   color: var(--el-text-color-secondary);
 }
 
-.docs-view__content-download {
+.docs-view__content-edit {
   margin-left: auto;
+}
+
+.docs-view__content-download {
+  margin-left: 0;
 }
 
 .btn-label {
   margin-left: 4px;
-}
-
-/* The rendered body comes from `v-html`, so scoped styles need `:deep()`. */
-.markdown {
-  line-height: 1.7;
-  color: var(--el-text-color-primary);
-  word-wrap: break-word;
-}
-
-.markdown :deep(h1),
-.markdown :deep(h2),
-.markdown :deep(h3),
-.markdown :deep(h4) {
-  margin: 1.2em 0 0.6em;
-  line-height: 1.3;
-}
-
-.markdown :deep(h1) {
-  font-size: 1.7em;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-  padding-bottom: 0.3em;
-}
-
-.markdown :deep(h2) {
-  font-size: 1.4em;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-  padding-bottom: 0.25em;
-}
-
-.markdown :deep(p),
-.markdown :deep(ul),
-.markdown :deep(ol),
-.markdown :deep(blockquote),
-.markdown :deep(table) {
-  margin: 0.7em 0;
-}
-
-.markdown :deep(code) {
-  font-family: 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace;
-  font-size: 0.88em;
-  background: var(--el-fill-color-light);
-  padding: 2px 5px;
-  border-radius: 4px;
-}
-
-.markdown :deep(pre) {
-  background: var(--el-fill-color-light);
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 6px;
-  padding: 12px;
-  overflow-x: auto;
-}
-
-.markdown :deep(pre code) {
-  background: none;
-  padding: 0;
-}
-
-.markdown :deep(blockquote) {
-  border-left: 4px solid var(--el-border-color);
-  padding: 2px 12px;
-  color: var(--el-text-color-secondary);
-  background: var(--el-fill-color-lighter);
-}
-
-.markdown :deep(table) {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.92em;
-}
-
-.markdown :deep(th),
-.markdown :deep(td) {
-  border: 1px solid var(--el-border-color-lighter);
-  padding: 6px 10px;
-  text-align: left;
-}
-
-.markdown :deep(th) {
-  background: var(--el-fill-color-light);
-}
-
-.markdown :deep(hr) {
-  border: none;
-  border-top: 1px solid var(--el-border-color-lighter);
-  margin: 1.4em 0;
-}
-
-.markdown :deep(img) {
-  max-width: 100%;
-}
-
-.markdown :deep(a) {
-  color: var(--el-color-primary);
-  text-decoration: none;
-}
-
-.markdown :deep(a:hover) {
-  text-decoration: underline;
 }
 </style>

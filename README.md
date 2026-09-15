@@ -27,10 +27,11 @@ the codebase.
   [Artifact hub](#artifact-hub-tools--npm--docker--debian--model-routing).
 - **Ecosystem documentation** — every ecosystem group owns its own
   documentation leaf (`/docs/python`, `/docs/npm`, `/docs/docker`, …) holding
-  that ecosystem's Markdown documents, stored per ecosystem under `DOCS_DIR/`.
-  Any signed-in user can read and download them; only an administrator can
-  change a document, by **uploading a `.md` file** — there is no in-browser
-  editor. See [Ecosystem documentation](#ecosystem-documentation).
+  that ecosystem's Markdown documents, stored as folder projects under
+  `DOCS_DIR/<ecosystem>/` with their own assets. Any signed-in user can read
+  and download them; only an administrator can create, edit or delete one —
+  through the **in-browser Markdown editor** (formatting toolbar + live
+  preview). See [Ecosystem documentation](#ecosystem-documentation).
 - **API keys** — issue, list, revoke and track per-key usage from a web
   dashboard; keys are stored hashed in SQLite.
 - **Pluggable authentication** — HTTP Basic, twine-style `__token__` Basic,
@@ -187,7 +188,7 @@ Templates are provided at `.env.example` (local development) and
 | `DEBIAN_CACHE_MAX_MB`   | `256`                  | Byte budget for the apt metadata cache             |
 | `DEBIAN_METADATA_TTL`   | `300`                  | Seconds a proxied `Release`/`Packages` document is trusted |
 | `MODELS_FILE`           | `config/model_routes.json` | Model-routing table for downstream DSH         |
-| `DOCS_DIR`              | `docs`                 | Per-ecosystem Markdown documentation root — one sub-directory per ecosystem |
+| `DOCS_DIR`              | `docs`                 | Per-ecosystem Markdown documentation root — one sub-directory per ecosystem, one folder project per document |
 
 Nested fields can also be addressed with the `__` delimiter, e.g.
 `SERVER__PORT=9091`.
@@ -272,8 +273,8 @@ The permission points shipped today, and the routes that enforce them:
 | `admin:view` | `/api/v1/admin/stats` |
 | `admin:refresh` | `POST /api/v1/admin/refresh-stats` |
 | `admin:roles` | `/api/v1/admin/{roles,permissions,users}` |
-| `doc:read` | `GET /api/v1/docs*`, `/docs/<ecosystem>/`, `/docs/<ecosystem>/<name>` |
-| `doc:upload` | `POST /api/v1/docs/<ecosystem>`, `DELETE /api/v1/docs/<ecosystem>/<name>` — publishes by uploading a Markdown file |
+| `doc:read` | `GET /api/v1/docs*`, `/docs/<ecosystem>/`, `/docs/<ecosystem>/<id>`, `/docs/<ecosystem>/<id>/assets/<name>` |
+| `doc:upload` | `POST`/`PUT`/`DELETE` on `/api/v1/docs/<ecosystem>[/<id>[/assets/<name>]]` and `POST /api/v1/docs/<ecosystem>/<id>/preview` — creates, edits and deletes documents and their assets |
 
 ### Built-in roles
 
@@ -354,7 +355,7 @@ first, and an optional upstream mirror is fetched on demand and cached:
 | Debian       | `/debian`  | `DEBIAN_DIR`         | `DEBIAN_UPSTREAM`   | flat `Packages` + apt mirror proxy (`dists/`, `pool/`) |
 | 工具 / Tools | `/tools`   | `TOOLS_DIR`          | —                   | direct file downloads |
 | 模型路由     | `/models`  | `MODELS_FILE`        | —                   | publish-only JSON table |
-| 文档 / Docs  | `/docs/<eco>` | `DOCS_DIR/<eco>`  | —                   | Markdown documentation — read by everyone, **uploaded by admins** |
+| 文档 / Docs  | `/docs/<eco>` | `DOCS_DIR/<eco>/<id>/` | —                | Markdown folder projects — read by everyone, **created/edited by admins** |
 
 The Python and npm pages each carry a **dropdown** that switches the page
 between its two sub-elements — packages vs. prebuilt builds for Python, npm
@@ -440,42 +441,52 @@ table plus an alias-expanded snippet ready to paste into a DSH config.
 
 Every ecosystem group in the sidebar carries a **documentation leaf of its own**
 — `/docs/python`, `/docs/npm`, `/docs/docker`, `/docs/debian`, `/docs/tools` and
-`/docs/models` — rather than one shared entry at the top of the menu. The
-documents are plain Markdown and the storage mirrors the menu exactly: each
-ecosystem owns a sub-directory, and nothing lives in the top-level directory
-itself:
+`/docs/models` — rather than one shared entry at the top of the menu. A document
+is a small **folder project**: its Markdown source, a `meta.json` title record,
+and its own `assets/` directory, so screenshots belong to the document that uses
+them instead of every ecosystem sharing one flat pile:
 
 ```
 docs/
-  python/   getting-started.md
-  npm/      publishing.md
-  docker/   offline-images.md
-  debian/   apt-sources.md
-  tools/    authoring-tools.md
-  models/   dsh-routing.md
+  python/
+    getting-started/
+      document.md          # the Markdown source
+      meta.json            # {title, created, modified}
+      assets/              # images the document references as assets/<name>
+  npm/
+    publishing/
+      document.md
 ```
 
 **Who may do what.** Reading and downloading require `doc:read`, which the
 built-in `authenticated` role holds — every signed-in user can read the
-handbook. Changing a document requires `doc:upload`, which only the built-in
-`admin` role holds: an administrator publishes by *uploading a `.md` file*
-(through the page's upload button, or `POST /api/v1/docs/<ecosystem>`), and
-uploading an existing filename replaces it. There is deliberately no in-browser
-editor, so a document's history is exactly its sequence of uploaded files.
+handbook. Creating, editing, deleting a document, or uploading one of its
+assets requires `doc:upload`, which only the built-in `admin` role holds. An
+administrator edits the Markdown **in the browser** — a GitHub-style formatting
+toolbar over a source box, with a live preview rendered by the same server
+renderer so what you see is what gets saved — creates a document from the
+list's "+" control (optionally seeded with an uploaded `.md`; without a file
+the document starts empty), and attaches images through the editor's asset
+panel. Creating or seeding a document whose title/id already exists
+**replaces** it rather than duplicating it.
 
 **Reading.** The SPA renders the document; the server does the Markdown → HTML
 conversion with a small, dependency-free renderer (`services/markdown.py`) that
 HTML-escapes the source *before* emitting any markup, so raw HTML in a document
-can never become live markup. Each document also has two raw forms:
+can never become live markup. A document's relative `assets/…` references are
+rewritten to their absolute URL only while rendering, so the stored Markdown
+stays portable. Each document also has raw forms:
 
 * `GET /docs/<ecosystem>/` — the server-rendered index (HTML, or JSON with
   `?format=json`), the docs counterpart of `/tools/`.
-* `GET /docs/<ecosystem>/<name>` — the raw `.md` (`?download=1` for an
+* `GET /docs/<ecosystem>/<id>` — the raw `.md` (`?download=1` for an
   attachment), also available as JSON via
-  `GET /api/v1/docs/<ecosystem>/<name>`.
+  `GET /api/v1/docs/<ecosystem>/<id>`.
+* `GET /docs/<ecosystem>/<id>/assets/<name>` — one asset (images inline, other
+  types as an attachment).
 
-The directory is the catalog, so a document that an administrator uploads is
-visible on the next request — no restart, no database.
+The directory is the catalog, so a change is visible on the next request — no
+restart, no database.
 
 All the catalogs are file-backed and read-only over HTTP **except this one**:
 there is no upload API for tools, npm, Docker or Debian, by design — but a
@@ -502,7 +513,7 @@ in a new tab. Templates are grouped by ecosystem under `static/`:
 | npm    | `/npm/` | `npm/index.html` lists local packages | `?format=json` → the `/-/all` document |
 | Docker | `/docker/` | `docker/index.html` lists images and config snippets | `?format=json` → the `/api/v1/docker` document |
 | Debian | `/debian/` | `debian/index.html` lists `.deb` files | `?format=json` → the `/api/v1/debian` document |
-| Docs   | `/docs/<eco>/` | `docs/index.html` lists an ecosystem's Markdown documents | `?format=json` → the `/api/v1/docs/<eco>` document |
+| Docs   | `/docs/<eco>/` | `docs/index.html` lists an ecosystem's document projects | `?format=json` → the `/api/v1/docs/<eco>` document |
 
 Python and tools follow the content-negotiation convention already used by
 `/simple/`. npm has no official HTML index, so the JSON side follows the two
@@ -652,9 +663,14 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 | GET    | `/api/v1/models`                  | Model-routing table (model:read)         |
 | GET    | `/api/v1/docs`                    | Per-ecosystem document counts (doc:read) |
 | GET    | `/api/v1/docs/<ecosystem>`        | One ecosystem's document catalog (doc:read) |
-| GET    | `/api/v1/docs/<ecosystem>/<name>` | Document source + rendered HTML (doc:read) |
-| POST   | `/api/v1/docs/<ecosystem>`        | Upload/replace a `.md` document (doc:upload) |
-| DELETE | `/api/v1/docs/<ecosystem>/<name>` | Delete a document (doc:upload)           |
+| POST   | `/api/v1/docs/<ecosystem>`        | Create/replace a document, optional `.md` seed (doc:upload) |
+| GET    | `/api/v1/docs/<ecosystem>/<id>`   | Document source + rendered HTML + assets (doc:read) |
+| PUT    | `/api/v1/docs/<ecosystem>/<id>`   | Save the browser editor's Markdown (doc:upload) |
+| DELETE | `/api/v1/docs/<ecosystem>/<id>`   | Delete a document and its assets (doc:upload) |
+| POST   | `/api/v1/docs/<ecosystem>/<id>/preview` | Render unsaved Markdown for the live preview (doc:upload) |
+| GET    | `/api/v1/docs/<ecosystem>/<id>/assets` | List a document's assets (doc:read) |
+| POST   | `/api/v1/docs/<ecosystem>/<id>/assets` | Upload an asset into the document (doc:upload) |
+| DELETE | `/api/v1/docs/<ecosystem>/<id>/assets/<name>` | Delete an asset (doc:upload) |
 
 ### Browser-facing
 
@@ -741,6 +757,24 @@ the tables; and that neither of the two escalation guards can be talked around
 Both scripts exit non-zero on failure and were each verified to fail when the
 bug they guard against is reintroduced.
 
+### Keeping the renderer honest
+
+The Markdown renderer is the only path from a stored document to HTML, so its
+inline passes have to compose — a code span inside bold is still a code span —
+and its output has to stay escaped:
+
+```bash
+python scripts/check_markdown.py
+```
+
+It exists because that composition regressed: `**upload a `.md` file**`
+rendered the code span as a bare `0`, because the placeholder restore ran a
+single `re.sub` pass and never rescanned the fragment substituted for the outer
+emphasis token. The gate also pins the safety properties: raw HTML stays
+escaped, and `javascript:`/`data:` URLs never become live tags. It exits
+non-zero on failure and was verified to fail when the single-pass restore is
+reintroduced.
+
 ### Keeping the proxies honest
 
 A protocol proxy is easy to get *almost* right: the packument looks correct, the
@@ -810,8 +844,8 @@ services/              authorization service, hub catalogs, per-ecosystem Markdo
                        stats, validation
 schemas.py             request + response models (single source for /openapi.json)
 scripts/               verification gates (check_openapi, check_contract,
-                       check_auth_guards, check_rbac, and one offline
-                       conformance gate per proxy: check_npm_proxy,
+                       check_auth_guards, check_rbac, check_markdown, and one
+                       offline conformance gate per proxy: check_npm_proxy,
                        check_docker_proxy, check_debian_proxy)
 frontend/              Vue 3 + Vite + Element Plus SPA (build-time only)
 static/                index templates grouped by ecosystem (python/ node/ tools/
@@ -821,7 +855,7 @@ npm/                   artifact hub — local npm tarballs + catalog.json
 node-builds/           artifact hub — nodejs.org/dist-shaped Node.js mirror
 docker-images/         artifact hub — image tarballs + compose/Dockerfile
 debian/                artifact hub — local .deb files + apt snippets
-docs/                  artifact hub — docs/<ecosystem>/*.md documentation
+docs/                  artifact hub — docs/<ecosystem>/<id>/document.md (+ assets/) documentation
 docker/                docker-compose.yml and its .env template
 ```
 

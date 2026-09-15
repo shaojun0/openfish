@@ -75,6 +75,24 @@ def safe_url(url: str) -> str | None:
     return candidate
 
 
+def _resolve_asset(url: str, asset_base: str | None) -> str:
+    """Prefix a document-relative ``assets/…`` URL with its absolute base.
+
+    Documents reference their own images as ``assets/diagram.png`` so the raw
+    Markdown stays portable.  The rendered HTML, however, is served from a page
+    whose own URL is not the asset directory, so the caller passes the real
+    ``asset_base`` (``/docs/<ecosystem>/<id>/assets``) and every such URL is
+    rewritten before it reaches the ``<img>``/``<a>`` tag.  Any other URL —
+    absolute, scheme-carrying or pointing elsewhere — is left untouched.
+    """
+    if not asset_base:
+        return url
+    for prefix in ("assets/", "./assets/"):
+        if url.startswith(prefix):
+            return asset_base.rstrip("/") + "/" + url[len(prefix):]
+    return url
+
+
 def _escape(text: str) -> str:
     return html.escape(text, quote=False)
 
@@ -89,12 +107,12 @@ def _attr(value: str) -> str:
     return value.replace('"', "&quot;")
 
 
-def _inline(text: str) -> str:
+def _inline(text: str, asset_base: str | None = None) -> str:
     """Escape *text* and render the inline markup inside it."""
-    return _inline_escaped(_escape(text))
+    return _inline_escaped(_escape(text), asset_base)
 
 
-def _inline_escaped(text: str) -> str:
+def _inline_escaped(text: str, asset_base: str | None = None) -> str:
     """Render inline markup inside already-escaped *text*.
 
     Code spans and links are replaced with placeholder tokens first, so the
@@ -112,7 +130,7 @@ def _inline_escaped(text: str) -> str:
 
     # 2. Images before links: `![alt](url)` also matches the link pattern.
     def image(match: re.Match[str]) -> str:
-        url = safe_url(match.group(2))
+        url = safe_url(_resolve_asset(match.group(2), asset_base))
         if url is None:
             return match.group(0)
         alt = _attr(match.group(1))
@@ -122,12 +140,12 @@ def _inline_escaped(text: str) -> str:
     text = _IMAGE_RE.sub(image, text)
 
     def link(match: re.Match[str]) -> str:
-        url = safe_url(match.group(2))
+        url = safe_url(_resolve_asset(match.group(2), asset_base))
         if url is None:
             return match.group(0)
         # The label may itself carry inline markup; the recursion is bounded by
         # the bracket syntax and the text is already escaped.
-        label = _inline_escaped(match.group(1))
+        label = _inline_escaped(match.group(1), asset_base)
         title = f' title="{_attr(match.group(3))}"' if match.group(3) else ""
         return stash(f'<a href="{_attr(url)}"{title}>{label}</a>')
 
@@ -149,10 +167,20 @@ def _inline_escaped(text: str) -> str:
     text = _STRIKE_RE.sub(lambda m: stash(f"<del>{m.group(1)}</del>"), text)
 
     # 5. Restore the stashed spans.
+    #
+    # The restore has to be iterative: a span can be stashed *inside* another
+    # (`**bold with `code`**` stashes the code span first, then the bold span
+    # whose fragment still holds the code span's token).  `re.sub` does not
+    # rescan the text it substitutes, so one pass would leave the inner token
+    # in the output — which is how ``.md`` used to leak into the page as a bare
+    # ``0``.  Loop until no token is left; there are only `len(tokens)` of them.
     def restore(match: re.Match[str]) -> str:
         return tokens[int(match.group(1))]
 
-    text = re.sub(r"\x00(\d+)\x00", restore, text)
+    for _ in range(len(tokens) + 1):
+        text, replaced = re.subn(r"\x00(\d+)\x00", restore, text)
+        if not replaced:
+            break
     return text
 
 
@@ -193,7 +221,9 @@ def _alignments(delimiter: str) -> list[str]:
     return styles
 
 
-def _render_table(lines: list[str], index: int) -> tuple[str, int]:
+def _render_table(
+    lines: list[str], index: int, asset_base: str | None = None
+) -> tuple[str, int]:
     header = _split_row(lines[index])
     styles = _alignments(lines[index + 1])
     index += 2
@@ -205,7 +235,7 @@ def _render_table(lines: list[str], index: int) -> tuple[str, int]:
     def cell(tag: str, content: str, column: int) -> str:
         style = styles[column] if column < len(styles) else ""
         attr = f' style="text-align:{style}"' if style else ""
-        return f"<{tag}{attr}>{_inline(content)}</{tag}>"
+        return f"<{tag}{attr}>{_inline(content, asset_base)}</{tag}>"
 
     out = ["<table>", "<thead>", "<tr>"]
     out.extend(cell("th", value, i) for i, value in enumerate(header))
@@ -218,7 +248,9 @@ def _render_table(lines: list[str], index: int) -> tuple[str, int]:
     return "\n".join(out), index
 
 
-def _render_list(lines: list[str], index: int) -> tuple[str, int]:
+def _render_list(
+    lines: list[str], index: int, asset_base: str | None = None
+) -> tuple[str, int]:
     match = _LIST_RE.match(lines[index])
     assert match is not None  # caller checked
     base_indent = len(match.group(1))
@@ -265,7 +297,7 @@ def _render_list(lines: list[str], index: int) -> tuple[str, int]:
             else:
                 strip = min(len(line) - len(line.lstrip()), base_indent + 2)
                 dedented.append(line[strip:])
-        rendered = _render_blocks(dedented).strip()
+        rendered = _render_blocks(dedented, asset_base).strip()
         items.append(f"<li>{_unwrap_single_paragraph(rendered)}</li>")
 
     return f"<{tag}>\n" + "\n".join(items) + f"\n</{tag}>", index
@@ -281,7 +313,7 @@ def _is_block_start(line: str) -> bool:
     )
 
 
-def _render_blocks(lines: list[str]) -> str:
+def _render_blocks(lines: list[str], asset_base: str | None = None) -> str:
     out: list[str] = []
     index = 0
     total = len(lines)
@@ -309,7 +341,7 @@ def _render_blocks(lines: list[str]) -> str:
         heading = _HEADING_RE.match(line)
         if heading:
             level = min(len(heading.group(1)), 6)
-            out.append(f"<h{level}>{_inline(heading.group(2).strip())}</h{level}>")
+            out.append(f"<h{level}>{_inline(heading.group(2).strip(), asset_base)}</h{level}>")
             index += 1
             continue
 
@@ -330,17 +362,17 @@ def _render_blocks(lines: list[str]) -> str:
                     index += 1
                 else:
                     break
-            inner = _render_blocks(quoted).strip()
+            inner = _render_blocks(quoted, asset_base).strip()
             out.append(f"<blockquote>\n{inner}\n</blockquote>")
             continue
 
         if _is_table_start(lines, index):
-            table, index = _render_table(lines, index)
+            table, index = _render_table(lines, index, asset_base)
             out.append(table)
             continue
 
         if _LIST_RE.match(line):
-            listing, index = _render_list(lines, index)
+            listing, index = _render_list(lines, index, asset_base)
             out.append(listing)
             continue
 
@@ -350,17 +382,22 @@ def _render_blocks(lines: list[str]) -> str:
             paragraph.append(lines[index])
             index += 1
         joined = _HARD_BREAK_RE.sub("<br>\n", "\n".join(paragraph))
-        out.append(f"<p>{_inline(joined)}</p>")
+        out.append(f"<p>{_inline(joined, asset_base)}</p>")
 
     return "\n".join(out)
 
 
-def render(text: str) -> str:
-    """Render a Markdown document to a safe HTML fragment."""
+def render(text: str, asset_base: str | None = None) -> str:
+    """Render a Markdown document to a safe HTML fragment.
+
+    *asset_base* is the absolute URL prefix a document's relative
+    ``assets/…`` references are resolved against (see :func:`_resolve_asset`).
+    Passing ``None`` leaves every URL exactly as authored.
+    """
     if not text:
         return ""
     normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
-    return _render_blocks(normalized.split("\n"))
+    return _render_blocks(normalized.split("\n"), asset_base)
 
 
 __all__ = ["render", "safe_url"]

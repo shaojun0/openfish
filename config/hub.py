@@ -50,9 +50,11 @@ class HubConfig(BaseSettings):
         description=(
             "Root of the per-ecosystem Markdown documentation. Each immediate "
             "sub-directory is one ecosystem (python/, npm/, docker/, debian/, "
-            "tools/, models/) and holds that ecosystem's *.md documents. The "
-            "directory is the catalog: an administrator publishes by uploading "
-            "a .md file, everyone else reads and downloads it."
+            "tools/, models/) and holds that ecosystem's document folder "
+            "projects; a project is <id>/document.md plus its own meta.json and "
+            "assets/. The directory is the catalog: an administrator creates "
+            "and edits documents in the browser, everyone else reads and "
+            "downloads them."
         ),
     )
     npm_dir: str = Field(

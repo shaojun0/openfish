@@ -30,34 +30,36 @@
         <a href="{{ spa_url }}">← 控制台</a>
     </div>
     <h1>&#x1f4d6; {{ ecosystem }} 生态文档</h1>
-    <p>该生态的 Markdown 文档。点击标题在线阅读或下载原文；只有管理员可以上传新的 Markdown 文件来修改内容。</p>
+    <p>该生态的 Markdown 文档。每篇文档是一个独立的文件夹，可携带自己的图片等附件；点击标题在线阅读或下载原文，只有管理员可以在线编辑或上传。</p>
     <p class="stats">{{ doc_count }} 篇文档</p>
 
     <h2>用法</h2>
     <pre><code># 下载原文（Markdown）
-curl -O {{ base_url }}&lt;文件名&gt;?download=1
+curl -O {{ base_url }}&lt;文档标识&gt;?download=1
 
 # 取 JSON 清单（与 /api/v1/docs/{{ ecosystem }} 相同）
 curl -H 'Accept: application/json' {{ base_url }}</code></pre>
 
     {% if not documents %}
-    <p class="empty">该生态暂无文档。管理员可在控制台通过上传 <code>.md</code> 文件发布文档。</p>
+    <p class="empty">该生态暂无文档。管理员可在控制台点击列表旁的“+”新增，或直接在线编辑。</p>
     {% else %}
     <table>
         <thead>
             <tr>
                 <th>标题</th>
-                <th>文件名</th>
+                <th>标识</th>
                 <th class="size">大小</th>
+                <th class="size">附件</th>
                 <th>更新时间</th>
             </tr>
         </thead>
         <tbody>
         {% for d in documents %}
             <tr>
-                <td><a href="{{ url_for('docs.docs_raw', ecosystem=ecosystem, name=d.name) }}">{{ d.title }}</a></td>
-                <td><code>{{ d.filename }}</code></td>
+                <td><a href="{{ d.raw_url }}">{{ d.title }}</a></td>
+                <td><code>{{ d.id }}</code></td>
                 <td class="size">{{ d.size_human }}</td>
+                <td class="size">{{ d.asset_count }}</td>
                 <td>{{ d.modified[:10] if d.modified else '' }}</td>
             </tr>
         {% endfor %}

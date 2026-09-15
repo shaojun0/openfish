@@ -247,23 +247,42 @@ export interface DebianCatalog {
 // ── Per-ecosystem documentation ──────────────────────────────────────
 //
 // Each ecosystem group in the sidebar owns a documentation leaf.  Reading and
-// downloading needs `doc:read`; uploading or deleting a Markdown file needs
-// `doc:upload`, which only the built-in admin role holds.
+// downloading needs `doc:read`; creating, editing, deleting a document or
+// uploading one of its assets needs `doc:upload`, which only the built-in
+// admin role holds.  A document is a folder: its Markdown plus its own
+// `assets/` directory.
 
-/** One Markdown document in an ecosystem's documentation leaf. */
-export interface DocEntry {
-  /** Filename on disk — the key used to read/download/delete. */
+/** One file inside a document project's `assets/` directory. */
+export interface DocAsset {
   name: string
-  /** The document's first `#` heading, or the filename stem. */
+  size: number
+  size_human: string
+  modified: string | null
+  /** Images are served inline; anything else downloads as an attachment. */
+  is_image: boolean
+  /** Absolute URL that serves the bytes. */
+  url: string
+}
+
+/** One documentation document (a folder project). */
+export interface DocEntry {
+  /** Folder id — the key used to read/edit/delete and to address assets. */
+  id: string
+  /** Display title: the stored title, the first `#` heading, or the id. */
   title: string
   filename: string
   size: number
   size_human: string
   modified: string | null
+  created: string | null
+  /** Number of files in the document's own `assets/` directory. */
+  asset_count: number
   /** Raw `.md` download (an attachment), served by Flask. */
   download_url: string
   /** Raw `.md` served inline as `text/markdown`. */
   raw_url: string
+  /** `GET` endpoint that lists the document's assets. */
+  assets_url: string
 }
 
 export interface DocCatalog {
@@ -275,10 +294,11 @@ export interface DocCatalog {
   documents: DocEntry[]
 }
 
-/** A document plus its source and server-rendered, HTML-escaped body. */
+/** A document plus its source, server-rendered body and asset list. */
 export interface DocDetail extends DocEntry {
   content: string
   html: string
+  assets: DocAsset[]
 }
 
 export interface DocsOverview {
@@ -428,37 +448,102 @@ export async function fetchDocCatalog(ecosystem: string): Promise<DocCatalog> {
   return data
 }
 
-export async function fetchDoc(ecosystem: string, name: string): Promise<DocDetail> {
+export async function fetchDoc(ecosystem: string, docId: string): Promise<DocDetail> {
   const { data } = await http.get<DocDetail>(
-    `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(name)}`,
+    `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(docId)}`,
   )
   return data
 }
 
 /**
- * Publish (or replace) one Markdown document.  Admin-only: the server enforces
- * `doc:upload`, so a non-admin gets a 403 here.  Passing the same filename
- * again is how an administrator changes a document's content.
+ * Create a document project from a title, optionally seeded with a `.md` file.
+ *
+ * Admin-only.  If the derived folder id already exists the server *replaces*
+ * that document's content instead of creating a duplicate, and says so through
+ * `replaced`.
  */
-export async function uploadDoc(
+export async function createDoc(
   ecosystem: string,
-  file: File,
-  name?: string,
-): Promise<DocEntry> {
+  title: string,
+  file?: File | null,
+): Promise<{ document: DocEntry; replaced: boolean }> {
   const form = new FormData()
-  form.append('file', file)
-  if (name) form.append('name', name)
+  form.append('title', title)
+  if (file) form.append('file', file)
   // Let the browser set the multipart boundary — do not set Content-Type.
-  const { data } = await http.post<DocEntry>(
+  const { data } = await http.post<{ document: DocEntry; replaced: boolean }>(
     `/docs/${encodeURIComponent(ecosystem)}`,
     form,
   )
   return data
 }
 
-export async function deleteDoc(ecosystem: string, name: string): Promise<DocEntry> {
+/** Save the in-browser editor's Markdown.  Admin-only. */
+export async function saveDoc(
+  ecosystem: string,
+  docId: string,
+  content: string,
+): Promise<DocDetail> {
+  const { data } = await http.put<DocDetail>(
+    `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(docId)}`,
+    { content },
+  )
+  return data
+}
+
+/** Render unsaved Markdown for the editor's live preview.  Admin-only. */
+export async function renderDocPreview(
+  ecosystem: string,
+  docId: string,
+  content: string,
+): Promise<string> {
+  const { data } = await http.post<{ html: string }>(
+    `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(docId)}/preview`,
+    { content },
+  )
+  return data.html
+}
+
+export async function deleteDoc(ecosystem: string, docId: string): Promise<DocEntry> {
   const { data } = await http.delete<DocEntry>(
-    `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(name)}`,
+    `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(docId)}`,
+  )
+  return data
+}
+
+/** The files that belong to one document project. */
+export async function fetchDocAssets(
+  ecosystem: string,
+  docId: string,
+): Promise<DocAsset[]> {
+  const { data } = await http.get<{ assets: DocAsset[] }>(
+    `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(docId)}/assets`,
+  )
+  return data.assets
+}
+
+/** Upload one image/file into a document's own `assets/` directory. */
+export async function uploadDocAsset(
+  ecosystem: string,
+  docId: string,
+  file: File,
+): Promise<DocAsset> {
+  const form = new FormData()
+  form.append('file', file)
+  const { data } = await http.post<DocAsset>(
+    `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(docId)}/assets`,
+    form,
+  )
+  return data
+}
+
+export async function deleteDocAsset(
+  ecosystem: string,
+  docId: string,
+  name: string,
+): Promise<DocAsset> {
+  const { data } = await http.delete<DocAsset>(
+    `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(docId)}/assets/${encodeURIComponent(name)}`,
   )
   return data
 }

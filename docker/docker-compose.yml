@@ -27,8 +27,8 @@ services:
       - ./../docker-images:/app/docker-images
       # Debian 本地包与 apt 配置片段
       - ./../debian:/app/debian
-      # 各生态 Markdown 文档：docs/<生态>/*.md。
-      # 只有管理员（doc:upload）能通过上传 .md 修改内容，其他人只能查看/下载。
+      # 各生态 Markdown 文档：docs/<生态>/<文档标识>/document.md（另有 meta.json 与 assets/）。
+      # 只有管理员（doc:upload）能在浏览器中在线编辑、新增/删除文档并上传附件，其他人只能查看/下载。
       - ./../docs:/app/docs
       # 模型路由表：只读挂载，改完刷新页面即可
       - ./../config/model_routes.json:/app/config/model_routes.json:ro

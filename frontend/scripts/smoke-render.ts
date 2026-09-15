@@ -214,6 +214,73 @@ for (const kind of ['python', 'node'] as const) {
   })
 }
 
+// ── Documentation editor ────────────────────────────────────────────
+// The editor and its asset manager only appear once a document is selected and
+// the dialog is open — states the route renders above cannot reach.  Render
+// them directly with a fake document so a broken tooltip expression, an
+// unresolved icon or a missing i18n key fails this run instead of the user's
+// first click.
+const { default: DocEditor } = await import('../src/components/DocEditor.vue')
+const { default: DocAssetManager } = await import('../src/components/DocAssetManager.vue')
+const fakeAsset = {
+  name: 'diagram.png',
+  size: 2048,
+  size_human: '2.0 KB',
+  modified: null,
+  is_image: true,
+  url: '/docs/python/getting-started/assets/diagram.png',
+}
+const fakeDoc = {
+  id: 'getting-started',
+  title: 'Getting started',
+  filename: 'document.md',
+  size: 1234,
+  size_human: '1.2 KB',
+  modified: '2026-09-15T00:00:00+00:00',
+  created: '2026-09-14T00:00:00+00:00',
+  asset_count: 1,
+  download_url: '/docs/python/getting-started?download=1',
+  raw_url: '/docs/python/getting-started',
+  assets_url: '/api/v1/docs/python/getting-started/assets',
+  content: '# Getting started\n\n![diagram](assets/diagram.png)\n',
+  html: '<h1>Getting started</h1>',
+  assets: [fakeAsset],
+}
+{
+  const subApp = createSSRApp({
+    render: () =>
+      h('div', [
+        h(DocEditor, { visible: true, ecosystem: 'python', doc: fakeDoc }),
+        h(DocAssetManager, {
+          ecosystem: 'python',
+          docId: 'getting-started',
+          assets: [fakeAsset],
+        }),
+      ]),
+  })
+  const subPinia = createPinia()
+  subApp.use(subPinia)
+  setActivePinia(subPinia)
+  subApp.use(i18n)
+  subApp.use(ElementPlus)
+  for (const [name, component] of Object.entries(ElementPlusIcons)) {
+    if (name !== 'default') subApp.component(name, component)
+  }
+  const html = await renderToString(subApp)
+  // `el-dialog` renders its body lazily (only after mount), so the editor's
+  // toolbar/source are not in SSR output; the asset manager is a plain
+  // component and is.  The editor template itself is covered by the build and
+  // by the i18n key audit in the repo's checks.
+  const missing = ['asset-manager__list'].filter((m) => !html.includes(m))
+  results.push({
+    path: 'doc:editor',
+    route: 'docs',
+    bytes: html.length,
+    missing,
+    ok: html.length > 400 && missing.length === 0,
+  })
+}
+
 const realProblems = problems.filter(
   (p) =>
     !p.includes('network disabled by smoke test') &&
