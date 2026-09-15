@@ -1,0 +1,24 @@
+# ============================================================================
+# dsh-plugin-enterprise-intranet —— DSH bundle patch（挂载声明）
+# ============================================================================
+# DSH 启动时按 bundle 层栈叠加各插件 patch，本文件把「企业内网模式」插件插入
+# Web profile 的配置树。
+#
+# 安装方式：
+#   dsh plugin --profile web add link:<本目录绝对路径>
+# 或发布后：
+#   dsh plugin --profile web add dsh-plugin-enterprise-intranet
+#
+# 可选：在这里下发初始配置（面板里也能改，且面板改动会写回运行状态文件）。
+#   - insert:
+#       - id: enterprise-intranet
+#         name: dsh-plugin-enterprise-intranet
+#         config:
+#           platformUrl: https://47.97.243.86:9443
+#           apiKey: ''            # 留空 = 让用户在 DSH 面板里点「登录获取」
+#           autoMirrors: true
+# ============================================================================
+
+- insert:
+    - id: enterprise-intranet
+      name: dsh-plugin-enterprise-intranet

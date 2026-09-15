@@ -42,6 +42,12 @@ Dockerfile
 .dockerignore
 docker-compose.yml
 
+# ── Downstream client integrations ──────────────────────────────────
+# Code consumed by *other* programs (the DSH enterprise-intranet plugin is a
+# JavaScript package DSH installs), not by this server. Keeping it out of the
+# image keeps the Python runtime image free of an unrelated Node project.
+integrations/
+
 # ── Tests ──────────────────────────────────────────────────────────
 tests/
 
