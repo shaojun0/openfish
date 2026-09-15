@@ -10,10 +10,13 @@ import {
   fetchKeys,
   type ApiKey,
   type CreatedApiKey,
+  type KeyStatRow,
   type KeyStats,
 } from '@/api'
 import { apiError } from '@/api/client'
 import CodeBlock from '@/components/CodeBlock.vue'
+import TablePager from '@/components/TablePager.vue'
+import { usePagination } from '@/composables/usePagination'
 import { useSessionStore } from '@/stores/session'
 import { formatDate } from '@/utils/format'
 
@@ -22,6 +25,15 @@ const session = useSessionStore()
 
 const keys = ref<ApiKey[]>([])
 const loading = ref(true)
+
+const {
+  page,
+  pageSize,
+  pageSizes,
+  total,
+  rows,
+  onSortChange,
+} = usePagination(keys)
 
 // `el-select` needs a non-null value to keep the selection rendered, so the
 // "permanent" choice travels as a sentinel string and is mapped back to `null`
@@ -41,6 +53,16 @@ const statsVisible = ref(false)
 const statsLoading = ref(false)
 const stats = ref<KeyStats | null>(null)
 const statsKeyName = ref('')
+
+const statsRows = computed<KeyStatRow[]>(() => stats.value?.per_package ?? [])
+const {
+  page: statsPage,
+  pageSize: statsPageSize,
+  pageSizes: statsPageSizes,
+  total: statsTotal,
+  rows: statsRowsPage,
+  reset: resetStatsPage,
+} = usePagination(statsRows, { pageSize: 10, pageSizes: [10, 20, 50] })
 
 const canCreate = computed(() => session.can('key:create'))
 const canDelete = computed(() => session.can('key:delete'))
@@ -128,6 +150,7 @@ async function openStats(key: ApiKey): Promise<void> {
   statsKeyName.value = key.name
   stats.value = key.stats_detail ?? null
   statsVisible.value = true
+  resetStatsPage()
   if (stats.value) return
   statsLoading.value = true
   try {
@@ -190,8 +213,14 @@ onMounted(load)
     </el-card>
 
     <el-card shadow="never">
-      <el-table v-loading="loading" :data="keys" stripe :empty-text="t('keys.empty')">
-        <el-table-column prop="name" :label="t('keys.table.name')" min-width="180" sortable />
+      <el-table
+        v-loading="loading"
+        :data="rows"
+        stripe
+        :empty-text="t('keys.empty')"
+        @sort-change="onSortChange"
+      >
+        <el-table-column prop="name" :label="t('keys.table.name')" min-width="180" sortable="custom" />
         <el-table-column prop="prefix" :label="t('keys.table.prefix')" min-width="150">
           <template #default="{ row }"><span class="mono">{{ row.prefix }}</span></template>
         </el-table-column>
@@ -207,14 +236,14 @@ onMounted(load)
           :label="t('keys.table.downloads')"
           width="110"
           align="right"
-          sortable
+          sortable="custom"
         />
         <el-table-column
           prop="upload_count"
           :label="t('keys.table.uploads')"
           width="100"
           align="right"
-          sortable
+          sortable="custom"
         />
         <el-table-column :label="t('keys.table.created')" width="150">
           <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
@@ -243,9 +272,12 @@ onMounted(load)
         </el-table-column>
       </el-table>
 
-      <div class="footer">
-        <span class="footer__count">{{ t('common.total', { count: keys.length }) }}</span>
-      </div>
+      <TablePager
+        v-model:page="page"
+        v-model:page-size="pageSize"
+        :page-sizes="pageSizes"
+        :total="total"
+      />
     </el-card>
 
     <!-- Raw key is revealed exactly once. -->
@@ -276,7 +308,7 @@ onMounted(load)
         </div>
         <el-divider>{{ t('keys.perPackage') }}</el-divider>
         <el-table
-          :data="stats?.per_package ?? []"
+          :data="statsRowsPage"
           size="small"
           :empty-text="t('keys.statsEmpty')"
         >
@@ -288,6 +320,14 @@ onMounted(load)
           </el-table-column>
           <el-table-column prop="count" :label="t('stat.downloads')" width="90" align="right" />
         </el-table>
+
+        <TablePager
+          v-model:page="statsPage"
+          v-model:page-size="statsPageSize"
+          :page-sizes="statsPageSizes"
+          :total="statsTotal"
+          compact
+        />
       </div>
     </el-drawer>
   </div>
@@ -329,17 +369,6 @@ onMounted(load)
 
 .hint {
   margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-
-.footer {
-  display: flex;
-  justify-content: flex-end;
-  padding-top: 12px;
-}
-
-.footer__count {
   font-size: 12px;
   color: var(--el-text-color-secondary);
 }

@@ -6,12 +6,17 @@ import { useI18n } from 'vue-i18n'
 import { fetchNpmCatalog, type NpmCatalog, type NpmPackage } from '@/api'
 import { apiError } from '@/api/client'
 import CodeBlock from '@/components/CodeBlock.vue'
+import TablePager from '@/components/TablePager.vue'
+import { usePagination } from '@/composables/usePagination'
 import { formatDate } from '@/utils/format'
 
 const { t } = useI18n()
 
 const catalog = ref<NpmCatalog | null>(null)
 const loading = ref(true)
+
+const packages = computed<NpmPackage[]>(() => catalog.value?.packages ?? [])
+const { page, pageSize, pageSizes, total, rows } = usePagination(packages)
 
 /** The URL clients would point at once the registry proxy lands. */
 const registryUrl = computed(() => `${window.location.origin}/npm/`)
@@ -99,7 +104,7 @@ onMounted(load)
         :description="catalog && !catalog.exists ? t('npm.missingDesc', { root: catalog.root }) : t('npm.empty')"
       />
 
-      <el-table v-else v-loading="loading" :data="catalog?.packages ?? []" stripe>
+      <el-table v-else v-loading="loading" :data="rows" stripe>
         <el-table-column prop="name" :label="t('npm.name')" min-width="220">
           <template #default="{ row }">
             <div class="pkg">
@@ -148,6 +153,13 @@ onMounted(load)
           </template>
         </el-table-column>
       </el-table>
+
+      <TablePager
+        v-model:page="page"
+        v-model:page-size="pageSize"
+        :page-sizes="pageSizes"
+        :total="total"
+      />
     </el-card>
   </div>
 </template>

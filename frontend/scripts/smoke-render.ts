@@ -202,6 +202,54 @@ for (const r of results) {
   )
 }
 
+// ── Pagination logic ────────────────────────────────────────────────
+// `renderToString` never runs `onMounted`, so the route renders above cannot
+// load data and exercise `usePagination`.  Assert the composable directly —
+// it is the piece every table now depends on for its slicing and sorting.
+const { usePagination } = await import('../src/composables/usePagination')
+const { ref: vueRef, nextTick } = await import('vue')
+
+const pagerSource = vueRef(
+  Array.from({ length: 25 }, (_, i) => ({
+    name: `item-${String(i).padStart(2, '0')}`,
+    size: 25 - i,
+  })),
+)
+const pager = usePagination(pagerSource, { pageSize: 10 })
+const pagerChecks: Array<[string, boolean]> = [
+  ['first page holds one page of rows', pager.rows.value.length === 10],
+  ['page count is ceil(total / size)', pager.pageCount.value === 3],
+  ['total mirrors the source length', pager.total.value === 25],
+]
+
+pager.page.value = 3
+pagerChecks.push(['the last page holds the remainder', pager.rows.value.length === 5])
+
+pager.page.value = 1
+pager.onSortChange({ prop: 'size', order: 'ascending' })
+pagerChecks.push(['custom sort orders the whole source', pager.rows.value[0].name === 'item-24'])
+
+pager.pageSize.value = 20
+await nextTick()
+pagerChecks.push(['a larger page size clamps the current page', pager.page.value === 1])
+
+pagerSource.value = pagerSource.value.slice(0, 3)
+await nextTick()
+pagerChecks.push([
+  'a shrinking source clamps the current page',
+  pager.page.value === 1 && pager.total.value === 3,
+])
+
+console.log('')
+console.log('pagination   result')
+console.log('─'.repeat(60))
+let pagerFailed = 0
+for (const [label, ok] of pagerChecks) {
+  if (!ok) pagerFailed += 1
+  console.log(`${label.padEnd(42)} ${ok ? '✅' : '❌'}`)
+}
+failed += pagerFailed
+
 console.log('')
 if (realProblems.length) {
   console.log(`❌ ${realProblems.length} console message(s) captured:`)

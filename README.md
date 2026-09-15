@@ -97,7 +97,9 @@ cd frontend && npm run dev     # terminal 2 — http://127.0.0.1:5173
 ### Frontend smoke test
 
 `npm run smoke` renders every route in jsdom — no browser required — and exits
-non-zero on any Vue warning, unresolved component or runtime error:
+non-zero on any Vue warning, unresolved component or runtime error. It also
+asserts the `usePagination` slicing/sorting behaviour every table pager relies
+on:
 
 ```bash
 cd frontend && npm run smoke
@@ -644,6 +646,13 @@ The split is by **audience**, not by convenience:
 Adding a new package ecosystem (npm, Maven, …) means adding a backend adapter
 plus its protocol routes; the SPA stays unchanged as long as the ecosystem is
 surfaced through `/api/v1`.
+
+Every SPA table pages **client-side**: the catalog endpoints return the whole
+list, `usePagination()` slices it in the browser and `TablePager.vue` renders a
+shared footer (total, page size, pager, jumper). Columns that need a global sort
+use `sortable="custom"` and feed `@sort-change` back into the composable, so a
+sort orders the whole list rather than one page. This keeps the JSON contract
+unchanged while stopping `el-table` from rendering thousands of DOM rows.
 
 ## Project layout
 

@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { ElMessage } from 'element-plus'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { fetchPackages, type PackageSummary } from '@/api'
 import { apiError } from '@/api/client'
+import TablePager from '@/components/TablePager.vue'
+import { usePagination } from '@/composables/usePagination'
 import { formatBytes } from '@/utils/format'
 
 const { t } = useI18n()
@@ -18,6 +20,11 @@ const filtered = computed(() => {
   if (!needle) return packages.value
   return packages.value.filter((p) => p.name.toLowerCase().includes(needle))
 })
+
+const { page, pageSize, pageSizes, total, rows, onSortChange, reset } = usePagination(filtered)
+
+// A new search is a new result set: start it from the first page.
+watch(query, reset)
 
 async function load(): Promise<void> {
   loading.value = true
@@ -76,11 +83,12 @@ onMounted(load)
     <el-card shadow="never">
       <el-table
         v-loading="loading"
-        :data="filtered"
+        :data="rows"
         stripe
         :empty-text="query ? t('packages.emptyFiltered', { query }) : t('packages.empty')"
+        @sort-change="onSortChange"
       >
-        <el-table-column prop="name" :label="t('packages.name')" min-width="220" sortable>
+        <el-table-column prop="name" :label="t('packages.name')" min-width="220" sortable="custom">
           <template #default="{ row }">
             <a class="pkg-link mono" :href="indexUrl(row.name)" target="_blank" rel="noopener">
               {{ row.name }}
@@ -93,10 +101,16 @@ onMounted(load)
           :label="t('packages.files')"
           width="100"
           align="right"
-          sortable
+          sortable="custom"
         />
 
-        <el-table-column prop="total_size" :label="t('packages.size')" width="130" align="right" sortable>
+        <el-table-column
+          prop="total_size"
+          :label="t('packages.size')"
+          width="130"
+          align="right"
+          sortable="custom"
+        >
           <template #default="{ row }">
             {{ row.total_size_human || formatBytes(row.total_size) }}
           </template>
@@ -107,7 +121,7 @@ onMounted(load)
           :label="t('packages.downloads')"
           width="120"
           align="right"
-          sortable
+          sortable="custom"
         />
 
         <el-table-column
@@ -115,7 +129,7 @@ onMounted(load)
           :label="t('packages.uploads')"
           width="110"
           align="right"
-          sortable
+          sortable="custom"
         />
 
         <el-table-column :label="t('common.actions')" width="190" align="right">
@@ -133,9 +147,12 @@ onMounted(load)
         </el-table-column>
       </el-table>
 
-      <div class="footer">
-        <span class="footer__count">{{ t('common.total', { count: filtered.length }) }}</span>
-      </div>
+      <TablePager
+        v-model:page="page"
+        v-model:page-size="pageSize"
+        :page-sizes="pageSizes"
+        :total="total"
+      />
     </el-card>
   </div>
 </template>
@@ -162,16 +179,5 @@ onMounted(load)
 
 .pkg-link:hover {
   text-decoration: underline;
-}
-
-.footer {
-  display: flex;
-  justify-content: flex-end;
-  padding-top: 12px;
-}
-
-.footer__count {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
 }
 </style>

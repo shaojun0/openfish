@@ -18,6 +18,8 @@ import {
 } from '@/api'
 import { apiError } from '@/api/client'
 import CodeBlock from '@/components/CodeBlock.vue'
+import TablePager from '@/components/TablePager.vue'
+import { usePagination } from '@/composables/usePagination'
 import { formatDate } from '@/utils/format'
 
 const props = defineProps<{ endpoint: 'docker' | 'debian' }>()
@@ -31,6 +33,7 @@ const loading = ref(true)
 
 const isDocker = computed(() => props.endpoint === 'docker')
 const artifacts = computed<FlatArtifact[]>(() => catalog.value?.artifacts ?? [])
+const { page, pageSize, pageSizes, total, rows } = usePagination(artifacts)
 const upstream = computed(() =>
   isDocker.value
     ? ((catalog.value as DockerCatalog | null)?.registry ?? '')
@@ -144,7 +147,7 @@ onMounted(load)
         "
       />
 
-      <el-table v-else v-loading="loading" :data="artifacts" stripe>
+      <el-table v-else v-loading="loading" :data="rows" stripe>
         <el-table-column :label="t(`${endpoint}.name`)" min-width="220">
           <template #default="{ row }">
             <div class="item">
@@ -214,6 +217,13 @@ onMounted(load)
           </template>
         </el-table-column>
       </el-table>
+
+      <TablePager
+        v-model:page="page"
+        v-model:page-size="pageSize"
+        :page-sizes="pageSizes"
+        :total="total"
+      />
     </el-card>
   </div>
 </template>

@@ -18,6 +18,8 @@ import {
   type UserInfo,
 } from '@/api'
 import { apiError } from '@/api/client'
+import TablePager from '@/components/TablePager.vue'
+import { usePagination } from '@/composables/usePagination'
 import { useSessionStore } from '@/stores/session'
 import { formatDate } from '@/utils/format'
 
@@ -28,6 +30,32 @@ const permissions = ref<PermissionInfo[]>([])
 const roles = ref<RoleInfo[]>([])
 const users = ref<UserInfo[]>([])
 const loading = ref(true)
+
+// All three lists are paged client-side; the roles and permissions tables are
+// small, but the accounts list can grow with every OAuth2/basic user.
+const {
+  page: rolesPage,
+  pageSize: rolesPageSize,
+  pageSizes: rolesPageSizes,
+  total: rolesTotal,
+  rows: rolesRows,
+} = usePagination(roles)
+
+const {
+  page: usersPage,
+  pageSize: usersPageSize,
+  pageSizes: usersPageSizes,
+  total: usersTotal,
+  rows: usersRows,
+} = usePagination(users)
+
+const {
+  page: permissionsPage,
+  pageSize: permissionsPageSize,
+  pageSizes: permissionsPageSizes,
+  total: permissionsTotal,
+  rows: permissionsRows,
+} = usePagination(permissions)
 
 /** `admin:roles` is the grant that owns this whole screen. */
 const canManage = computed(() => session.can('admin:roles'))
@@ -204,7 +232,9 @@ async function load(): Promise<void> {
     const [perm, role, user] = await Promise.all([
       fetchPermissions(),
       fetchRoles(),
-      fetchUsers(),
+      // One round trip up to the endpoint's cap; the accounts table pages in
+      // the browser so the page stays interactive.
+      fetchUsers(1000),
     ])
     permissions.value = perm
     roles.value = role
@@ -247,7 +277,7 @@ onMounted(load)
         </div>
       </template>
       <el-table
-        :data="roles"
+        :data="rolesRows"
         stripe
         row-class-name="role-row"
         :empty-text="t('access.roles.empty')"
@@ -321,6 +351,13 @@ onMounted(load)
           </template>
         </el-table-column>
       </el-table>
+
+      <TablePager
+        v-model:page="rolesPage"
+        v-model:page-size="rolesPageSize"
+        :page-sizes="rolesPageSizes"
+        :total="rolesTotal"
+      />
     </el-card>
 
     <!-- Accounts ──────────────────────────────────────────────────── -->
@@ -331,7 +368,7 @@ onMounted(load)
           <span class="card-hint">{{ t('access.accounts.description') }}</span>
         </div>
       </template>
-      <el-table :data="users" stripe :empty-text="t('access.accounts.empty')">
+      <el-table :data="usersRows" stripe :empty-text="t('access.accounts.empty')">
         <el-table-column :label="t('access.accounts.account')" min-width="200">
           <template #default="{ row }">
             <div class="mono">{{ row.external_id }}</div>
@@ -397,6 +434,13 @@ onMounted(load)
           </template>
         </el-table-column>
       </el-table>
+
+      <TablePager
+        v-model:page="usersPage"
+        v-model:page-size="usersPageSize"
+        :page-sizes="usersPageSizes"
+        :total="usersTotal"
+      />
     </el-card>
 
     <!-- Permission points ─────────────────────────────────────────── -->
@@ -408,9 +452,8 @@ onMounted(load)
         </div>
       </template>
       <el-table
-        :data="permissions"
+        :data="permissionsRows"
         stripe
-        max-height="440"
         :empty-text="t('access.permissions.empty')"
       >
         <el-table-column :label="t('access.permissions.code')" min-width="180">
@@ -439,6 +482,13 @@ onMounted(load)
           </template>
         </el-table-column>
       </el-table>
+
+      <TablePager
+        v-model:page="permissionsPage"
+        v-model:page-size="permissionsPageSize"
+        :page-sizes="permissionsPageSizes"
+        :total="permissionsTotal"
+      />
     </el-card>
 
     <!-- Role permission editor ────────────────────────────────────── -->

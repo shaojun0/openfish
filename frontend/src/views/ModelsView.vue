@@ -6,6 +6,8 @@ import { useI18n } from 'vue-i18n'
 import { fetchModelRoutes, type ModelRoute, type ModelRoutes } from '@/api'
 import { apiError } from '@/api/client'
 import CodeBlock from '@/components/CodeBlock.vue'
+import TablePager from '@/components/TablePager.vue'
+import { usePagination } from '@/composables/usePagination'
 
 const { t } = useI18n()
 
@@ -15,6 +17,9 @@ const loading = ref(true)
 const enabledCount = computed(
   () => (routes.value?.routes ?? []).filter((route) => route.enabled).length,
 )
+
+const routeList = computed<ModelRoute[]>(() => routes.value?.routes ?? [])
+const { page, pageSize, pageSizes, total, rows } = usePagination(routeList)
 
 /** A ready-to-paste mapping for the DSH side, built from enabled routes. */
 const dshSnippet = computed(() => {
@@ -99,7 +104,7 @@ onMounted(load)
         :description="routes && !routes.exists ? t('models.missingDesc', { source: routes.source }) : t('models.empty')"
       />
 
-      <el-table v-else v-loading="loading" :data="routes?.routes ?? []" stripe>
+      <el-table v-else v-loading="loading" :data="rows" stripe>
         <el-table-column :label="t('models.name')" min-width="200">
           <template #default="{ row }">
             <div class="route">
@@ -148,6 +153,13 @@ onMounted(load)
           </template>
         </el-table-column>
       </el-table>
+
+      <TablePager
+        v-model:page="page"
+        v-model:page-size="pageSize"
+        :page-sizes="pageSizes"
+        :total="total"
+      />
     </el-card>
 
     <el-card v-if="enabledCount" shadow="never">
