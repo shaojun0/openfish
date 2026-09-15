@@ -17,10 +17,11 @@ This module is also the *only* thing that serves files off disk to a browser.
 ``app.py`` disables Flask's built-in ``static`` handler, so the SPA bundle
 (``static/dist/*``) is served here by one explicit route instead of the whole
 ``static/`` tree.  Two things live under ``static/`` that must never be public
-and used to be: the Jinja templates in ``static/<ecosystem>/`` (read by
-``services/templates.py``) and any TLS material an operator drops into
-``static/certs/``.  Keep it that way — ``scripts/check_auth_guards.py`` now
-fails the build if a blanket static handler comes back.
+and used to be: the Jinja templates in ``static/<ecosystem>/`` (loaded by
+Flask's template loader for the machine-facing pages) and any TLS material an
+operator drops into ``static/certs/``.  Keep it that way —
+``scripts/check_auth_guards.py`` now fails the build if a blanket static handler
+comes back.
 
 Whole-blueprint guard
 ---------------------

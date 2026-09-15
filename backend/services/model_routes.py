@@ -26,22 +26,22 @@ route's ``name`` and ``description`` are mandatory; the API key may be empty.
 
 from __future__ import annotations
 
-import errno
 import json
 import logging
 import os
 import re
-import tempfile
 import threading
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 import requests
 
-log = logging.getLogger("cpypiserver.model_routes")
+from services.fileio import read_json, write_json
+from services.format import utc_now_iso
+
+logger = logging.getLogger("cpypiserver.model_routes")
 
 #: Wire formats a route may speak.  The values are the canonical spellings the
 #: UI select offers and the JSON document stores.
@@ -317,40 +317,6 @@ def public_route(item: Mapping[str, Any], *, health: Mapping[str, Any] | None = 
 
 # ── Document I/O ─────────────────────────────────────────────────────
 
-def _atomic_write(path: Path, data: bytes) -> None:
-    """Write *data* to *path* through a temp file + ``os.replace``.
-
-    A concurrent reader (or the downstream DSH) therefore sees either the old
-    document or the new one, never a half-written one.
-
-    The one exception is a **single-file bind mount** — a common way to hand
-    this deployment its route table.  Such a file is a mount point, and
-    ``rename(2)`` onto it fails with ``EBUSY`` (a cross-device rename with
-    ``EXDEV``); there the document is rewritten in place, which is the only
-    operation that mount permits.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=".tmp-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-        try:
-            os.replace(tmp_name, path)
-        except OSError as exc:
-            if exc.errno not in (errno.EBUSY, errno.EXDEV):
-                raise
-            log.debug("cannot rename onto %s (%s); rewriting in place", path, exc)
-            with open(path, "wb") as fh:
-                fh.write(data)
-    finally:
-        # A successful replace consumed the temp file; the in-place fallback
-        # left it behind.  Either way, cleaning up is best-effort.
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-
-
 def _read_document(path: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Return ``(document, routes)``, preserving unknown top-level keys.
 
@@ -390,10 +356,7 @@ def _write_document(
     payload = dict(document) if isinstance(document, Mapping) else {}
     payload.setdefault("version", 1)
     payload["routes"] = routes
-    _atomic_write(
-        Path(path),
-        (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
-    )
+    write_json(Path(path), payload)
 
 
 def _index_of(routes: list[dict[str, Any]], name: str) -> int | None:
@@ -410,12 +373,7 @@ def load_health(path: str | Path | None) -> dict[str, dict[str, Any]]:
     if not path:
         return {}
     file_path = Path(path)
-    if not file_path.is_file():
-        return {}
-    try:
-        data = json.loads(file_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    data = read_json(file_path, default={})
     raw = data.get("routes") if isinstance(data, dict) and "routes" in data else data
     if not isinstance(raw, dict):
         return {}
@@ -427,10 +385,7 @@ def load_health(path: str | Path | None) -> dict[str, dict[str, Any]]:
 
 
 def _save_health(path: str | Path, mapping: Mapping[str, Any]) -> None:
-    _atomic_write(
-        Path(path),
-        (json.dumps({"routes": mapping}, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
-    )
+    write_json(Path(path), {"routes": mapping})
 
 
 def record_health(path: str | Path | None, name: str, health: Mapping[str, Any]) -> None:
@@ -474,7 +429,7 @@ def load(path: str | Path, *, health_path: str | Path | None = None) -> dict[str
     try:
         data = json.loads(file_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        log.warning("cannot read model routes from %s: %s", file_path, exc)
+        logger.warning("cannot read model routes from %s: %s", file_path, exc)
         return {
             "source": str(file_path),
             "exists": True,
@@ -544,7 +499,7 @@ def resolve(path: str | Path, *, health_path: str | Path | None = None) -> dict[
     try:
         data = json.loads(file_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        log.warning("cannot read model routes from %s: %s", file_path, exc)
+        logger.warning("cannot read model routes from %s: %s", file_path, exc)
         return {
             "source": str(file_path),
             "exists": True,
@@ -676,7 +631,7 @@ def _classify(status_code: int) -> str:
 
 
 def _checked_at() -> str:
-    return datetime.now(tz=timezone.utc).isoformat()
+    return utc_now_iso()
 
 
 def _unreachable(url: str, error: str, latency_ms: int | None = None) -> dict[str, Any]:

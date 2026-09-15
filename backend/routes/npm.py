@@ -32,7 +32,7 @@ or the guard is applied after registration and never runs.
 from __future__ import annotations
 
 from flask import (
-    Blueprint, jsonify, render_template_string, request, send_file,
+    Blueprint, jsonify, render_template, request, send_file,
     send_from_directory, url_for,
 )
 from werkzeug.routing import BaseConverter
@@ -42,7 +42,7 @@ from auth.permissions import NPM_DOWNLOAD, NPM_READ
 from config import settings
 from openapi import api_operation, binary, errors, json_body, ok
 from routes.hub_common import spa_url, wants_json
-from services import hub, templates
+from services import hub
 from services.npm_registry import (
     ABBREVIATED_ACCEPT, SEARCH_MAX_SIZE, NpmRegistry, clamp_search_size,
 )
@@ -268,8 +268,8 @@ def npm_index():
     document = hub.npm_all_index(catalog)
     if wants_json():
         return jsonify(document)
-    return render_template_string(
-        templates.npm_index(),
+    return render_template(
+        "npm/index.html",
         server_name=settings.server.server_name,
         base_url=url_for("npm.npm_index", _external=True),
         spa_url=spa_url("/npm"),

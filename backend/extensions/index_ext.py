@@ -1,5 +1,7 @@
 """Index extension — watchdog-backed PackageIndex + PythonBuildIndex."""
 
+from __future__ import annotations
+
 from extensions import Extension
 from index import register_all
 

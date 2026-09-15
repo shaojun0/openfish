@@ -1,5 +1,7 @@
 """Error handler extension — global Flask error handlers."""
 
+from __future__ import annotations
+
 from flask import jsonify, redirect, request
 
 from config import settings

@@ -1,28 +1,14 @@
 <script setup lang="ts">
-import { ElMessage } from 'element-plus'
-import { ref } from 'vue'
-import { useI18n } from 'vue-i18n'
+import { useClipboard } from '@/composables/useClipboard'
 
-const props = defineProps<{
+defineProps<{
   /** The literal text that gets copied. */
   code: string
   /** Optional label rendered above the block. */
   label?: string
 }>()
 
-const { t } = useI18n()
-const copied = ref(false)
-
-async function copy(): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(props.code)
-    copied.value = true
-    ElMessage.success(t('common.copied'))
-    window.setTimeout(() => (copied.value = false), 1500)
-  } catch {
-    ElMessage.warning(t('common.copyFailed'))
-  }
-}
+const { copied, copy } = useClipboard()
 </script>
 
 <template>
@@ -34,7 +20,7 @@ async function copy(): Promise<void> {
         size="small"
         text
         :type="copied ? 'success' : 'default'"
-        @click="copy"
+        @click="copy(code)"
       >
         <el-icon><component :is="copied ? 'Select' : 'CopyDocument'" /></el-icon>
       </el-button>

@@ -20,6 +20,7 @@ import CodeBlock from '@/components/CodeBlock.vue'
 import TablePager from '@/components/TablePager.vue'
 import { usePagination } from '@/composables/usePagination'
 import { useSessionStore } from '@/stores/session'
+import { formatDate } from '@/utils/format'
 
 /**
  * Model routing (`/models`).
@@ -216,7 +217,7 @@ function healthTooltip(health: ModelRouteHealth | null): string {
   return [
     health.error,
     health.url,
-    health.checked_at ? `${t('models.checkedAt')} ${health.checked_at}` : '',
+    health.checked_at ? `${t('models.checkedAt')} ${formatDate(health.checked_at)}` : '',
   ]
     .filter(Boolean)
     .join('\n')
@@ -702,14 +703,6 @@ onMounted(() => load())
 </template>
 
 <style scoped>
-.card-title {
-  font-weight: 600;
-}
-
-.btn-label {
-  margin-left: 4px;
-}
-
 .page__actions {
   display: flex;
   gap: 8px;

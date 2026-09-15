@@ -29,7 +29,7 @@ import os
 import re
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from index.base import WatchdogIndex, compute_sha256, invalidate_digest_cache
 from schemas import NodeBuildFile
@@ -92,7 +92,7 @@ def _version_key(tag: str) -> tuple:
     )
 
 
-def _parse_node_filename(filename: str) -> Optional[NodeBuildFile]:
+def _parse_node_filename(filename: str) -> NodeBuildFile | None:
     match = _NODE_PATTERN.match(filename)
     if match is None:
         return None
@@ -114,7 +114,7 @@ def _parse_node_filename(filename: str) -> Optional[NodeBuildFile]:
     )
 
 
-def _entry(full_path: Path, release_tag: str) -> Optional[NodeBuildFile]:
+def _entry(full_path: Path, release_tag: str) -> NodeBuildFile | None:
     bf = _parse_node_filename(full_path.name)
     if bf is None:
         return None
@@ -161,12 +161,12 @@ class NodeBuildIndex(WatchdogIndex):
         with self._lock:
             return sorted(self._by_release.keys(), key=_version_key, reverse=True)
 
-    def get_files_for_release(self, release_tag: str) -> Optional[list[NodeBuildFile]]:
+    def get_files_for_release(self, release_tag: str) -> list[NodeBuildFile] | None:
         with self._lock:
             files = self._by_release.get(release_tag)
             return list(files) if files else None
 
-    def get_file(self, release_tag: str, filename: str) -> Optional[NodeBuildFile]:
+    def get_file(self, release_tag: str, filename: str) -> NodeBuildFile | None:
         with self._lock:
             for f in self._by_release.get(release_tag, []):
                 if f.filename == filename:
@@ -179,7 +179,7 @@ class NodeBuildIndex(WatchdogIndex):
         bf.sha256_digest = compute_sha256(bf.path)
         return bf.sha256_digest
 
-    def resolve_alias(self, tag: str) -> Optional[str]:
+    def resolve_alias(self, tag: str) -> str | None:
         """``latest`` / ``latest-v20.x`` → a concrete release tag, or None.
 
         ``nvm`` resolves ``nvm install node`` through ``latest/SHASUMS256.txt``
@@ -218,7 +218,7 @@ class NodeBuildIndex(WatchdogIndex):
                 "versions": sorted(versions, key=_version_key),
             }
 
-    def shasums(self, release_tag: str) -> Optional[str]:
+    def shasums(self, release_tag: str) -> str | None:
         """``SHASUMS256.txt`` for one release, in node's two-space format.
 
         Returns ``None`` for an unknown release.  Every listed archive is hashed

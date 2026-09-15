@@ -6,8 +6,6 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Optional
-
 from index.base import WatchdogIndex, compute_sha256, invalidate_digest_cache
 from schemas import PackageFile
 
@@ -27,7 +25,7 @@ def normalize_package_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name.lower())
 
 
-def _parse_name(filename: str) -> Optional[str]:
+def _parse_name(filename: str) -> str | None:
     m = WHEEL_PATTERN.match(filename)
     if m:
         return normalize_package_name(m.group(1))
@@ -49,7 +47,7 @@ def _extract_version(filename: str, norm_name: str) -> str:
     return rest
 
 
-def _build_package_file(full_path: Path, *, stat_size: bool = False) -> Optional[PackageFile]:
+def _build_package_file(full_path: Path, *, stat_size: bool = False) -> PackageFile | None:
     filename = full_path.name
     pkg_name = _parse_name(filename)
     if not pkg_name:
@@ -96,7 +94,7 @@ class PackageIndex(WatchdogIndex):
         with self._lock:
             return {k: list(v) for k, v in self._packages.items()}
 
-    def get_files(self, name: str) -> Optional[list[PackageFile]]:
+    def get_files(self, name: str) -> list[PackageFile] | None:
         norm = normalize_package_name(name)
         with self._lock:
             files = self._packages.get(norm)

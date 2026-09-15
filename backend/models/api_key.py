@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import Column, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, relationship
 
 from .base import Base

@@ -9,12 +9,11 @@ description = "A lightweight Python package server built with Flask."
 requires-python = ">=3.12"
 dependencies = [
     "clamd>=1.0.2",
-    "cryptography>=49.0.0",
     "flask-caching>=2.4",
     "flask>=3.1",
     "flask-pydantic>=0.14.0",
+    "markdown-it-py>=3.0",
     "pydantic-settings>=2.14.2",
-    "pyjwt>=2.13.0",
     "python-magic>=0.4.27",
     "requests>=2.34.2",
     "sqlalchemy>=2.0",
@@ -23,8 +22,9 @@ dependencies = [
 
 [project.optional-dependencies]
 prod = ["gunicorn>=22"]
-# Verification gates — see scripts/check_openapi.py and scripts/check_contract.py
-dev = ["openapi-spec-validator>=0.7"]
+# Verification gates — see scripts/check_openapi.py, check_contract.py and
+# check_lint.py (pyflakes: undefined names / dead imports).
+dev = ["openapi-spec-validator>=0.7", "pyflakes>=3.2"]
 
 [project.scripts]
 cpypiserver = "app:main"

@@ -28,7 +28,7 @@ from urllib.parse import quote
 from index.node_build import NodeBuildIndex
 from index.python_build import PythonBuildIndex
 from schemas import NodeBuildFile, PythonBuildFile
-from services.hub import human_size
+from services.format import human_size
 
 #: OpenAPI shape of the payloads below.  A plain JSON Schema rather than a
 #: pydantic model: the two mirrors differ at the leaves (a CPython archive has a

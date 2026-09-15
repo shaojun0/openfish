@@ -110,6 +110,7 @@ export default {
     nodeTitle: 'Node.js runtime mirror (nvm / fnm)',
     nodeDesc: 'Point NVM_NODEJS_ORG_MIRROR or FNM_NODE_DIST_MIRROR here to download prebuilt Node.js.',
     copy: 'Copy',
+    loadFailed: 'Failed to load the overview',
   },
 
   stat: {
@@ -570,8 +571,6 @@ export default {
     noAssets: 'No assets yet',
     insert: 'Insert into document',
     copyLink: 'Copy link',
-    copied: 'Link copied',
-    copyFailed: 'Copy failed — please select manually',
     assetUploaded: 'Uploaded {name}',
     assetUploadFailed: 'Failed to upload the asset',
     assetLoadFailed: 'Failed to load the assets',

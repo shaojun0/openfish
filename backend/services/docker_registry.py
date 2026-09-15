@@ -56,12 +56,12 @@ from urllib.parse import urlsplit
 from flask import Response
 
 from config import settings
-from services.hub import _parse_docker_filename
+from services.hub import parse_docker_filename
 from services.upstream import (
     CHUNK, DiskCache, Upstream, UpstreamError, forward_headers, passthrough,
 )
 
-log = logging.getLogger("cpypiserver.docker")
+logger = logging.getLogger("cpypiserver.docker")
 
 #: Manifest documents are metadata and therefore small; this is the ceiling on
 #: what may be read into memory.  Docker Hub manifest lists are a few KiB.
@@ -334,7 +334,7 @@ class _RepositoryIndex:
             try:
                 self._save(data)
             except OSError as exc:
-                log.warning("docker: cannot update %s: %s", self.path, exc)
+                logger.warning("docker: cannot update %s: %s", self.path, exc)
 
     def record_blob(self, name: str, digest: str) -> None:
         """Link one repository to a blob that was fetched or served for it."""
@@ -351,7 +351,7 @@ class _RepositoryIndex:
             try:
                 self._save(data)
             except OSError as exc:
-                log.warning("docker: cannot update %s: %s", self.path, exc)
+                logger.warning("docker: cannot update %s: %s", self.path, exc)
 
     def has_blob(self, name: str, digest: str) -> bool:
         """True when *digest* is known to belong to repository *name*."""
@@ -511,16 +511,16 @@ class DockerRegistryProxy:
                 "GET", realm, params=query, headers=token_headers,
             )
         except UpstreamError as exc:
-            log.warning("docker: token endpoint unreachable: %s", exc)
+            logger.warning("docker: token endpoint unreachable: %s", exc)
             return ""
         try:
             if response.status_code >= 400:
-                log.warning("docker: token endpoint returned %s", response.status_code)
+                logger.warning("docker: token endpoint returned %s", response.status_code)
                 return ""
             try:
                 document = response.json()
             except ValueError:
-                log.warning("docker: token endpoint returned invalid JSON")
+                logger.warning("docker: token endpoint returned invalid JSON")
                 return ""
         finally:
             response.close()
@@ -538,7 +538,7 @@ class DockerRegistryProxy:
         with self._token_lock:
             self._tokens[key] = (token, expiry)
         # Deliberately never log the token itself.
-        log.debug("docker: obtained upstream bearer token (service=%r)", service)
+        logger.debug("docker: obtained upstream bearer token (service=%r)", service)
         return token
 
     def _get_document(self, path: str, *, accept: str | None, what: str):
@@ -609,7 +609,7 @@ class DockerRegistryProxy:
                 meta = self._read_meta(key)
                 digest = reference if digest_ref else sha256_digest(body)
                 content_type = meta.get("content_type") or _infer_manifest_type(body)
-                log.info("docker: manifest cache hit %s (%d bytes)", key, len(body))
+                logger.info("docker: manifest cache hit %s (%d bytes)", key, len(body))
                 return ManifestResult(body, content_type, digest, from_cache=True)
 
         if not self.configured:
@@ -627,7 +627,7 @@ class DockerRegistryProxy:
         computed = sha256_digest(body)
         upstream_digest = (response.headers.get("Docker-Content-Digest") or "").strip()
         if upstream_digest and upstream_digest.lower() != computed.lower():
-            log.error(
+            logger.error(
                 "docker: manifest digest mismatch for %s: upstream=%s computed=%s",
                 key, upstream_digest, computed,
             )
@@ -648,7 +648,7 @@ class DockerRegistryProxy:
         self._index.record_manifest(
             name, reference, served_digest, _manifest_blob_digests(body),
         )
-        log.info("docker: cached manifest %s (%d bytes)", key, len(body))
+        logger.info("docker: cached manifest %s (%d bytes)", key, len(body))
         return ManifestResult(body, content_type, served_digest, from_cache=False)
 
     def _meta_key(self, key: str) -> str:
@@ -695,7 +695,7 @@ class DockerRegistryProxy:
 
         cached = self._cache.get(digest, max_age=None)
         if cached is not None and self._index.has_blob(name, digest):
-            log.info("docker: blob cache hit %s for %s", digest, name)
+            logger.info("docker: blob cache hit %s for %s", digest, name)
             return _cached_blob_response(cached, digest, range_header)
 
         if not self.configured:
@@ -809,7 +809,7 @@ class DockerRegistryProxy:
                     if state["hasher"] is not None else digest
                 )
                 if state["hasher"] is not None and computed.lower() != digest.lower():
-                    log.error(
+                    logger.error(
                         "docker: blob digest mismatch for %s: got %s; not caching",
                         digest, computed,
                     )
@@ -821,15 +821,15 @@ class DockerRegistryProxy:
                 try:
                     self._cache.enforce_limit()
                 except OSError as exc:  # pragma: no cover - budget is best effort
-                    log.warning("docker: cache eviction failed: %s", exc)
+                    logger.warning("docker: cache eviction failed: %s", exc)
                 if dest.exists():
-                    log.info("docker: cached blob %s (%d bytes)", digest, written)
+                    logger.info("docker: cached blob %s (%d bytes)", digest, written)
                 else:
                     # The blob went out to the client, but it is bigger than the
                     # whole budget, so the entry was evicted as soon as it was
                     # committed. Say so instead of reporting a cache hit that
                     # will not happen.
-                    log.info(
+                    logger.info(
                         "docker: streamed blob %s (%d bytes); larger than the "
                         "cache budget, so it was not retained",
                         digest, written,
@@ -867,7 +867,7 @@ class DockerRegistryProxy:
             try:
                 tags.update(self._upstream_tags(name))
             except DockerRegistryError as exc:
-                log.warning("docker: tags/list upstream failed for %s: %s", name, exc.message)
+                logger.warning("docker: tags/list upstream failed for %s: %s", name, exc.message)
         if not tags:
             raise DockerRegistryError(
                 f"repository {name} is unknown", status=404, code="NAME_UNKNOWN",
@@ -915,7 +915,7 @@ class DockerRegistryProxy:
                     continue
             except OSError:
                 continue
-            info = _parse_docker_filename(path.name)
+            info = parse_docker_filename(path.name)
             if info.get("kind") != "image":
                 continue
             if info.get("name") in wanted and info.get("version"):

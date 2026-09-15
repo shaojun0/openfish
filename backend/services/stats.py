@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from services.format import human_size
+
 logger = logging.getLogger("cpypiserver.stats")
 
 
@@ -41,7 +43,7 @@ def compute(pkg_index, key_mgr) -> dict:
             "name": name,
             "file_count": pkg_info["file_count"],
             "total_size": pkg_info["total_size"],
-            "total_size_human": _human_size(pkg_info["total_size"]),
+            "total_size_human": human_size(pkg_info["total_size"]),
             "download_count": db_info.get("downloads", 0),
             "upload_count": db_info.get("uploads", 0),
         })
@@ -52,7 +54,7 @@ def compute(pkg_index, key_mgr) -> dict:
             "package_count": len(snapshot),
             "file_count": len(all_files),
             "total_storage": sum(p["total_size"] for p in per_package.values()),
-            "total_storage_human": _human_size(
+            "total_storage_human": human_size(
                 sum(p["total_size"] for p in per_package.values())
             ),
             "total_keys": len(key_stats) if key_mgr else 0,
@@ -110,10 +112,3 @@ def _aggregate_package_stats(key_mgr) -> dict:
     finally:
         session.close()
 
-
-def _human_size(size: int) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(size) < 1024:
-            return f"{size:.1f} {unit}" if unit != "B" else f"{size} B"
-        size /= 1024
-    return f"{size:.1f} PB"

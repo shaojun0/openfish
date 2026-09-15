@@ -8,6 +8,8 @@ When no identity provider is configured the same URL falls back to an HTTP
 Basic challenge, so a Basic-only deployment has a working sign-in path too.
 """
 
+from __future__ import annotations
+
 from flask import Blueprint, jsonify, redirect, request, session, url_for
 
 from auth.oauth import get_authorize_url, exchange_code

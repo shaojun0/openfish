@@ -607,10 +607,6 @@ onMounted(load)
 </template>
 
 <style scoped>
-.card-title {
-  font-weight: 600;
-}
-
 .card-header {
   display: flex;
   align-items: baseline;
@@ -621,10 +617,6 @@ onMounted(load)
 .card-hint {
   font-size: 12px;
   color: var(--el-text-color-secondary);
-}
-
-.btn-label {
-  margin-left: 4px;
 }
 
 .page__actions {

@@ -6,8 +6,6 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Optional
-
 from index.base import WatchdogIndex, compute_sha256, invalidate_digest_cache
 from schemas import PythonBuildFile
 
@@ -25,7 +23,7 @@ _BUILD_PATTERN = re.compile(
 _BUILD_EXTENSIONS = {".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".zip"}
 
 
-def _parse_build_filename(filename: str) -> Optional[PythonBuildFile]:
+def _parse_build_filename(filename: str) -> PythonBuildFile | None:
     m = _BUILD_PATTERN.match(filename)
     if not m:
         return None
@@ -42,7 +40,7 @@ def _parse_build_filename(filename: str) -> Optional[PythonBuildFile]:
     )
 
 
-def _build_entry(full_path: Path, release_tag: str) -> Optional[PythonBuildFile]:
+def _build_entry(full_path: Path, release_tag: str) -> PythonBuildFile | None:
     pf = _parse_build_filename(full_path.name)
     if pf is None:
         return None
@@ -68,12 +66,12 @@ class PythonBuildIndex(WatchdogIndex):
         with self._lock:
             return sorted(self._by_release.keys(), reverse=True)
 
-    def get_files_for_release(self, release_tag: str) -> Optional[list[PythonBuildFile]]:
+    def get_files_for_release(self, release_tag: str) -> list[PythonBuildFile] | None:
         with self._lock:
             files = self._by_release.get(release_tag)
             return list(files) if files else None
 
-    def get_file(self, release_tag: str, filename: str) -> Optional[PythonBuildFile]:
+    def get_file(self, release_tag: str, filename: str) -> PythonBuildFile | None:
         with self._lock:
             for f in self._by_release.get(release_tag, []):
                 if f.filename == filename:

@@ -1,6 +1,7 @@
 /** Formatting helpers shared across views. */
+import dayjs from 'dayjs'
 
-/** Human readable byte size — mirrors the backend's `_human_size`. */
+/** Human readable byte size — mirrors the backend's `human_size`. */
 export function formatBytes(size: number): string {
   if (!Number.isFinite(size) || size <= 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
@@ -16,13 +17,15 @@ export function formatBytes(size: number): string {
 /** Render an ISO-8601 UTC timestamp in the browser's local timezone. */
 export function formatDate(value: string | null | undefined): string {
   if (!value) return '—'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return (
-    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
-    `${pad(date.getHours())}:${pad(date.getMinutes())}`
-  )
+  const date = dayjs(value)
+  return date.isValid() ? date.format('YYYY-MM-DD HH:mm') : value
+}
+
+/** The date part of a timestamp, for the compact metadata lines. */
+export function formatDateOnly(value: string | null | undefined): string {
+  if (!value) return '—'
+  const date = dayjs(value)
+  return date.isValid() ? date.format('YYYY-MM-DD') : value
 }
 
 /**

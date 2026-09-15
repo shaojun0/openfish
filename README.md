@@ -68,8 +68,9 @@ The repository is split so that each half builds on its own:
 ```
 backend/     Flask application, its own Dockerfile, its own venv and tests/gates
 frontend/    Vue 3 + Vite SPA, its own Dockerfile (node build → nginx)
-docker/      Compose orchestration, edge nginx, .env template and the catalogs:
-             tools/ npm/ node-builds/ docker-images/ debian/ docs/
+docker/      Compose orchestration, edge nginx, .env template, the
+             prepare-mounts.sh helper and the catalogs:
+             tools/ docs/ + share/ npm/ node-builds/ docker-images/ debian/
 integrations/   downstream client code (never part of an image)
 ```
 
@@ -151,8 +152,17 @@ cd frontend && npm run smoke
 ```bash
 cd docker
 cp .env.example .env      # REQUIRED: set SECRET_KEY, otherwise compose aborts
+./prepare-mounts.sh       # create the bind-mount sources (or point them at a data disk)
 docker compose up -d --build
 ```
+
+`./prepare-mounts.sh` is the one setup step. Every bind-mount source in
+`docker-compose.yml` is a path **inside `docker/`**, and the script creates them:
+with no argument it makes real directories seeded from `docker/examples/`, and
+with a data-disk path it makes them symlinks into it —
+`./prepare-mounts.sh /media/root/Getea/openfish-mirror`. Re-pointing a single
+mount later is just `ln -sfn /srv/data/npm docker/npm`; the Compose file never
+changes. See `docker/README.md`.
 
 Four services are defined, each built from its own directory:
 
@@ -635,9 +645,10 @@ panel. Creating or seeding a document whose title/id already exists
 **replaces** it rather than duplicating it.
 
 **Reading.** The SPA renders the document; the server does the Markdown → HTML
-conversion with a small, dependency-free renderer (`services/markdown.py`) that
-HTML-escapes the source *before* emitting any markup, so raw HTML in a document
-can never become live markup. A document's relative `assets/…` references are
+conversion with [markdown-it-py](https://markdown-it-py.readthedocs.io/) (a
+CommonMark implementation, `services/markdown.py`) run with `html=False`, so raw
+HTML in a document is escaped to text instead of becoming live markup, and its
+link validator is narrowed to `http`/`https`/`mailto`. A document's relative `assets/…` references are
 rewritten to their absolute URL only while rendering, so the stored Markdown
 stays portable. The URL layout follows the permission boundary exactly: the
 browser page is a public SPA shell at `/documentation/<ecosystem>`, while
@@ -739,7 +750,7 @@ mirrored alongside the archives it is served as-is; otherwise it is generated
 from the files on disk (hashed on first access, then cached). An authentic
 `index.json` at the mirror root is read as an overlay for the metadata a filename
 cannot carry (`lts`, `date`, `npm`, …) without ever inventing a release. See
-`docker/node-builds/README.txt` for the layout and
+`docker/examples/node-builds/README.txt` for the layout and
 `docker/tools/net/node-builds-mirror.sh` for a sync helper.
 
 **CPython.** `GET /python-builds/` returns the release listing `uv` expects when
@@ -921,8 +932,8 @@ reachable*; the bundle contains no registry data.
 When Flask does serve the bundle, it does so through **`GET
 /static/dist/<path>`** (behind `app:read`). Flask's built-in static handler is
 disabled (`static_folder=None`), so the rest of `static/` is not reachable: in
-particular the Jinja templates in `backend/static/<ecosystem>/` that
-`services/templates.py` loads. `GET /certs/ca_chain.pem` is the one anonymous
+particular the Jinja templates in `backend/static/<ecosystem>/` that Flask's own
+template loader renders for the machine-facing pages. `GET /certs/ca_chain.pem` is the one anonymous
 file route, because a client must be able to fetch the CA before it can trust
 the mirror at all.
 
@@ -1002,6 +1013,20 @@ the tables; and that neither of the two escalation guards can be talked around
 
 Both scripts exit non-zero on failure and were each verified to fail when the
 bug they guard against is reintroduced.
+
+### Keeping the code itself honest
+
+The gates above check behaviour. One more checks the source, because a refactor
+fails quietly rather than loudly — move a shared helper and the module still
+imports, while the one route that used the old name raises `NameError`:
+
+```bash
+python backend/scripts/check_lint.py    # pyflakes: undefined names, dead imports
+```
+
+It runs [pyflakes](https://pypi.org/project/pyflakes/) over every application
+module (a `dev` extra) and documents the two allowed exceptions rather than
+silencing them in the source.
 
 ### Keeping the renderer honest
 
@@ -1090,7 +1115,10 @@ backend/                        the Flask application — one build unit
 │                               catalogs (build_mirror.py), the shared upstream
 │                               proxy/cache (upstream.py) and the per-ecosystem
 │                               registry adapters (npm_registry, docker_registry,
-│                               debian_apt), templates, stats, validation
+│                               debian_apt), plus the shared primitives every
+│                               service formats/writes/hashes with
+│                               (format.py, fileio.py, digest.py), stats,
+│                               validation
 ├── schemas.py                  request + response models (single source for /openapi.json)
 ├── scripts/                    verification gates (check_openapi, check_contract,
 │                               check_auth_guards, check_rbac, check_markdown, and
@@ -1118,14 +1146,18 @@ docker/                         orchestration — no application code
 ├── docker-compose.yml          backend + frontend + nginx + db (profiles)
 ├── nginx/nginx.conf            the edge gateway: path routing, upload size
 ├── .env.example                Compose variable template (copied to docker/.env)
+├── prepare-mounts.sh           creates / re-points every bind-mount source
+├── examples/                   committed sample catalogs, seeded into a fresh mount
 ├── certs/                      optional TLS material, git-ignored
-└── artifact-hub catalogs       operator data, bind-mounted — no rebuild needed
-    ├── tools/                  tools/<category>/<file> + catalog.json
-    ├── npm/                    local npm tarballs + catalog.json
+├── tools/, docs/               small versioned catalogs (real directories)
+└── pluggable mount sources      operator data — real dir or symlink, never committed
+    ├── share                   python + python-build-standalone
+    ├── npm/                    local npm tarballs
     ├── node-builds/            nodejs.org/dist-shaped Node.js mirror
     ├── docker-images/          image tarballs + compose/Dockerfile
     ├── debian/                 local .deb files + apt snippets
-    └── docs/                   docs/<ecosystem>/<id>/document.md (+ assets/)
+    ├── data                    SQLite DB + proxy caches (→ backend/data)
+    └── config/model_routes.json  (→ backend/config/model_routes.json)
 
 integrations/                   downstream *client* code, versioned here because it is
                                 tightly coupled to this server's contract. Currently:
@@ -1144,10 +1176,17 @@ The artifact-hub catalogs (`tools/`, `npm/`, `node-builds/`, `docker-images/`,
 `debian/`, `docs/`) live under `docker/` on purpose: they are operator data, not
 code, and keeping them in the Compose directory leaves the repository root a
 short list of build units. Compose bind-mounts them into the backend container,
-so dropping a file in one takes effect without rebuilding anything. Each mount
-source can be overridden in `docker/.env` with `TOOLS_SRC`, `NPM_SRC`,
-`NODE_BUILDS_SRC`, `DOCKER_IMAGES_SRC`, `DEBIAN_SRC` or `DOCS_SRC`, so a large
-mirror can stay on a data disk and simply be pointed at instead of moved.
+so dropping a file in one takes effect without rebuilding anything.
+
+Every bind source is a path inside `docker/`, and each one is **pluggable**: it
+is either a real directory or a symlink to wherever the data actually lives.
+`docker/prepare-mounts.sh` creates them (`./prepare-mounts.sh
+/media/root/Getea/openfish-mirror` for the data-disk layout), and re-pointing one
+later is a single `ln -sfn`. There is deliberately no `*_SRC` environment
+override any more — the symlink is the only redirect mechanism, so an absolute
+host path can never creep back into `docker-compose.yml`. The committed sample
+catalogs live in `docker/examples/` and are copied into an empty mount by that
+script.
 
 ## Security notes
 
@@ -1164,8 +1203,8 @@ mirror can stay on a data disk and simply be pointed at instead of moved.
 - **`backend/static/` is not a public directory.** When Flask serves the bundle
   it does so through one explicit route, `GET /static/dist/<path>`
   (`spa.dist_asset`). Everything else under `backend/static/` — the Jinja
-  templates in `backend/static/<ecosystem>/` that `services/templates.py` reads,
-  for instance — is **not** reachable over HTTP.
+  templates in `backend/static/<ecosystem>/` that Flask's template loader
+  renders, for instance — is **not** reachable over HTTP.
   `backend/scripts/check_auth_guards.py` fails the build if a blanket `static`
   handler is ever reintroduced.
 - **The SPA bundle is static, the data behind it is not.** In the split Docker

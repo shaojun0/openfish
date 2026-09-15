@@ -28,8 +28,6 @@ The principal dict looks like::
 from __future__ import annotations
 
 import logging
-from typing import Optional
-
 from flask import current_app, g, request, session
 
 from config import settings
@@ -71,8 +69,8 @@ def _identify(
     provider: str,
     external_id: str,
     *,
-    display_name: Optional[str] = None,
-    email: Optional[str] = None,
+    display_name: str | None = None,
+    email: str | None = None,
     method: str,
     **extra,
 ) -> bool:

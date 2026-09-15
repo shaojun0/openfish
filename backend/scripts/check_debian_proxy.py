@@ -61,7 +61,18 @@ os.environ["AUTH_USERNAME"] = "dev"
 os.environ["AUTH_ASSERT"] = "devpass"
 os.environ["ADMIN_USERS"] = '["dev"]'
 os.environ["API_KEYS_FILE"] = str(_TMP / "keys.db")
-os.environ["DEBIAN_DIR"] = str(CATALOGS_ROOT / "debian")
+# `DEBIAN_DIR` must be a *controlled* tree, not the deployment's mount source.
+# On a real deployment docker/debian is the mount source, and if it has been
+# synced with `dists/` + `pool/` the local mirror is served *before* the
+# upstream — which would shadow every proxy assertion below.  Seed a throwaway
+# flat catalog from the committed samples instead, so this gate depends on the
+# checkout and not on whatever an operator has mirrored.
+_FLAT = _TMP / "flat"
+_FLAT.mkdir(parents=True, exist_ok=True)
+_SAMPLES = CATALOGS_ROOT / "examples" / "debian"
+if _SAMPLES.is_dir():
+    shutil.copytree(_SAMPLES, _FLAT, dirs_exist_ok=True)
+os.environ["DEBIAN_DIR"] = str(_FLAT)
 os.environ["DEBIAN_UPSTREAM"] = ""
 os.environ["DEBIAN_MIRROR"] = ""
 

@@ -1,5 +1,7 @@
 """Authentication — HTTP Basic, OAuth2, and API key settings."""
 
+from __future__ import annotations
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -57,10 +59,6 @@ class AuthConfig(BaseSettings):
         default="",
         description="Client secret for the OAuth2 provider (env: OAUTH2_CLIENT_SECRET)",
     )
-    oauth2_issuer: str = Field(
-        default="",
-        description="Expected issuer for JWT validation (optional)",
-    )
     oauth2_token_url: str = Field(
         default="",
         description="Token endpoint, e.g. https://auth.example.com/oauth/token",
@@ -72,12 +70,4 @@ class AuthConfig(BaseSettings):
     oauth2_auth_preference: str = Field(
         default="",
         description="Optional auth-preference query parameter for 4A-style flows",
-    )
-    oauth2_scope_read: str = Field(
-        default="package:read",
-        description="OAuth2 scope for read operations",
-    )
-    oauth2_scope_write: str = Field(
-        default="package:write",
-        description="OAuth2 scope for write operations",
     )

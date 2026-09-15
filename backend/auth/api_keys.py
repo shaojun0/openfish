@@ -9,8 +9,6 @@ import hashlib
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
-
 from sqlalchemy import or_
 from sqlalchemy.orm import scoped_session
 
@@ -113,7 +111,7 @@ class ApiKeyManager:
 
     # ── Validate ────────────────────────────────────────────────────
 
-    def validate(self, raw_key: str) -> Optional[dict]:
+    def validate(self, raw_key: str) -> dict | None:
         """Validate a raw API key.
 
         Returns the owning identity (``user_id`` / ``sub``) rather than a role:

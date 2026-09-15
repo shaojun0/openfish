@@ -7,18 +7,19 @@
  * component gives every category that state without a hand-rolled map in the
  * parent.  The category card header stays in the parent view.
  */
-import { ElMessage } from 'element-plus'
 import { computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import type { ToolCategory, ToolEntry } from '@/api'
 import TablePager from '@/components/TablePager.vue'
+import { useClipboard } from '@/composables/useClipboard'
 import { usePagination } from '@/composables/usePagination'
 import { formatDate } from '@/utils/format'
 
 const props = defineProps<{ category: ToolCategory }>()
 
 const { t } = useI18n()
+const { copy } = useClipboard()
 
 const tools = computed<ToolEntry[]>(() => props.category.tools)
 const { page, pageSize, pageSizes, total, rows, reset } = usePagination(tools, {
@@ -34,14 +35,8 @@ function download(tool: ToolEntry): void {
   window.open(tool.download_url, '_blank', 'noopener')
 }
 
-async function copySha(tool: ToolEntry): Promise<void> {
-  if (!tool.sha256) return
-  try {
-    await navigator.clipboard.writeText(tool.sha256)
-    ElMessage.success(t('common.copied'))
-  } catch {
-    ElMessage.warning(t('common.copyFailed'))
-  }
+function copySha(tool: ToolEntry): void {
+  if (tool.sha256) void copy(tool.sha256)
 }
 </script>
 
@@ -111,10 +106,6 @@ async function copySha(tool: ToolEntry): Promise<void> {
 </template>
 
 <style scoped>
-.btn-label {
-  margin-left: 4px;
-}
-
 .tool {
   display: flex;
   flex-direction: column;

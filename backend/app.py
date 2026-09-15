@@ -4,6 +4,8 @@ Entry point.  All infrastructure is wired via extensions (plugin architecture),
 so this file stays short regardless of how many features are added.
 """
 
+from __future__ import annotations
+
 import os
 import logging
 
@@ -24,14 +26,19 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 
+# The machine-facing Jinja templates live under ``static/<ecosystem>/`` — the
+# name is historical.  Pointing Flask's own loader at that folder is what lets
+# every route call ``render_template("python/simple_index.html", …)`` instead of
+# reading the file by hand and handing the text to ``render_template_string``.
+#
 # No built-in static handler.  Flask's default serves *everything* under
-# ``static/`` anonymously, which would publish the Jinja templates in
-# ``static/<ecosystem>/`` (services/templates.py reads them) and anything an
-# operator drops into ``static/certs/``.  The only asset a browser needs before
-# it has a session is the compiled Vue bundle, and ``routes/spa.py`` serves
-# that one directory explicitly.  This also means an unguarded endpoint can no
-# longer hide behind the ``static`` endpoint — see scripts/check_auth_guards.py.
-app = Flask(__name__, static_folder=None)
+# ``static/`` anonymously, which would publish those Jinja templates and
+# anything an operator drops into ``static/certs/``.  The only asset a browser
+# needs before it has a session is the compiled Vue bundle, and ``routes/spa.py``
+# serves that one directory explicitly.  This also means an unguarded endpoint
+# can no longer hide behind the ``static`` endpoint — see
+# scripts/check_auth_guards.py.
+app = Flask(__name__, static_folder=None, template_folder="static")
 app.config.from_mapping(settings.model_dump())
 app.secret_key = settings.server.secret_key
 app.config["MAX_CONTENT_LENGTH"] = settings.storage.max_content_length

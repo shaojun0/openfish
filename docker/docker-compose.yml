@@ -75,24 +75,32 @@ x-backend-env: &backend-env
   # ── 上传限制（需与 nginx client_max_body_size 保持一致）──
   MAX_CONTENT_LENGTH: "104857600"
 
-# 制品库与运行态：backend/ 内是运行态，制品库目录与本文件同级（docker/ 下）。
-# 每个制品库的**宿主机来源**都可用 .env 覆盖（默认取本目录内随仓库提交的
-# 目录），因此大件镜像数据可以留在 /media 之类的数据盘上，只把挂载路径指过去，
-# 不必搬进仓库：
-#   TOOLS_SRC  NPM_SRC  NODE_BUILDS_SRC  DOCKER_IMAGES_SRC  DEBIAN_SRC  DOCS_SRC
+# 制品库与运行态：**所有** bind-mount 源都在本文件所在的 docker/ 目录下
+# （一律写成 ./xxx），挂载拓扑里不含任何宿主机绝对路径，也就没有 ../backend/…。
+# 大件数据放在数据盘上时，把 docker/ 下的同名目录换成指向数据盘的符号链接即可，
+# 换存储 = 重指一个符号链接，compose 文件一个字都不用改（见 docker/README.md）：
+#   docker/share                   -> /media/.../openfish-mirror
+#   docker/npm                     -> /media/.../openfish-mirror/npm
+#   docker/node-builds             -> /media/.../openfish-mirror/node-builds
+#   docker/docker-images           -> /media/.../openfish-mirror/docker-images
+#   docker/debian                  -> /media/.../openfish-mirror/debian
+#   docker/data                    -> ../backend/data
+#   docker/config/model_routes.json -> ../backend/config/model_routes.json
 x-backend-volumes: &backend-volumes
-  - ${SHARE_DIR:-/data/share}:/app/share
+  # /app/share：python 包与 python-build-standalone；容器内两个子路径分别由
+  # PACKAGES_DIR / PYTHON_BUILDS_DIR 指向。
+  - ./share:/app/share
   # ── 内网制品中心：丢文件即生效，无需重建镜像 ──────────────
-  - ${TOOLS_SRC:-./tools}:/app/tools
-  - ${NPM_SRC:-./npm}:/app/npm
-  - ${NODE_BUILDS_SRC:-./node-builds}:/app/node-builds
-  - ${DOCKER_IMAGES_SRC:-./docker-images}:/app/docker-images
-  - ${DEBIAN_SRC:-./debian}:/app/debian
-  - ${DOCS_SRC:-./docs}:/app/docs
+  - ./tools:/app/tools
+  - ./npm:/app/npm
+  - ./node-builds:/app/node-builds
+  - ./docker-images:/app/docker-images
+  - ./debian:/app/debian
+  - ./docs:/app/docs
   # 模型路由表：改完刷新页面即可；管理员在 /models 页可在线编辑，故需可写
-  - ../backend/config/model_routes.json:/app/config/model_routes.json
-  # SQLite 库与回源缓存，容器重建后不丢
-  - ../backend/data:/app/data
+  - ./config/model_routes.json:/app/config/model_routes.json
+  # SQLite 库与回源缓存，容器重建后不丢；backend/data 仍是本地开发的同一份
+  - ./data:/app/data
   # 自备 TLS 证书（可选）：把 CA 链放到 docker/certs/ca_chain.pem 后取消注释。
   # 挂载点是 /app/certs（**不在** web 根目录）：服务端只匿名供应
   # GET /certs/ca_chain.pem 这一个文件，同目录下的私钥不会被暴露。

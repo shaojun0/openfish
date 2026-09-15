@@ -27,6 +27,8 @@ Authorization policy, in one line: **anonymous is docs and nothing else.**  The
 :func:`register_all`.
 """
 
+from __future__ import annotations
+
 from config import settings
 from auth.decorators import require_auth, require_permission
 from auth.permissions import ADMIN_ROLES, ADMIN_VIEW, APP_READ

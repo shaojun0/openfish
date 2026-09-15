@@ -24,7 +24,7 @@ from services.authz import AuthzService
 import models  # noqa: F401
 from models.base import Base
 
-log = logging.getLogger("cpypiserver.database")
+logger = logging.getLogger("cpypiserver.database")
 
 # ``expire_on_commit=False`` matters: guards detach ORM objects (expunge) and
 # then read their attributes outside the session.  With the default
@@ -86,7 +86,7 @@ def _apply_light_migrations(engine: Engine) -> None:
                 continue  # table does not exist yet — create_all handled it
             if column not in cols:
                 conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {ddl}")
-                log.warning("Migrated existing database: added %s.%s", table, column)
+                logger.warning("Migrated existing database: added %s.%s", table, column)
 
         for name, table, column in _INDEXES:
             conn.exec_driver_sql(

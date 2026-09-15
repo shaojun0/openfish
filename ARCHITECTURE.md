@@ -45,12 +45,30 @@ app.py                     创建 Flask 应用，禁用内置 static handler
 | 配置 | `config/` | pydantic-settings 模型（server / storage / auth / security / hub）+ `paths.py` 路径锚定 |
 | 鉴权 | `auth/` | 装饰器、守卫、权限点目录、API key、OAuth2 |
 | 路由 | `routes/` | 每个生态一个蓝图；机器面协议与 `/api/v1` JSON 同址 |
-| 服务 | `services/` | 授权服务、目录聚合、Markdown 渲染、上游穿透代理与缓存、各生态 registry 适配器 |
+| 服务 | `services/` | 授权服务、目录聚合、Markdown 渲染（markdown-it-py 封装）、上游穿透代理与缓存、各生态 registry 适配器，以及三个共享原语：`format.py`（字节/时间格式化）、`fileio.py`（原子写 + JSON）、`digest.py`（SHA-256 缓存） |
 | 索引 | `index/` | 包 / CPython 构建 / Node 构建的发现与索引 |
 | 模型 | `models/` | SQLAlchemy 表：users / roles / permissions / user_roles / role_permissions / api_keys / stats |
 | 描述 | `openapi/` | OpenAPI 3.1 元数据注册表、spec 生成、渲染器 |
-| 模板 | `static/<生态>/*.html` | **机器面** Jinja 模板（`pip`/`uv`/`nvm` 直接解析，不跑 JS），由 `services/templates.py` 读取，**不对外公开** |
-| 门禁 | `scripts/check_*.py` | 11 个离线回归门禁 |
+| 模板 | `static/<生态>/*.html` | **机器面** Jinja 模板（`pip`/`uv`/`nvm` 直接解析，不跑 JS），由 Flask 自带模板加载器（`template_folder="static"`）渲染，**不对外公开** |
+| 门禁 | `scripts/check_*.py` | 12 个离线回归门禁 |
+
+### 代码约定（熵减规则）
+
+后端遵循最初提交确立的风格，并把"每件事只有一种做法"作为硬约束。新增代码照抄
+最近的同类模块即可，不需要另立一套：
+
+| 约定 | 说明 |
+| --- | --- |
+| **先找库，再自己写** | 有成熟依赖就不要手写。已落地的替换：Markdown 渲染由约 400 行手写解析器改为 `markdown-it-py`（`html=False` + 收窄的 `link_validator`，安全性是结构性的）；机器面模板由 `services/templates.py` 的 lru 文件缓存改为 Flask/Jinja 自带加载器（`render_template("python/simple_index.html", …)`）。协议代理（npm / Docker Registry v2 / apt）没有对应库，属于业务逻辑，保留自研。 |
+| **一个关注点只有一份实现** | 字节格式化、ISO 时间、原子写 + JSON、SHA-256 缓存分别只有 `services/format.py`、`services/fileio.py`、`services/digest.py` 三处实现；此前它们各有 2–3 份不同写法的副本。 |
+| **从定义处导入** | `from services.docs import read`，不要经 `services/__init__.py` 之类的门面转一手；`auth/`、`services/` 的包初始化文件只保留 docstring（`index/` 另留唯一的 `register_all`）。 |
+| **模块头** | 每个模块以 `from __future__ import annotations` 开头，其后先标准库、再三方、再本仓库，各段内部按字母序。**唯一例外**是 `routes/pypi.py`：PEP 563 会把 `query: FormatQuery` 变成字符串，而 flask-pydantic 正是读这个注解并交给 `issubclass`，文件头注明了原因。 |
+| **类型写法** | 一律 `X \| None`，不使用 `typing.Optional`；公共函数写全签名。 |
+| **日志** | 模块级 `logger = logging.getLogger("cpypiserver.<域>")`，不使用 `log` / `_log`。 |
+| **依赖** | `pyproject.toml` 里只留真正被 import 的包；`cryptography` / `pyjwt` 已因无人使用而删除。`scripts/check_lint.py`（pyflakes）把这套约定变成可执行门禁：未定义名、死导入一律失败。 |
+| **契约稳定** | `/openapi.json` 的 `components.schemas` 顺序是确定的（`_build_schemas` 对引用集合排序），因此契约变更在 diff 里只显示真正改动的行。 |
+| **分区注释** | 长模块用 `# ── 标题 ────…` 分段，与既有模块保持一致的视觉节奏。 |
+| **模板归属** | 机器面 Jinja 模板写在 `static/<生态>/`，用 `render_template("<生态>/<文件>.html", …)` 渲染；浏览器页面属于 `frontend/` 的 Vue SPA，唯一例外是设备授权页（`routes/device.py` 内的自包含字符串模板）。 |
 
 ### 蓝图与 URL 归属
 
@@ -156,8 +174,16 @@ registry 数据）；所有数据端点、`/docs/*`、`/api/v1` 仍各自鉴权�
 
 刻意收进 Compose 目录 `docker/`：它们是**操作员数据**而非代码，Compose 以
 bind mount 注入容器，丢文件即生效、无需重建镜像；收在 `docker/` 下则是为了让
-仓库根只保留构建单元。每个目录的宿主机来源都可用 `.env` 里的 `*_SRC` 覆盖，
-因此大件数据可以留在数据盘上、只把挂载路径指过去，不必搬进仓库。
+仓库根只保留构建单元。
+
+**所有 bind mount 源都是 `docker/` 内的路径**（`./share` `./npm` `./data` …），
+`docker-compose.yml` 里既没有 `../backend/...` 也没有宿主机绝对路径。每个源都是
+**可插拔**的：它要么是真实目录，要么是指向数据盘的符号链接。`docker/prepare-mounts.sh`
+负责创建（`./prepare-mounts.sh /media/…/openfish-mirror` 走数据盘布局），以后
+换存储只需 `ln -sfn` 重指一个链接，compose 一个字都不用改。原先的 `*_SRC` 环境
+变量已删除——符号链接是唯一的重定向机制，宿主机绝对路径因此无法再回流到
+compose 文件里。随仓库提交的样例目录移到了 `docker/examples/`，由该脚本播种进
+空的挂载目录。
 
 | 目录 | 内容 | 主要环境变量 |
 | --- | --- | --- |
@@ -221,7 +247,8 @@ npm run smoke                       # jsdom 全路由冒烟
 backend/.venv/bin/python backend/scripts/check_openapi.py
 #   check_openapi / check_auth_guards / check_auth_disabled / check_rbac /
 #   check_markdown / check_permission_catalog / check_permission_labels /
-#   check_device_flow / check_npm_proxy / check_docker_proxy / check_debian_proxy
+#   check_device_flow / check_npm_proxy / check_docker_proxy / check_debian_proxy /
+#   check_lint（pyflakes：未定义名 / 死导入）
 #   另有 check_contract.py，需要对着活服务跑（--base-url + --api-key）
 
 # ── 容器（需要 Docker Compose v2；仓库自带的 docker-compose 1.25 解析不了）──
@@ -240,8 +267,9 @@ docker build -t openfish-frontend frontend/
 
 ## 验证证据
 
-* **11 个离线门禁全部通过**（从仓库根运行，与迁移前基线一致；`check_openapi`
-  现在还会执行完整的 OpenAPI 3.1 结构校验）。
+* **12 个离线门禁全部通过**（从仓库根运行，与迁移前基线一致；`check_openapi`
+  现在还会执行完整的 OpenAPI 3.1 结构校验，新增的 `check_lint` 用 pyflakes
+  兜住"改名后漏改调用点"这类只有单条路由才炸的静默错误）。
 * **两个镜像构建成功**：`backend/Dockerfile`（pip 依赖 + gunicorn）、
   `frontend/Dockerfile`（`npm ci` + vite build → nginx）。
 * **两个 nginx 配置 `nginx -t` 通过**，包括 `limit_except POST` 的根路由写法和

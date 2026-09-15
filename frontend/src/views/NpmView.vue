@@ -199,40 +199,8 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.card-title {
-  font-weight: 600;
-}
-
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .toolbar__type {
   width: 160px;
-}
-
-.btn-label {
-  margin-left: 4px;
-}
-
-.setup {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.setup__item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.setup__label {
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
-  min-width: 110px;
 }
 
 .pkg {

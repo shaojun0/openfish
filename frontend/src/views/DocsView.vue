@@ -16,6 +16,7 @@ import {
 import { apiError } from '@/api/client'
 import DocEditor from '@/components/DocEditor.vue'
 import { useSessionStore } from '@/stores/session'
+import { formatDateOnly } from '@/utils/format'
 
 /**
  * One ecosystem's documentation leaf.
@@ -335,7 +336,7 @@ watch(ecosystem, () => load(), { immediate: true })
             <span class="docs-view__content-title">{{ detail.title }}</span>
             <span class="docs-view__content-meta">
               {{ detail.id }}/document.md · {{ detail.size_human }}
-              <template v-if="detail.modified"> · {{ detail.modified.slice(0, 10) }}</template>
+              <template v-if="detail.modified"> · {{ formatDateOnly(detail.modified) }}</template>
             </span>
             <el-button
               v-if="canUpload"
@@ -369,9 +370,6 @@ watch(ecosystem, () => load(), { immediate: true })
 
 <style scoped>
 .toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   flex-wrap: wrap;
 }
 
@@ -536,9 +534,5 @@ watch(ecosystem, () => load(), { immediate: true })
 
 .docs-view__content-download {
   margin-left: 0;
-}
-
-.btn-label {
-  margin-left: 4px;
 }
 </style>

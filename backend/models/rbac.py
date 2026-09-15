@@ -23,7 +23,7 @@ overwriting an administrator's edits.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
@@ -36,15 +36,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped
 
-from .base import Base
-
-
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def iso(dt: datetime | None) -> str | None:
-    return dt.isoformat() if dt is not None else None
+from .base import Base, iso, utcnow
 
 
 class Role(Base):
@@ -187,5 +179,5 @@ class SeedMigration(Base):
 
 
 __all__ = [
-    "Role", "Permission", "UserRole", "RolePermission", "SeedMigration", "utcnow", "iso",
+    "Role", "Permission", "UserRole", "RolePermission", "SeedMigration",
 ]

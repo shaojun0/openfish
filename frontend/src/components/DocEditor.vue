@@ -149,6 +149,54 @@ function tableBlock(): void {
   insertText('\n| 列 1 | 列 2 |\n| --- | --- |\n| 内容 | 内容 |\n')
 }
 
+/** The Markdown for an empty image, with the cursor placed inside the target. */
+const IMAGE_PLACEHOLDER = '![alt](assets/)'
+
+/** One toolbar button: a text label (optionally emphasised) or an icon. */
+interface ToolButton {
+  /** i18n key for the tooltip; unique, so the loop uses it as its key too. */
+  titleKey: string
+  text?: string
+  textTag?: 'strong' | 'em' | 's'
+  /** A globally-registered Element Plus icon name; used when there is no text. */
+  icon?: string
+  run: () => void
+}
+
+/**
+ * The whole toolbar as data — one entry per format instead of five
+ * hand-written button groups, so the template stays a single loop.
+ */
+const toolbar = computed<ToolButton[][]>(() => [
+  [
+    { titleKey: 'docs.fmtH1', text: 'H1', run: () => linePrefix('# ') },
+    { titleKey: 'docs.fmtH2', text: 'H2', run: () => linePrefix('## ') },
+    { titleKey: 'docs.fmtH3', text: 'H3', run: () => linePrefix('### ') },
+  ],
+  [
+    { titleKey: 'docs.fmtBold', text: 'B', textTag: 'strong', run: () => wrap('**', '**', 'bold') },
+    { titleKey: 'docs.fmtItalic', text: 'I', textTag: 'em', run: () => wrap('*', '*', 'italic') },
+    { titleKey: 'docs.fmtStrike', text: 'S', textTag: 's', run: () => wrap('~~', '~~', 'strike') },
+    { titleKey: 'docs.fmtInlineCode', icon: 'Operation', run: () => wrap('`', '`', 'code') },
+    { titleKey: 'docs.fmtCodeBlock', icon: 'Document', run: codeBlock },
+  ],
+  [
+    { titleKey: 'docs.fmtQuote', text: '❝', run: () => linePrefix('> ') },
+    { titleKey: 'docs.fmtBullet', text: '•', run: () => linePrefix('- ') },
+    { titleKey: 'docs.fmtOrdered', text: '1.', run: () => linePrefix('', true) },
+  ],
+  [
+    { titleKey: 'docs.fmtLink', icon: 'Link', run: () => wrap('[', '](https://)', 'text') },
+    {
+      titleKey: 'docs.fmtImage',
+      icon: 'Picture',
+      run: () => insertText(IMAGE_PLACEHOLDER, IMAGE_PLACEHOLDER.length - 1),
+    },
+    { titleKey: 'docs.fmtTable', icon: 'Grid', run: tableBlock },
+    { titleKey: 'docs.fmtHr', text: '—', run: () => insertText('\n---\n') },
+  ],
+])
+
 function onKeydown(event: KeyboardEvent): void {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
     event.preventDefault()
@@ -270,76 +318,18 @@ onBeforeUnmount(() => {
   >
     <div v-if="doc" class="doc-editor">
       <div class="doc-editor__toolbar">
-        <el-button-group>
-          <el-tooltip :content="t('docs.fmtH1')" placement="top">
-            <el-button size="small" @click="linePrefix('# ')">H1</el-button>
-          </el-tooltip>
-          <el-tooltip :content="t('docs.fmtH2')" placement="top">
-            <el-button size="small" @click="linePrefix('## ')">H2</el-button>
-          </el-tooltip>
-          <el-tooltip :content="t('docs.fmtH3')" placement="top">
-            <el-button size="small" @click="linePrefix('### ')">H3</el-button>
-          </el-tooltip>
-        </el-button-group>
-
-        <el-button-group>
-          <el-tooltip :content="t('docs.fmtBold')" placement="top">
-            <el-button size="small" @click="wrap('**', '**', 'bold')">
-              <strong>B</strong>
+        <el-button-group v-for="(group, index) in toolbar" :key="index">
+          <el-tooltip
+            v-for="button in group"
+            :key="button.titleKey"
+            :content="t(button.titleKey)"
+            placement="top"
+          >
+            <el-button size="small" @click="button.run">
+              <component :is="button.textTag" v-if="button.textTag">{{ button.text }}</component>
+              <el-icon v-else-if="button.icon"><component :is="button.icon" /></el-icon>
+              <template v-else>{{ button.text }}</template>
             </el-button>
-          </el-tooltip>
-          <el-tooltip :content="t('docs.fmtItalic')" placement="top">
-            <el-button size="small" @click="wrap('*', '*', 'italic')">
-              <em>I</em>
-            </el-button>
-          </el-tooltip>
-          <el-tooltip :content="t('docs.fmtStrike')" placement="top">
-            <el-button size="small" @click="wrap('~~', '~~', 'strike')">
-              <s>S</s>
-            </el-button>
-          </el-tooltip>
-          <el-tooltip :content="t('docs.fmtInlineCode')" placement="top">
-            <el-button size="small" @click="wrap('`', '`', 'code')">
-              <el-icon><Operation /></el-icon>
-            </el-button>
-          </el-tooltip>
-          <el-tooltip :content="t('docs.fmtCodeBlock')" placement="top">
-            <el-button size="small" @click="codeBlock">
-              <el-icon><Document /></el-icon>
-            </el-button>
-          </el-tooltip>
-        </el-button-group>
-
-        <el-button-group>
-          <el-tooltip :content="t('docs.fmtQuote')" placement="top">
-            <el-button size="small" @click="linePrefix('> ')">❝</el-button>
-          </el-tooltip>
-          <el-tooltip :content="t('docs.fmtBullet')" placement="top">
-            <el-button size="small" @click="linePrefix('- ')">•</el-button>
-          </el-tooltip>
-          <el-tooltip :content="t('docs.fmtOrdered')" placement="top">
-            <el-button size="small" @click="linePrefix('', true)">1.</el-button>
-          </el-tooltip>
-        </el-button-group>
-
-        <el-button-group>
-          <el-tooltip :content="t('docs.fmtLink')" placement="top">
-            <el-button size="small" @click="wrap('[', '](https://)', 'text')">
-              <el-icon><Link /></el-icon>
-            </el-button>
-          </el-tooltip>
-          <el-tooltip :content="t('docs.fmtImage')" placement="top">
-            <el-button size="small" @click="insertText('![alt](assets/)', '![alt](assets/)'.length - 1)">
-              <el-icon><Picture /></el-icon>
-            </el-button>
-          </el-tooltip>
-          <el-tooltip :content="t('docs.fmtTable')" placement="top">
-            <el-button size="small" @click="tableBlock">
-              <el-icon><Grid /></el-icon>
-            </el-button>
-          </el-tooltip>
-          <el-tooltip :content="t('docs.fmtHr')" placement="top">
-            <el-button size="small" @click="insertText('\n---\n')">—</el-button>
           </el-tooltip>
         </el-button-group>
 
@@ -540,9 +530,5 @@ onBeforeUnmount(() => {
 .doc-editor__footer-actions {
   display: inline-flex;
   gap: 8px;
-}
-
-.btn-label {
-  margin-left: 4px;
 }
 </style>

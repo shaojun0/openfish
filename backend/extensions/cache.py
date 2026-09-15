@@ -1,5 +1,7 @@
 """Cache extension — Flask-Caching SimpleCache."""
 
+from __future__ import annotations
+
 from extensions import Extension
 
 

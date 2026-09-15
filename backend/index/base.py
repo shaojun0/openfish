@@ -1,104 +1,22 @@
 """Generic watchdog-backed in-memory index base class.
 
 Subclasses implement ``_full_scan()``, ``_add_or_update()``, ``_remove()``.
+
+The digest helpers that used to live here now have exactly one home, in
+:mod:`services.digest`; they are re-exported so the index modules keep a single
+import site for everything they need.
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+from services.digest import compute_sha256, invalidate_digest_cache, store_digest
+
 logger = logging.getLogger("cpypiserver.index")
-
-_DIGEST_BLOCKSIZE = 8 << 20  # 8 MB — tuned for multi-GB packages on SSD/NVMe
-_DIGEST_HEXLEN = 64          # SHA256 hex digest length
-
-# ── Two-level digest cache ──────────────────────────────────────────
-# L1: in-memory dict (sub-ms reads), keyed by resolved absolute path.
-# L2: <package>.sha256 sidecar files (persist across restarts, zero-lock).
-_digest_cache: dict[str, str] = {}
-_digest_cache_lock = threading.Lock()
-
-
-def _sidecar_path(file_path: str | Path) -> Path:
-    return Path(file_path).with_suffix(Path(file_path).suffix + ".sha256")
-
-
-def _read_sidecar(sidecar: Path) -> str | None:
-    """Best-effort read from a .sha256 sidecar file.  Returns None on any failure."""
-    try:
-        text = sidecar.read_text().strip()
-        if len(text) == _DIGEST_HEXLEN and all(c in "0123456789abcdef" for c in text):
-            return text
-    except (FileNotFoundError, UnicodeError, OSError):
-        pass
-    return None
-
-
-def _write_sidecar(sidecar: Path, digest: str) -> None:
-    """Best-effort write to a .sha256 sidecar file."""
-    try:
-        sidecar.write_text(digest)
-    except OSError:
-        pass  # disk full / permission — non-fatal; correctness unaffected
-
-
-def compute_sha256(file_path: str | Path) -> str:
-    """Chunked SHA256 with L1 memory cache + L2 sidecar file.
-
-    On cache miss reads ``<filename>.sha256`` sidecar; recomputes and
-    writes the sidecar if missing or corrupt.  Self-healing.
-    """
-    key = str(Path(file_path).resolve())
-
-    # ── L1: memory cache ───────────────────────────────────────────
-    with _digest_cache_lock:
-        cached = _digest_cache.get(key)
-        if cached is not None:
-            return cached
-
-    # ── L2: sidecar file ───────────────────────────────────────────
-    sidecar = _sidecar_path(file_path)
-    digest = _read_sidecar(sidecar)
-    if digest is not None:
-        with _digest_cache_lock:
-            _digest_cache[key] = digest
-        return digest
-
-    # ── Compute (slow path — only on first access or after corruption)
-    digester = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for block in iter(lambda: f.read(_DIGEST_BLOCKSIZE), b""):
-            digester.update(block)
-    digest = digester.hexdigest()
-
-    # ── Store in both levels ───────────────────────────────────────
-    with _digest_cache_lock:
-        _digest_cache[key] = digest
-    _write_sidecar(sidecar, digest)
-    return digest
-
-
-def invalidate_digest_cache(file_path: str | Path) -> None:
-    """Purge both memory cache and sidecar file for *file_path*."""
-    key = str(Path(file_path).resolve())
-    with _digest_cache_lock:
-        _digest_cache.pop(key, None)
-    try:
-        _sidecar_path(file_path).unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def store_digest(file_path: str | Path, digest: str) -> None:
-    """Pre-populate both memory cache and sidecar file (e.g. from streaming upload)."""
-    key = str(Path(file_path).resolve())
-    with _digest_cache_lock:
-        _digest_cache[key] = digest
-    _write_sidecar(_sidecar_path(file_path), digest)
 
 
 class WatchdogIndex(ABC):
@@ -183,3 +101,11 @@ class WatchdogIndex(ABC):
         observer.start()
         self._observer = observer
         logger.info("Watchdog started on '%s' (recursive=%s)", self._dir, self._recursive)
+
+
+__all__ = [
+    "WatchdogIndex",
+    "compute_sha256",
+    "invalidate_digest_cache",
+    "store_digest",
+]

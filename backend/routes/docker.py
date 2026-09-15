@@ -43,7 +43,7 @@ from __future__ import annotations
 from urllib.parse import quote
 
 from flask import (
-    Blueprint, Response, jsonify, render_template_string, request,
+    Blueprint, Response, jsonify, render_template, request,
     send_from_directory, url_for,
 )
 
@@ -53,7 +53,7 @@ from config import settings
 from openapi import api_operation, binary, errors, json_body, ok
 from routes.hub_common import spa_url, wants_json
 from services import docker_registry as registry
-from services import hub, templates
+from services import hub
 
 docker_bp = Blueprint("docker", __name__)
 
@@ -137,8 +137,8 @@ def docker_index():
     catalog = _docker_payload()
     if wants_json():
         return jsonify(catalog)
-    return render_template_string(
-        templates.docker_index(),
+    return render_template(
+        "docker/index.html",
         server_name=settings.server.server_name,
         base_url=url_for("docker.docker_index", _external=True),
         spa_url=spa_url("/docker"),

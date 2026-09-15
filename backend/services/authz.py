@@ -25,23 +25,23 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Iterable, Optional
+from typing import Iterable
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import scoped_session
 
 from auth import permissions as P
+from models.base import utcnow
 from models.rbac import (
     Permission,
     Role,
     RolePermission,
     SeedMigration,
     UserRole,
-    utcnow,
 )
 from models.user import User
 
-log = logging.getLogger("cpypiserver.authz")
+logger = logging.getLogger("cpypiserver.authz")
 
 #: Permission points the ``anonymous`` role starts with.  Anonymous access is
 #: reachable only when ``AUTH_ENABLED=false`` (or, in a deployment that turns
@@ -230,7 +230,7 @@ class AuthzService:
                         P.ADMIN_ROLE: tuple(perms),
                     }[code]
                     self._set_role_permissions(session, role, seed, perms)
-                    log.info("Created built-in role %r with %d permission(s)", code, len(seed))
+                    logger.info("Created built-in role %r with %d permission(s)", code, len(seed))
                 else:
                     # Keep the flags authoritative; they drive anonymous and
                     # auto-grant behaviour and must not drift.
@@ -294,7 +294,7 @@ class AuthzService:
                 session.add(RolePermission(role_id=role.id, permission_id=pid))
             session.add(SeedMigration(code=migration_id))
             applied.append(migration_id)
-            log.info(
+            logger.info(
                 "Seed migration %r: granted %d point(s) to role %r (%s)",
                 migration_id, len(added), role_code,
                 ", ".join(sorted(codes)) if codes else "—",
@@ -309,7 +309,7 @@ class AuthzService:
         held = AuthzService._role_permission_codes(session, P.AUTHENTICATED_ROLE)
         missing = sorted(set(_AUTHENTICATED_SEED) - held)
         if missing:
-            log.warning(
+            logger.warning(
                 "The %r role does not hold seeded point(s): %s — grant them on "
                 "/access (or with AuthzService.set_role_permissions); until then "
                 "signed-in users get 403 for those features.",
@@ -351,7 +351,7 @@ class AuthzService:
                 promoted.append(ident)
             session.commit()
             self.invalidate()
-            log.warning(
+            logger.warning(
                 "Bootstrapped %d superuser(s) from ADMIN_USERS: %s — "
                 "this setting is now inert; manage admins with the CLI instead.",
                 len(promoted), ", ".join(promoted),
@@ -371,9 +371,9 @@ class AuthzService:
         self,
         provider: str,
         external_id: str,
-        display_name: Optional[str] = None,
-        email: Optional[str] = None,
-    ) -> Optional[User]:
+        display_name: str | None = None,
+        email: str | None = None,
+    ) -> User | None:
         """Find or create the shadow account for an external identity.
 
         Called on every successful authentication (just-in-time provisioning),
@@ -414,7 +414,7 @@ class AuthzService:
                         raise
                     return user
                 self._apply_auto_grant(session, user)
-                log.info("Provisioned user %s:%s (id=%s)", provider, external_id, user.id)
+                logger.info("Provisioned user %s:%s (id=%s)", provider, external_id, user.id)
             else:
                 if display_name and user.display_name != display_name:
                     user.display_name = display_name
@@ -435,7 +435,7 @@ class AuthzService:
             session.close()
 
     @classmethod
-    def _should_touch_login(cls, last_login_at: Optional[datetime]) -> bool:
+    def _should_touch_login(cls, last_login_at: datetime | None) -> bool:
         """True when ``last_login_at`` is stale enough to be worth a write.
 
         SQLite has no timezone type, so a value read back from the database is
@@ -449,7 +449,7 @@ class AuthzService:
         age = (datetime.now(timezone.utc) - last_login_at).total_seconds()
         return age > cls.LOGIN_TOUCH_INTERVAL_SECONDS
 
-    def get_user(self, user_id: int) -> Optional[User]:
+    def get_user(self, user_id: int) -> User | None:
         session = self._s
         try:
             user = session.get(User, user_id)
@@ -459,7 +459,7 @@ class AuthzService:
         finally:
             session.close()
 
-    def find_user(self, external_id: str, provider: Optional[str] = None) -> Optional[User]:
+    def find_user(self, external_id: str, provider: str | None = None) -> User | None:
         session = self._s
         try:
             q = session.query(User).filter(User.external_id == external_id)
@@ -542,7 +542,7 @@ class AuthzService:
         self._anon_cache = (self._version, time.monotonic(), grants)
         return grants
 
-    def has_permission(self, principal: Optional[dict], code: str) -> bool:
+    def has_permission(self, principal: dict | None, code: str) -> bool:
         """The check every guard ultimately makes.
 
         *principal* is the ``g.auth_user`` dict (or None when unauthenticated).
@@ -556,7 +556,7 @@ class AuthzService:
             return code in self.anonymous_grants()
         return code in self._grants_for_user_id(user_id)
 
-    def permission_codes(self, principal: Optional[dict]) -> frozenset[str]:
+    def permission_codes(self, principal: dict | None) -> frozenset[str]:
         """Effective permissions — used to render the UI, not to enforce."""
         if principal is None:
             return self.anonymous_grants()
@@ -612,7 +612,7 @@ class AuthzService:
         finally:
             session.close()
 
-    def get_role(self, code: Optional[str] = None, role_id: Optional[int] = None) -> Optional[Role]:
+    def get_role(self, code: str | None = None, role_id: int | None = None) -> Role | None:
         session = self._s
         try:
             q = session.query(Role)
@@ -901,7 +901,7 @@ def bootstrap(authz: AuthzService, admin_users: Iterable[str] = ()) -> dict:
         # Usually a typo in a @require_permission(...) code: the typo becomes a
         # permission point no role holds, so the route silently denies everyone
         # except superusers.  Loud on purpose.
-        log.warning(
+        logger.warning(
             "Permission points held by no role: %s — "
             "check for a mistyped @require_permission code",
             ", ".join(orphans),
@@ -912,7 +912,7 @@ def bootstrap(authz: AuthzService, admin_users: Iterable[str] = ()) -> dict:
         # Drift in the other direction: a row survived a rename or a removed
         # feature.  It is still offered on /access and can still be granted,
         # but no guard checks it, so granting it changes nothing.
-        log.warning(
+        logger.warning(
             "Permission points no guard declares any more: %s — rename/remove "
             "them, or drop the stale `permissions` rows; granting one has no effect",
             ", ".join(stale),

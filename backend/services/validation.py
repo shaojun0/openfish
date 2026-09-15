@@ -9,8 +9,6 @@ import tarfile
 import zipfile
 from io import BytesIO
 from pathlib import Path
-from typing import Optional
-
 import magic
 from werkzeug.utils import secure_filename
 
@@ -106,7 +104,7 @@ def _check_executable(content: bytes) -> tuple[bool, str]:
     return True, ""
 
 
-def _pe_offset(dos_header: bytes) -> Optional[int]:
+def _pe_offset(dos_header: bytes) -> int | None:
     if len(dos_header) < 64:
         return None
     try:

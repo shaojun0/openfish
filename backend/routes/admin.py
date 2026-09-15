@@ -17,7 +17,7 @@ from openapi import api_operation, errors, ok
 from services.stats import compute as compute_stats
 
 admin_bp = Blueprint("admin", __name__)
-_log = logging.getLogger("cpypiserver.admin")
+logger = logging.getLogger("cpypiserver.admin")
 
 
 @admin_bp.route("/stats")
@@ -39,7 +39,7 @@ def stats():
         data = cache.get("admin_stats")
         if data is not None:
             return jsonify(data)
-    _log.warning("Stats cache miss — computing live")
+    logger.warning("Stats cache miss — computing live")
     return jsonify(_compute())
 
 

@@ -19,6 +19,8 @@ environment variables override these defaults, and docker-compose sets every
 one of them to an absolute ``/app/...`` path.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 
 #: ``<project>/backend`` — the application package root.

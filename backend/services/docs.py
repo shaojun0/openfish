@@ -32,18 +32,17 @@ the ecosystem directory: :func:`normalize_doc_id` and
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import re
 import shutil
-import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-log = logging.getLogger("cpypiserver.docs")
+from services.fileio import atomic_write_bytes, read_json, write_json
+from services.format import human_size, iso_from_timestamp, utc_now_iso
+
+logger = logging.getLogger("cpypiserver.docs")
 
 #: The ecosystems that own a documentation leaf, in sidebar order.
 ECOSYSTEMS: tuple[str, ...] = ("python", "npm", "docker", "debian", "tools", "models")
@@ -199,42 +198,6 @@ def resolve_asset(root: str, ecosystem: str, doc_id: str, name: str) -> Path:
 
 # ── Small helpers ────────────────────────────────────────────────────
 
-def human_size(num: float) -> str:
-    """Format a byte count the way the rest of the UI does."""
-    step = 1024.0
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(num) < step or unit == "TB":
-            if unit == "B":
-                return f"{int(num)} {unit}"
-            return f"{num:.1f} {unit}"
-        num /= step
-    return f"{num:.1f} TB"
-
-
-def _iso(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-
-
-def _atomic_write(path: Path, data: bytes) -> None:
-    """Write *data* to *path* through a temp file + ``os.replace``.
-
-    A concurrent reader therefore sees either the old file or the new one,
-    never a half-written one.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=".tmp-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:  # pragma: no cover - best effort cleanup
-            pass
-        raise
-
-
 def heading_in_text(text: str) -> str:
     """The first ``#`` heading in a Markdown string, or ``""``."""
     for line in (text or "").splitlines()[:200]:  # only the head matters
@@ -249,15 +212,12 @@ def first_heading(path: Path) -> str:
     try:
         return heading_in_text(path.read_text(encoding="utf-8", errors="replace"))
     except OSError as exc:  # pragma: no cover - races with a deletion
-        log.debug("cannot read heading of %s: %s", path, exc)
+        logger.debug("cannot read heading of %s: %s", path, exc)
         return ""
 
 
 def _read_meta(doc_dir: Path) -> dict[str, Any]:
-    try:
-        raw = json.loads((doc_dir / META_FILENAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    raw = read_json(doc_dir / META_FILENAME, default={})
     return raw if isinstance(raw, dict) else {}
 
 
@@ -267,12 +227,9 @@ def _write_meta(
     title: str,
     created: str | None = None,
 ) -> dict[str, Any]:
-    now = datetime.now(tz=timezone.utc).isoformat()
+    now = utc_now_iso()
     payload = {"title": title, "created": created or now, "modified": now}
-    _atomic_write(
-        doc_dir / META_FILENAME,
-        (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
-    )
+    write_json(doc_dir / META_FILENAME, payload)
     return payload
 
 
@@ -299,7 +256,7 @@ def _asset_entry(
         "name": path.name,
         "size": stat.st_size,
         "size_human": human_size(stat.st_size),
-        "modified": _iso(stat.st_mtime),
+        "modified": iso_from_timestamp(stat.st_mtime),
         "is_image": is_image_name(path.name),
         "url": f"{base}/{quote(ecosystem)}/{quote(doc_id)}/{ASSETS_DIRNAME}/{quote(path.name)}",
     }
@@ -317,7 +274,7 @@ def _assets_in(
         try:
             normalize_asset_name(path.name)
         except ValueError:
-            log.debug("skipping unservable asset %r", path.name)
+            logger.debug("skipping unservable asset %r", path.name)
             continue
         out.append(
             _asset_entry(path, ecosystem=ecosystem, doc_id=doc_id, url_prefix=url_prefix)
@@ -351,8 +308,8 @@ def save_asset(
     filename = normalize_asset_name(name)
     assets_dir = doc_dir / ASSETS_DIRNAME
     target = _contained(assets_dir / filename, assets_dir)
-    _atomic_write(target, bytes(data))
-    log.info("asset %s/%s/%s saved (%d bytes)", ecosystem, doc_id, filename, len(data))
+    atomic_write_bytes(target, bytes(data))
+    logger.info("asset %s/%s/%s saved (%d bytes)", ecosystem, doc_id, filename, len(data))
     return _asset_entry(
         target, ecosystem=ecosystem, doc_id=doc_id, url_prefix="/docs"
     )
@@ -365,7 +322,7 @@ def delete_asset(root: str, ecosystem: str, doc_id: str, name: str) -> dict[str,
         path, ecosystem=ecosystem, doc_id=doc_id, url_prefix="/docs"
     )
     path.unlink()
-    log.info("asset %s/%s/%s deleted", ecosystem, doc_id, path.name)
+    logger.info("asset %s/%s/%s deleted", ecosystem, doc_id, path.name)
     return entry
 
 
@@ -397,7 +354,7 @@ def _doc_entry(
         "filename": DOC_FILENAME,
         "size": stat.st_size if stat else 0,
         "size_human": human_size(stat.st_size if stat else 0),
-        "modified": _iso(stat.st_mtime) if stat else None,
+        "modified": iso_from_timestamp(stat.st_mtime) if stat else None,
         "created": meta.get("created"),
         "asset_count": len(assets),
         # Read/download the raw Markdown exactly as authored.
@@ -426,7 +383,7 @@ def scan(
             try:
                 doc_id = normalize_doc_id(path.name)
             except ValueError:
-                log.debug("skipping unservable document folder %r", path.name)
+                logger.debug("skipping unservable document folder %r", path.name)
                 continue
             documents.append(
                 _doc_entry(
@@ -522,10 +479,10 @@ def save_document(
     meta = _read_meta(doc_dir)
 
     doc_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_write(doc_dir / DOC_FILENAME, encoded)
+    atomic_write_bytes(doc_dir / DOC_FILENAME, encoded)
     _write_meta(doc_dir, title=clean_title, created=meta.get("created"))
 
-    log.info(
+    logger.info(
         "document %s/%s %s (%d bytes)",
         ecosystem, chosen_id, "replaced" if existed else "created", len(encoded),
     )
@@ -556,13 +513,13 @@ def save_content(root: str, ecosystem: str, doc_id: str, content: str) -> dict[s
     if not (doc_dir / DOC_FILENAME).is_file():
         raise FileNotFoundError(doc_id)
 
-    _atomic_write(doc_dir / DOC_FILENAME, encoded)
+    atomic_write_bytes(doc_dir / DOC_FILENAME, encoded)
     meta = _read_meta(doc_dir)
     heading = first_heading(doc_dir / DOC_FILENAME)
     title = heading or str(meta.get("title") or "").strip() or normalize_doc_id(doc_id)
     _write_meta(doc_dir, title=title, created=meta.get("created"))
 
-    log.info("document %s/%s saved (%d bytes)", ecosystem, doc_id, len(encoded))
+    logger.info("document %s/%s saved (%d bytes)", ecosystem, doc_id, len(encoded))
     return _doc_entry(
         doc_dir,
         normalize_doc_id(doc_id),
@@ -585,7 +542,7 @@ def delete(root: str, ecosystem: str, doc_id: str) -> dict[str, Any]:
         api_prefix="/api/v1",
     )
     shutil.rmtree(doc_dir)
-    log.info("document %s/%s deleted", ecosystem, doc_id)
+    logger.info("document %s/%s deleted", ecosystem, doc_id)
     return entry
 
 
@@ -617,5 +574,4 @@ __all__ = [
     "list_assets",
     "save_asset",
     "delete_asset",
-    "human_size",
 ]

@@ -53,15 +53,15 @@ import re
 import tarfile
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import unquote, urlparse
 
 from services import hub
+from services.format import iso_from_timestamp, utc_now_iso
 from services.upstream import DiskCache, Upstream, UpstreamError
 
-log = logging.getLogger("cpypiserver.npm")
+logger = logging.getLogger("cpypiserver.npm")
 
 #: How long a packument fetched from the upstream registry is trusted.
 PACKUMENT_TTL = 300.0
@@ -111,14 +111,6 @@ _VERSION_SPLIT = re.compile(r"[.\-+]")
 
 # ── Small document helpers ───────────────────────────────────────────
 
-def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat()
-
-
-def _iso(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-
-
 def _visible(path: Path) -> bool:
     """Skip dotfiles and the human-facing README that documents the directory."""
     if any(part.startswith(".") for part in path.parts):
@@ -165,7 +157,7 @@ def _modified_of(doc: Mapping[str, Any]) -> str:
             value = stamp.get(key)
             if isinstance(value, str) and value:
                 return value
-    return _now_iso()
+    return utc_now_iso()
 
 
 def _read_tarball_manifest(path: Path) -> dict[str, Any] | None:
@@ -192,7 +184,7 @@ def _read_tarball_manifest(path: Path) -> dict[str, Any] | None:
                 return None
             data = json.loads(handle.read().decode("utf-8"))
     except (OSError, ValueError, tarfile.TarError) as exc:
-        log.warning("ignoring unreadable npm tarball %s: %s", path, exc)
+        logger.warning("ignoring unreadable npm tarball %s: %s", path, exc)
         return None
     return data if isinstance(data, dict) else None
 
@@ -259,7 +251,7 @@ def _abbreviate(packument: Mapping[str, Any]) -> dict[str, Any]:
         "name": packument.get("name"),
         "dist-tags": packument.get("dist-tags") or {},
         "versions": versions,
-        "modified": packument.get("modified") or _now_iso(),
+        "modified": packument.get("modified") or utc_now_iso(),
     }
 
 
@@ -643,8 +635,8 @@ class NpmRegistry:
             "name": name,
             "dist-tags": {LATEST_TAG: record.get("latest") or LATEST_TAG},
             "versions": versions,
-            "modified": _iso(modified),
-            "time": {version: _iso(ts) for version, ts in (record.get("times") or {}).items()},
+            "modified": iso_from_timestamp(modified),
+            "time": {version: iso_from_timestamp(ts) for version, ts in (record.get("times") or {}).items()},
         }
         document["time"]["modified"] = document["modified"]
         if record.get("description"):
@@ -678,7 +670,7 @@ class NpmRegistry:
         try:
             response = client.get_bytes(name, headers=headers, max_bytes=PACKUMENT_MAX_BYTES)
         except UpstreamError as exc:
-            log.info("npm upstream packument %s failed: %s", name, exc)
+            logger.info("npm upstream packument %s failed: %s", name, exc)
             return None, str(exc)
         if response.status_code == 404:
             return None, "notfound"
@@ -784,7 +776,7 @@ class NpmRegistry:
         try:
             response = client.request("GET", f"{package}/-/{filename}", stream=True)
         except UpstreamError as exc:
-            log.info("npm upstream tarball %s/%s failed: %s", package, filename, exc)
+            logger.info("npm upstream tarball %s/%s failed: %s", package, filename, exc)
             return None, str(exc)
         if response.status_code == 404:
             response.close()
@@ -820,7 +812,7 @@ class NpmRegistry:
                     "name": name,
                     "version": version,
                     "description": record.get("description") or "",
-                    "date": _iso(record.get("modified") or time.time()),
+                    "date": iso_from_timestamp(record.get("modified") or time.time()),
                     "links": {"npm": package_url(name)},
                     "publisher": {"username": publisher},
                     "maintainers": [{"username": publisher, "email": ""}],
@@ -847,7 +839,7 @@ class NpmRegistry:
                 headers={"Accept": FULL_ACCEPT, **self._auth_headers()},
             )
         except UpstreamError as exc:
-            log.info("npm upstream search failed, degrading to local results: %s", exc)
+            logger.info("npm upstream search failed, degrading to local results: %s", exc)
             return []
         raw = document.get("objects") if isinstance(document, dict) else None
         if not isinstance(raw, list):
@@ -868,7 +860,7 @@ class NpmRegistry:
         from_ = max(0, int(from_ or 0))
         text = (text or "").strip()
         if not text:
-            return {"objects": [], "total": 0, "time": _now_iso()}
+            return {"objects": [], "total": 0, "time": utc_now_iso()}
 
         merged: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -886,7 +878,7 @@ class NpmRegistry:
         return {
             "objects": merged[from_:from_ + size],
             "total": len(merged),
-            "time": _now_iso(),
+            "time": utc_now_iso(),
         }
 
 

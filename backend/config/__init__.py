@@ -15,6 +15,8 @@ Environment variables use ``__`` as delimiter::
     STORAGE__PACKAGES_DIR=/data/packages
 """
 
+from __future__ import annotations
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from config.server import ServerConfig

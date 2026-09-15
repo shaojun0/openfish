@@ -117,7 +117,7 @@ async function load(): Promise<void> {
   try {
     packages.value = await fetchPackages()
   } catch (e) {
-    ElMessage.error(apiError(e))
+    ElMessage.error(apiError(e) || t('home.loadFailed'))
   }
   if (session.isAdmin) {
     try {
@@ -240,10 +240,6 @@ onMounted(load)
 </template>
 
 <style scoped>
-.card-title {
-  font-weight: 600;
-}
-
 .shortcuts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));

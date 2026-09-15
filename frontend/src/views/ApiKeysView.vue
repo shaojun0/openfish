@@ -334,14 +334,6 @@ onMounted(load)
 </template>
 
 <style scoped>
-.card-title {
-  font-weight: 600;
-}
-
-.btn-label {
-  margin-left: 4px;
-}
-
 .create-row {
   display: flex;
   align-items: flex-end;

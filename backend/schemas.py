@@ -6,9 +6,9 @@ view that changes shape fails that check instead of silently drifting away
 from its published contract.
 """
 
-from dataclasses import dataclass
-from typing import Optional
+from __future__ import annotations
 
+from dataclasses import dataclass
 from pydantic import BaseModel, Field
 
 
@@ -29,11 +29,11 @@ class PackageFile:
     version: str
     packagetype: str = "sdist"
     python_version: str = "source"
-    requires_python: Optional[str] = None
+    requires_python: str | None = None
     size: int = 0
-    upload_time: Optional[str] = None
-    md5_digest: Optional[str] = None
-    sha256_digest: Optional[str] = None
+    upload_time: str | None = None
+    md5_digest: str | None = None
+    sha256_digest: str | None = None
 
 
 # ── Python-build file ────────────────────────────────────────────────
@@ -50,7 +50,7 @@ class PythonBuildFile:
     variant: str           # e.g. "install_only_stripped"
     extension: str         # e.g. "tar.gz"
     size: int = 0
-    sha256_digest: Optional[str] = None
+    sha256_digest: str | None = None
 
 
 # ── Node-build file ──────────────────────────────────────────────────
@@ -65,7 +65,7 @@ class NodeBuildFile:
     arch: str              # "x64" | "arm64" | ... — empty for `headers`
     extension: str         # e.g. "tar.xz"
     size: int = 0
-    sha256_digest: Optional[str] = None
+    sha256_digest: str | None = None
 
 
 # ── Sort helpers ─────────────────────────────────────────────────────

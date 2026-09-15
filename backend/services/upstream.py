@@ -44,7 +44,7 @@ from urllib.parse import quote, urljoin
 import requests
 from flask import Response
 
-log = logging.getLogger("cpypiserver.upstream")
+logger = logging.getLogger("cpypiserver.upstream")
 
 #: Headers that describe *this* hop and must never be forwarded in either
 #: direction (RFC 9110 §7.6.1, plus the de-facto ``X-Accel-*`` pair).
@@ -511,7 +511,7 @@ class DiskCache:
             except OSError:
                 continue
         if reclaimed:
-            log.info(
+            logger.info(
                 "cache %s evicted %d byte(s) to stay under the %d byte budget",
                 self.root, reclaimed, self.max_bytes,
             )

@@ -177,14 +177,6 @@ onMounted(load)
 </template>
 
 <style scoped>
-.card-title {
-  font-weight: 600;
-}
-
-.btn-label {
-  margin-left: 4px;
-}
-
 .pkg-link {
   color: var(--el-color-primary);
   text-decoration: none;

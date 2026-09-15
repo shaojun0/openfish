@@ -1,5 +1,7 @@
 """Health check."""
 
+from __future__ import annotations
+
 from flask import Blueprint, current_app, jsonify
 
 from config import settings

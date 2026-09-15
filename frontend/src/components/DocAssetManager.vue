@@ -6,6 +6,7 @@ import { useI18n } from 'vue-i18n'
 
 import { deleteDocAsset, uploadDocAsset, type DocAsset } from '@/api'
 import { apiError } from '@/api/client'
+import { useClipboard } from '@/composables/useClipboard'
 
 /**
  * Lightweight asset manager for one documentation project.
@@ -31,6 +32,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+const { copy } = useClipboard()
 const uploading = ref(false)
 const busy = ref<string | null>(null)
 
@@ -62,12 +64,7 @@ function insert(asset: DocAsset): void {
 
 async function copyLink(asset: DocAsset): Promise<void> {
   const absolute = new URL(asset.url, window.location.origin).href
-  try {
-    await navigator.clipboard.writeText(absolute)
-    ElMessage.success(t('docs.copied'))
-  } catch {
-    ElMessage.error(t('docs.copyFailed'))
-  }
+  await copy(absolute)
 }
 
 async function remove(asset: DocAsset): Promise<void> {
@@ -234,9 +231,5 @@ async function remove(asset: DocAsset): Promise<void> {
   display: flex;
   align-items: center;
   flex-shrink: 0;
-}
-
-.btn-label {
-  margin-left: 4px;
 }
 </style>

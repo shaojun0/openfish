@@ -46,7 +46,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from flask import (
-    Blueprint, abort, jsonify, redirect, render_template_string, request,
+    Blueprint, abort, jsonify, redirect, render_template, request,
     send_from_directory, url_for,
 )
 
@@ -56,7 +56,7 @@ from config import settings
 from errors import BadRequestError
 from openapi import api_operation, errors, ok
 from routes.hub_common import spa_url, wants_json
-from services import docs, markdown, templates
+from services import docs, markdown
 
 docs_bp = Blueprint("docs", __name__)
 
@@ -643,8 +643,8 @@ def docs_index(ecosystem: str):
     payload = _catalog(ecosystem)
     if wants_json():
         return jsonify(payload)
-    return render_template_string(
-        templates.docs_index(),
+    return render_template(
+        "docs/index.html",
         server_name=settings.server.server_name,
         base_url=url_for("docs.docs_index", ecosystem=ecosystem, _external=True),
         spa_url=spa_url(f"/documentation/{ecosystem}"),

@@ -50,13 +50,24 @@ backend/data/cache/
 # data/ (stale env file, a command run from the wrong directory) must never be
 # committed — it is a live SQLite file, not a fixture.
 /data/
-# Uploaded packages (volume in the container, working directory locally).
+
+# ── Docker deployment: pluggable bind-mount sources ─────────────────
+# Every Compose bind source is a path under docker/.  On a real deployment the
+# artifact/state directories there are symlinks to a data disk (docker/npm ->
+# /media/.../npm, …) and docker/data -> ../backend/data.  They are created per
+# None of them is committed; the committed sample catalogs live in
+# docker/examples/ and are copied in by that script on a fresh checkout.
+docker/.pre-symlink-backup/
+docker/share
+docker/npm
+docker/node-builds
+docker/docker-images
+docker/debian
+docker/data
+docker/config/model_routes.json
+# Uploaded packages and interpreter mirrors (bind-mounted in the container).
 packages/
 python-build-standalone/
-# The Node.js mirror holds multi-gigabyte archives; commit only the README that
-# documents the layout it expects.  Catalogs live under docker/.
-docker/node-builds/*
-!docker/node-builds/README.txt
 
 # ── TLS material (private CA / certs / keys) ────────────────────────
 *.pem

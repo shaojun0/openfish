@@ -15,11 +15,13 @@ without credentials.  ``scripts/check_auth_guards.py`` fails the build if that
 pattern comes back.
 """
 
+from __future__ import annotations
+
 import logging
 from pathlib import Path
 
 from flask import (
-    Blueprint, current_app, jsonify, render_template_string,
+    Blueprint, current_app, jsonify, render_template,
     send_from_directory, url_for,
 )
 
@@ -27,7 +29,8 @@ from config import settings
 from auth.decorators import require_permission
 from auth.permissions import BUILD_DOWNLOAD, BUILD_READ, BUILD_SHA256
 from openapi import api_operation, binary, errors, ok
-from services import build_mirror, templates
+from services import build_mirror
+from services.format import human_size
 
 logger = logging.getLogger("cpypiserver.python_build")
 python_build_bp = Blueprint("python_build", __name__)
@@ -73,8 +76,8 @@ def discovery():
     s = idx.stats()
     base_url = url_for("python_build.discovery", _external=True).rstrip("/")
     sorted_releases = sorted(snapshot.items(), key=lambda kv: kv[0], reverse=True)
-    return render_template_string(
-        templates.build_discovery(),
+    return render_template(
+        "python/build_discovery.html",
         server_name=settings.server.server_name,
         base_url=base_url,
         releases=len(snapshot),
@@ -101,8 +104,8 @@ def release_page(release_tag: str):
     files = idx.get_files_for_release(release_tag)
     if files is None:
         return f"<h1>Release '{release_tag}' not found</h1>", 404
-    return render_template_string(
-        templates.build_release(),
+    return render_template(
+        "python/build_release.html",
         server_name=settings.server.server_name,
         release_tag=release_tag,
         file_count=len(files),
@@ -153,7 +156,7 @@ def health():
     s = idx.stats()
     return jsonify({
         "status": "ok", "builds_dir": settings.storage.python_builds_dir,
-        **s, "total_size_human": f"{s['total_size'] / 1024 / 1024 / 1024:.1f} GB",
+        **s, "total_size_human": human_size(s["total_size"]),
     })
 
 

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import urllib.parse
-from typing import Optional
 from urllib.parse import urlencode
 
 import requests
@@ -18,7 +17,7 @@ from requests.auth import HTTPBasicAuth
 
 from config import settings
 
-log = logging.getLogger("cpypiserver.oauth")
+logger = logging.getLogger("cpypiserver.oauth")
 
 
 def _verify() -> str | bool:
@@ -33,7 +32,7 @@ def _verify() -> str | bool:
     return bundle or True
 
 
-def identity_from_info(info: dict) -> tuple[str, str, Optional[str]]:
+def identity_from_info(info: dict) -> tuple[str, str, str | None]:
     """Derive ``(external_id, display_name, email)`` from an introspection body.
 
     ``external_id`` is the stable account key and is what roles attach to.  The
@@ -53,7 +52,7 @@ def identity_from_info(info: dict) -> tuple[str, str, Optional[str]]:
     return external_id, display_name, (email or None)
 
 
-def introspect_token(token: str) -> Optional[dict]:
+def introspect_token(token: str) -> dict | None:
     """Validate an OAuth2 access token against the introspection endpoint."""
     url = settings.auth.oauth2_introspect_url
     if not url:
@@ -68,7 +67,7 @@ def introspect_token(token: str) -> Optional[dict]:
         resp.raise_for_status()
         return resp.json()
     except Exception:
-        log.warning("Token introspection failed", exc_info=True)
+        logger.warning("Token introspection failed", exc_info=True)
         return None
 
 
@@ -107,8 +106,8 @@ def exchange_code(code: str) -> dict | None:
         )
         if resp.status_code == 200:
             return resp.json()
-        log.warning("Code exchange failed: HTTP %s", resp.status_code)
+        logger.warning("Code exchange failed: HTTP %s", resp.status_code)
     except Exception as exc:
-        log.warning("Code exchange failed: %s", exc)
+        logger.warning("Code exchange failed: %s", exc)
         raise
     return None

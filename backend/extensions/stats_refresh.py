@@ -1,12 +1,14 @@
 """Stats refresh extension — background daemon thread for admin stats."""
 
+from __future__ import annotations
+
 import logging
 import threading
 
 from extensions import Extension
 from services.stats import compute as compute_stats
 
-_log = logging.getLogger("cpypiserver.stats_refresh")
+logger = logging.getLogger("cpypiserver.stats_refresh")
 
 
 class StatsRefreshExtension(Extension):
@@ -22,19 +24,19 @@ class StatsRefreshExtension(Extension):
             import time
             try:
                 start = time.time()
-                _log.info("Computing admin stats…")
+                logger.info("Computing admin stats…")
                 with app.app_context():
                     pkg_index = app.extensions.get("pypi_index")
                     key_mgr = app.extensions.get("api_key_manager")
                     data = compute_stats(pkg_index, key_mgr)
                 cache.set("admin_stats", data, timeout=0)
                 elapsed = time.time() - start
-                _log.info(
+                logger.info(
                     "Stats refreshed (%d packages, %.1fs, next in %ds)",
                     data["overview"]["package_count"], elapsed, interval,
                 )
             except Exception:
-                _log.exception("Stats refresh failed")
+                logger.exception("Stats refresh failed")
 
         def _schedule():
             t = threading.Timer(interval, _tick)

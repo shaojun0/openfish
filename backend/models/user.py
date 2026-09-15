@@ -16,21 +16,12 @@ credential goes — keeping it now avoids a schema migration at that point.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import Boolean, Column, DateTime, Integer, String
 from sqlalchemy.orm import Mapped
 
-from .base import Base
-
-
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def iso(dt: datetime | None) -> str | None:
-    """Serialize a datetime to an ISO-8601 UTC string (or None)."""
-    return dt.isoformat() if dt is not None else None
+from .base import Base, iso, utcnow
 
 
 class User(Base):
@@ -91,4 +82,4 @@ class User(Base):
         return f"<User {self.id} {self.provider}:{self.external_id}>"
 
 
-__all__ = ["User", "utcnow", "iso"]
+__all__ = ["User"]

@@ -36,7 +36,7 @@ this.
 from __future__ import annotations
 
 from flask import (
-    Blueprint, abort, jsonify, render_template_string, request,
+    Blueprint, abort, jsonify, render_template, request,
     send_from_directory, url_for,
 )
 
@@ -48,7 +48,7 @@ from config import settings
 from errors import BadRequestError, PypiError
 from openapi import api_operation, binary, errors, ok
 from routes.hub_common import spa_url, wants_json
-from services import hub, model_routes, templates
+from services import hub, model_routes
 
 hub_bp = Blueprint("hub", __name__)
 
@@ -272,8 +272,8 @@ def tools_index():
     payload = _tools_payload()
     if wants_json():
         return jsonify(payload)
-    return render_template_string(
-        templates.tools_index(),
+    return render_template(
+        "tools/index.html",
         server_name=settings.server.server_name,
         base_url=url_for("hub.tools_index", _external=True),
         spa_url=spa_url("/tools"),

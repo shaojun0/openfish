@@ -5,6 +5,8 @@ The HTML dashboard that used to live here is now part of the Vue SPA
 ``/api/v1``.
 """
 
+from __future__ import annotations
+
 from flask import Blueprint, current_app, jsonify, request
 
 from auth.decorators import current_sub, current_user_id, require_permission

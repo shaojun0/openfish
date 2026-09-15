@@ -272,8 +272,8 @@ def render_llms_txt(spec: dict, base_url: str) -> str:
     lines: list[str] = [
         f"# {server_name}",
         "",
-        f"> Self-hosted Python package registry. Serves `pip`, `uv` and `twine`, "
-        f"and exposes a JSON API authenticated with API keys.",
+        "> Self-hosted Python package registry. Serves `pip`, `uv` and `twine`, "
+        "and exposes a JSON API authenticated with API keys.",
         "",
         f"Base URL: `{base}`",
         "",

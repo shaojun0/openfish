@@ -32,7 +32,7 @@ line, or the guard is applied after registration and never runs.
 from __future__ import annotations
 
 from flask import (
-    Blueprint, Response, jsonify, render_template_string, request,
+    Blueprint, Response, jsonify, render_template, request,
     send_from_directory, url_for,
 )
 
@@ -41,7 +41,7 @@ from auth.permissions import DEBIAN_DOWNLOAD, DEBIAN_READ
 from config import settings
 from openapi import api_operation, binary, errors, ok
 from routes.hub_common import spa_url, wants_json
-from services import debian_apt, hub, templates
+from services import debian_apt, hub
 
 debian_bp = Blueprint("debian", __name__)
 
@@ -96,8 +96,8 @@ def debian_index():
     catalog = _debian_payload()
     if wants_json():
         return jsonify(catalog)
-    return render_template_string(
-        templates.debian_index(),
+    return render_template(
+        "debian/index.html",
         server_name=settings.server.server_name,
         base_url=url_for("debian.debian_index", _external=True),
         spa_url=spa_url("/debian"),

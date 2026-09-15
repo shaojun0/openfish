@@ -33,8 +33,6 @@ Both work in two positions:
 from __future__ import annotations
 
 from functools import wraps
-from typing import Optional
-
 from flask import current_app, g
 
 from auth.permissions import ADMIN_VIEW, PACKAGE_READ, PACKAGE_WRITE, declare
@@ -45,17 +43,17 @@ from errors import ForbiddenError, UnauthorizedError
 
 # ── Principal accessors ──────────────────────────────────────────────
 
-def current_principal() -> Optional[dict]:
+def current_principal() -> dict | None:
     """The ``g.auth_user`` dict, or None when unauthenticated."""
     return getattr(g, "auth_user", None)
 
 
-def current_user_id() -> Optional[int]:
+def current_user_id() -> int | None:
     principal = current_principal()
     return principal.get("user_id") if principal else None
 
 
-def current_sub() -> Optional[str]:
+def current_sub() -> str | None:
     """Stable identity of the caller (never a display name)."""
     principal = current_principal()
     return principal.get("sub") if principal else None

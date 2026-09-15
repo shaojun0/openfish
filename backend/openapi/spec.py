@@ -179,9 +179,15 @@ def _refs_in(node: Any) -> set[str]:
 
 
 def _build_schemas(paths: dict[str, Any]) -> dict[str, Any]:
-    """Emit component schemas for every model the paths reference."""
+    """Emit component schemas for every model the paths reference.
+
+    The walk is ordered (``sorted`` + a LIFO stack that drains it), because
+    ``_refs_in`` returns a *set*: without this the component section comes out in
+    a different order on every process, and a two-line change to `/openapi.json`
+    shows up as a whole-file diff.
+    """
     models = _model_registry()
-    pending = list(_refs_in(paths))
+    pending = sorted(_refs_in(paths), reverse=True)
     schemas: dict[str, Any] = {}
 
     while pending:
@@ -199,7 +205,7 @@ def _build_schemas(paths: dict[str, Any]) -> dict[str, Any]:
         )
         # pydantic emits nested models flat in `$defs`; hoist them into the
         # component section where the refs already point.
-        for def_name, def_schema in document.pop("$defs", {}).items():
+        for def_name, def_schema in sorted(document.pop("$defs", {}).items(), reverse=True):
             if def_name not in schemas:
                 schemas[def_name] = def_schema
                 pending.append(def_name)

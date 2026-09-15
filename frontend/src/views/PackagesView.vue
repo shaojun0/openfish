@@ -186,22 +186,12 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .toolbar__type {
   width: 160px;
 }
 
 .toolbar__search {
   width: 260px;
-}
-
-.btn-label {
-  margin-left: 4px;
 }
 
 .pkg-link {

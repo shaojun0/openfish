@@ -1,5 +1,11 @@
 """*** package routes — PEP 503 Simple Repository API."""
 
+# NOTE: no `from __future__ import annotations` in this module.  PEP 563
+# turns the `query: FormatQuery` annotation into the *string* "FormatQuery",
+# and flask-pydantic reads `func.__annotations__["query"]` in preference to
+# the explicit `query=` argument and hands it to `issubclass` — which then
+# raises TypeError on every request.  This is the one module that opts out.
+
 import hashlib
 import json as _json
 import logging
@@ -8,8 +14,8 @@ import tempfile
 from pathlib import Path
 
 from flask import (
-    Blueprint, Response, current_app, g, jsonify,
-    render_template_string, request, send_from_directory, url_for,
+    Blueprint, Response, current_app, g,
+    render_template, request, send_from_directory, url_for,
 )
 from flask_pydantic import validate
 
@@ -22,7 +28,6 @@ from schemas import FormatQuery
 from services.validation import validate_file
 from index.packages import normalize_package_name
 from index.base import store_digest
-from services import templates
 
 logger = logging.getLogger("cpypiserver")
 pypi_bp = Blueprint("pypi", __name__)
@@ -68,7 +73,7 @@ def simple_index(query: FormatQuery):
     names = sorted(packages)
     if _wants_json(request.headers.get("Accept", ""), query.format):
         return _json_response({"meta": {"api-version": "1.0"}, "projects": [{"name": n} for n in names]})
-    return render_template_string(templates.pypi_simple_index(), package_names=names)
+    return render_template("python/simple_index.html", package_names=names)
 
 
 @pypi_bp.route("/simple/<package_name>/")
@@ -108,7 +113,11 @@ def package_page(query: FormatQuery, package_name: str):
         })
     for f in files:
         pkg_index.get_sha256(f)
-    return render_template_string(templates.pypi_simple_package(), package_name=normalize_package_name(package_name), files=files)
+    return render_template(
+            "python/simple_package.html",
+            package_name=normalize_package_name(package_name),
+            files=files,
+        )
 
 
 @pypi_bp.route("/packages/<path:filename>")

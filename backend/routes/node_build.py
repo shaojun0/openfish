@@ -36,7 +36,7 @@ import logging
 from pathlib import Path
 
 from flask import (
-    Blueprint, Response, current_app, jsonify, render_template_string,
+    Blueprint, Response, current_app, jsonify, render_template,
     send_from_directory, url_for,
 )
 
@@ -47,7 +47,8 @@ from auth.permissions import (
 from config import settings
 from openapi import api_operation, binary, errors, html, ok
 from routes.hub_common import wants_json
-from services import build_mirror, templates
+from services import build_mirror
+from services.format import human_size
 
 logger = logging.getLogger("cpypiserver.node_build")
 node_build_bp = Blueprint("node_build", __name__)
@@ -135,8 +136,8 @@ def discovery():
     # `get_releases()` is newest-first; preserve that order in the rendered
     # document so the page reads top-down from the most recent release.
     releases_dict = {tag: snapshot[tag] for tag in idx.get_releases() if tag in snapshot}
-    return render_template_string(
-        templates.node_build_discovery(),
+    return render_template(
+        "node/build_discovery.html",
         server_name=settings.server.server_name,
         base_url=base_url,
         releases=len(snapshot),
@@ -215,7 +216,7 @@ def health():
     s = idx.stats()
     return jsonify({
         "status": "ok", "builds_dir": settings.storage.node_builds_dir,
-        **s, "total_size_human": f"{s['total_size'] / 1024 / 1024 / 1024:.1f} GB",
+        **s, "total_size_human": human_size(s["total_size"]),
     })
 
 
@@ -243,8 +244,8 @@ def release_page(release_tag: str):
     files = idx.get_files_for_release(resolved)
     if files is None:
         return f"<h1>Release '{release_tag}' not found</h1>", 404
-    return render_template_string(
-        templates.node_build_release(),
+    return render_template(
+        "node/build_release.html",
         server_name=settings.server.server_name,
         release_tag=resolved,
         file_count=len(files),

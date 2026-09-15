@@ -110,6 +110,7 @@ export default {
     nodeTitle: 'Node.js 运行时镜像（nvm / fnm）',
     nodeDesc: '把 NVM_NODEJS_ORG_MIRROR 或 FNM_NODE_DIST_MIRROR 指向本仓库以下载预编译 Node.js。',
     copy: '复制',
+    loadFailed: '加载概览数据失败',
   },
 
   stat: {
@@ -554,8 +555,6 @@ export default {
     noAssets: '暂无附件',
     insert: '插入到正文',
     copyLink: '复制链接',
-    copied: '链接已复制',
-    copyFailed: '复制失败，请手动选择',
     assetUploaded: '已上传 {name}',
     assetUploadFailed: '上传附件失败',
     assetLoadFailed: '加载附件失败',

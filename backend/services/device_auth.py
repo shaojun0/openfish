@@ -50,7 +50,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
-log = logging.getLogger("cpypiserver.device_auth")
+logger = logging.getLogger("cpypiserver.device_auth")
 
 #: Characters for ``user_code``.  No vowels (so a code cannot spell a word), no
 #: ``0/O/1/I`` lookalikes: a code is read off a screen and typed back.
@@ -116,7 +116,7 @@ class DeviceAuthStore:
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            log.warning("cannot read device codes from %s: %s", self._path, exc)
+            logger.warning("cannot read device codes from %s: %s", self._path, exc)
             return {}
         raw = data.get("requests") if isinstance(data, dict) else None
         return raw if isinstance(raw, dict) else {}
@@ -239,7 +239,7 @@ class DeviceAuthStore:
                 })
                 requests[digest] = item
                 self._write(requests)
-                log.info(
+                logger.info(
                     "device authorization approved for %s (key %s)",
                     user, key.get("id"),
                 )

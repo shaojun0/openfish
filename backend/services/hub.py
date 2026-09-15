@@ -33,16 +33,17 @@ browser rather than on disk; :mod:`services.model_routes` owns it.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-log = logging.getLogger("cpypiserver.hub")
+from services.digest import sha256_or_none
+from services.fileio import read_json
+from services.format import human_size, iso_from_timestamp
+
+logger = logging.getLogger("cpypiserver.hub")
 
 #: Files that are catalog metadata rather than catalog entries.
 _OVERLAY_FILENAME = "catalog.json"
@@ -51,66 +52,21 @@ _OVERLAY_FILENAME = "catalog.json"
 _DOC_PREFIXES = ("readme", "license", "changelog")
 
 #: Files larger than this are listed without a SHA-256 — hashing multi-gigabyte
-#: installers on every page load is not worth it.
+#: installers on every page load is not worth it.  The digest cache means an
+#: unchanged file is only ever read once anyway.
 _HASH_LIMIT_BYTES = 64 * 1024 * 1024
-
-#: ``(absolute path, mtime, size) -> sha256``.  Bounded crudely: cleared when it
-#: grows past this many entries, which is more than any catalog directory holds.
-_HASH_CACHE_MAX = 512
-_sha256_cache: dict[tuple[str, float, int], str] = {}
 
 
 # ── Small helpers ────────────────────────────────────────────────────
 
-def human_size(num: float) -> str:
-    """Format a byte count the way the rest of the UI does."""
-    step = 1024.0
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(num) < step or unit == "TB":
-            if unit == "B":
-                return f"{int(num)} {unit}"
-            return f"{num:.1f} {unit}"
-        num /= step
-    return f"{num:.1f} TB"
-
-
-def _iso(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-
-
-def _sha256(path: Path, stat: Any) -> str | None:
-    """SHA-256 of *path*, cached on (path, mtime, size)."""
-    if stat.st_size > _HASH_LIMIT_BYTES:
-        return None
-    key = (str(path), stat.st_mtime, stat.st_size)
-    cached = _sha256_cache.get(key)
-    if cached is not None:
-        return cached
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as fh:
-            for chunk in iter(lambda: fh.read(1 << 20), b""):
-                digest.update(chunk)
-    except OSError as exc:  # pragma: no cover - races with a deletion
-        log.debug("cannot hash %s: %s", path, exc)
-        return None
-    value = digest.hexdigest()
-    if len(_sha256_cache) >= _HASH_CACHE_MAX:
-        _sha256_cache.clear()
-    _sha256_cache[key] = value
-    return value
+def _sha256(path: Path) -> str | None:
+    """SHA-256 of *path* when it is small enough to be worth hashing."""
+    return sha256_or_none(path, max_bytes=_HASH_LIMIT_BYTES)
 
 
 def _load_overlay(root: Path) -> dict[str, Any]:
     """Read ``catalog.json`` when present; never let a bad file 500 the page."""
-    overlay = root / _OVERLAY_FILENAME
-    if not overlay.is_file():
-        return {}
-    try:
-        data = json.loads(overlay.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        log.warning("ignoring unreadable %s: %s", overlay, exc)
-        return {}
+    data = read_json(root / _OVERLAY_FILENAME, default={})
     return data if isinstance(data, dict) else {}
 
 
@@ -142,8 +98,8 @@ def _tool_entry(
         "download_url": f"{url_prefix.rstrip('/')}/{quote(rel)}",
         "size": stat.st_size,
         "size_human": human_size(stat.st_size),
-        "sha256": _sha256(file_path, stat),
-        "modified": _iso(stat.st_mtime),
+        "sha256": _sha256(file_path),
+        "modified": iso_from_timestamp(stat.st_mtime),
         "description": meta.get("description"),
         "tags": list(meta.get("tags") or []),
     }
@@ -234,7 +190,7 @@ def _npm_tarball_entry(path: Path, *, url_prefix: str, meta: dict[str, Any]) -> 
         "filename": path.name,
         "size": stat.st_size,
         "size_human": human_size(stat.st_size),
-        "modified": _iso(stat.st_mtime),
+        "modified": iso_from_timestamp(stat.st_mtime),
         "download_url": f"{url_prefix.rstrip('/')}/{quote(path.name)}",
         "description": meta.get("description"),
         "tags": list(meta.get("tags") or []),
@@ -361,8 +317,8 @@ def _flat_entry(
         "filename": path.name,
         "size": stat.st_size,
         "size_human": human_size(stat.st_size),
-        "sha256": _sha256(path, stat),
-        "modified": _iso(stat.st_mtime),
+        "sha256": _sha256(path),
+        "modified": iso_from_timestamp(stat.st_mtime),
         "download_url": f"{url_prefix.rstrip('/')}/{quote(rel)}",
         "description": meta.get("description"),
         "tags": list(meta.get("tags") or []),
@@ -455,7 +411,7 @@ def scan_flat(
     return result
 
 
-def _parse_docker_filename(filename: str) -> dict[str, Any]:
+def parse_docker_filename(filename: str) -> dict[str, Any]:
     """``nginx-1.25.3.tar`` → image ``nginx:1.25.3``; describe the rest as files."""
     lower = filename.lower()
     for ext in (".tar.gz", ".tgz", ".tar"):
@@ -496,7 +452,7 @@ def scan_docker(root: str, *, url_prefix: str, registry: str = "") -> dict[str, 
     return scan_flat(
         root,
         url_prefix=url_prefix,
-        parse=_parse_docker_filename,
+        parse=parse_docker_filename,
         extra={"registry": registry},
     )
 
@@ -560,7 +516,7 @@ def debian_packages_index(catalog: dict[str, Any]) -> str:
 # modules.  This module keeps only the artifact catalogs.
 
 __all__ = [
-    "human_size",
+    "parse_docker_filename",
     "scan_tools",
     "scan_npm",
     "npm_all_index",
