@@ -53,6 +53,9 @@ BLUEPRINT_GUARDS: dict[str, str] = {
     "access": "ADMIN_ROLES",
     "api_keys": "AUTH_ONLY",
     "pypi": "AUTH_ONLY",
+    # The browser app: gated by its own point so it stays closed to `anonymous`
+    # even while `AUTH_ENABLED=false`.
+    "spa": "APP_READ",
 }
 
 #: ``(module stem, view function) -> permission constant`` for every route that

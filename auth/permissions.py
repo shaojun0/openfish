@@ -69,6 +69,16 @@ MODEL_WRITE = "model:write"
 DOC_READ = "doc:read"
 DOC_UPLOAD = "doc:upload"
 
+# The browser application itself
+#
+# Gates the SPA shell and its bundle, nothing else: every byte of data behind it
+# is still checked by that ecosystem's own point.  It exists because "anonymous
+# may read the docs and nothing else" has to include *not opening the app*, and
+# `require_auth` cannot express that — with `AUTH_ENABLED=false` no credential is
+# demanded, so a request without one is simply anonymous.  A point the
+# `anonymous` role does not hold is what actually closes the UI.
+APP_READ = "app:read"
+
 # API key self-service
 KEY_LIST = "key:list"
 KEY_CREATE = "key:create"
@@ -104,6 +114,7 @@ BUILTIN: dict[str, tuple[str, str]] = {
     MODEL_WRITE: ("管理模型路由", "新增、修改、删除模型路由并检测其连通性"),
     DOC_READ: ("浏览生态文档", "查看与下载各生态的 Markdown 文档"),
     DOC_UPLOAD: ("上传生态文档", "通过上传 Markdown 文件新增、覆盖或删除各生态文档"),
+    APP_READ: ("打开 Web 控制台", "加载并进入浏览器控制台外壳；其中的数据仍由各自的权限点控制"),
     KEY_LIST: ("列出 API 密钥", "查看自己名下的 API 密钥"),
     KEY_CREATE: ("创建 API 密钥", "签发新的 API 密钥"),
     KEY_DELETE: ("吊销 API 密钥", "删除 API 密钥"),
@@ -178,7 +189,8 @@ ADMIN_ROLE = "admin"
 BUILTIN_ROLES: dict[str, tuple[str, str, bool, bool, bool]] = {
     ANONYMOUS_ROLE: (
         "匿名访客",
-        "未认证请求自动获得（仅在 AUTH_ENABLED=false 时可达）",
+        "未认证请求自动获得（仅在 AUTH_ENABLED=false 时可达）。仅持有 doc:read："
+        "只读文档，其余（含 Web 控制台 app:read）一律拒绝",
         True,
         True,    # is_anonymous_default
         False,
@@ -206,6 +218,7 @@ __all__ = [
     "TOOL_READ", "TOOL_DOWNLOAD", "NPM_READ", "NPM_DOWNLOAD", "MODEL_READ", "MODEL_WRITE",
     "DOCKER_READ", "DOCKER_DOWNLOAD", "DEBIAN_READ", "DEBIAN_DOWNLOAD",
     "DOC_READ", "DOC_UPLOAD",
+    "APP_READ",
     "KEY_LIST", "KEY_CREATE", "KEY_DELETE", "KEY_STATS",
     "ADMIN_VIEW", "ADMIN_REFRESH", "ADMIN_ROLES",
     "BUILTIN", "BUILTIN_ROLES",

@@ -45,11 +45,33 @@ os.environ["ADMIN_USERS"] = '["root"]'
 
 from app import app  # noqa: E402
 from auth.permissions import PACKAGE_READ, PACKAGE_WRITE  # noqa: E402
+from models.rbac import Permission  # noqa: E402
 from services.authz import bootstrap  # noqa: E402
 
 ROOT_AUTH = ("root", "rbac-gate-secret")
 
 failures: list[str] = []
+
+
+def _plant_ghost_permission(authz) -> None:
+    """Insert a catalogue row no guard declares — a renamed/removed point."""
+    session = authz._s
+    try:
+        session.add(Permission(
+            code="legacy:ghost", name="Legacy Ghost", module="legacy", description=None,
+        ))
+        session.commit()
+    finally:
+        session.close()
+
+
+def _remove_ghost_permission(authz) -> None:
+    session = authz._s
+    try:
+        session.query(Permission).filter(Permission.code == "legacy:ghost").delete()
+        session.commit()
+    finally:
+        session.close()
 
 
 def check(ok: bool, label: str) -> None:
@@ -177,6 +199,39 @@ def main() -> int:
     check(expected <= declared,
           f"every built-in permission point is registered "
           f"(missing: {sorted(expected - declared)})")
+
+    # ── 5. Catalogue drift, both directions ──────────────────────────
+    # `admin` holds everything and is topped up on every boot, so it can hide
+    # two different bugs that this gate must still catch:
+    #   * a seeded point the `authenticated` role never actually got  (the
+    #     nodebuild:* release), and
+    #   * a row no guard declares any more, left behind by a rename.
+    print()
+    print("── Catalogue drift ─────────────────────────────────────────────")
+    pending = sorted(p["code"] for p in authz.list_permissions() if p["authenticated_pending"])
+    check(pending == [],
+          f"the `authenticated` role holds every seeded point — no migration "
+          f"pending (pending: {pending})")
+
+    check(authz.stale_permissions() == [],
+          f"no catalogue row outlives the guard that declared it "
+          f"(stale: {authz.stale_permissions()})")
+
+    # Prove the detector works rather than trusting an empty list.
+    _plant_ghost_permission(authz)
+    try:
+        stale = authz.stale_permissions()
+        check(stale == ["legacy:ghost"],
+              f"a row no guard declares is reported as stale (got {stale})")
+        ghost = next((p for p in authz.list_permissions() if p["code"] == "legacy:ghost"), None)
+        check(ghost is not None and ghost["stale"] is True,
+              "the API marks the orphaned row `stale` so /access can warn about it")
+        check(all(not p["stale"] for p in authz.list_permissions() if p["code"] != "legacy:ghost"),
+              "no live point is mislabelled stale")
+    finally:
+        _remove_ghost_permission(authz)
+    check(authz.stale_permissions() == [],
+          "removing the row clears the report (the detector is not sticky)")
 
     print()
     if failures:

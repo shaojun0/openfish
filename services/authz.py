@@ -31,25 +31,85 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import scoped_session
 
 from auth import permissions as P
-from models.rbac import Permission, Role, RolePermission, UserRole, utcnow
+from models.rbac import (
+    Permission,
+    Role,
+    RolePermission,
+    SeedMigration,
+    UserRole,
+    utcnow,
+)
 from models.user import User
 
 log = logging.getLogger("cpypiserver.authz")
 
-#: Permission points the ``anonymous`` role starts with (unauthenticated only
-#: reachable when AUTH_ENABLED=false).
-_ANONYMOUS_SEED = (P.PACKAGE_READ, P.BUILD_READ)
+#: Permission points the ``anonymous`` role starts with.  Anonymous access is
+#: reachable only when ``AUTH_ENABLED=false`` (or, in a deployment that turns
+#: the switch off, by any caller that presents no credential).
+#:
+#: Deliberately minimal: **documentation only.**  An anonymous caller may read
+#: the ecosystem handbook on ``/docs/*`` and nothing else — no package index, no
+#: mirror, no catalogue, and not even the SPA shell, which is guarded by
+#: ``require_auth`` rather than by a point so that flipping the master switch
+#: cannot accidentally open the application.  Add a point here only if the
+#: deployment is genuinely meant to serve it to unauthenticated strangers.
+_ANONYMOUS_SEED = (P.DOC_READ,)
 
 #: Permission points the ``authenticated`` role starts with.  This is *seed
 #: data for one built-in role row*, not a role -> permission mapping in code:
 #: once created, the row is the authority and admins may edit it freely.
+#:
+#: Rule of thumb, and the reason this tuple is exhaustive rather than
+#: hand-picked: **every read/download point for a mirror ecosystem belongs
+#: here; only write/admin points stay with the ``admin`` role.**  A point that
+#: gates a mirror a signed-in developer is expected to consume (``uv``, ``nvm``,
+#: ``npm``, ``docker``, ``apt``, the tools catalog) must be seeded, or the
+#: feature is silently admin-only.  ``nodebuild:*`` was missed for exactly that
+#: reason — see ``scripts/check_permission_catalog.py``, which now refuses a new
+#: built-in point that nobody has classified.
 _AUTHENTICATED_SEED = (
     P.PACKAGE_READ, P.PACKAGE_WRITE,
     P.BUILD_READ, P.BUILD_DOWNLOAD, P.BUILD_SHA256,
+    P.NODE_BUILD_READ, P.NODE_BUILD_DOWNLOAD, P.NODE_BUILD_SHA256,
     P.TOOL_READ, P.TOOL_DOWNLOAD, P.NPM_READ, P.NPM_DOWNLOAD, P.MODEL_READ,
     P.DOCKER_READ, P.DOCKER_DOWNLOAD, P.DEBIAN_READ, P.DEBIAN_DOWNLOAD,
     P.DOC_READ,
+    P.APP_READ,
     P.KEY_LIST, P.KEY_CREATE, P.KEY_DELETE, P.KEY_STATS,
+)
+
+#: One-time seed top-ups, applied to built-in roles that already exist.
+#:
+#: ``sync_builtin_roles`` seeds a role only when its row is created, so a point
+#: added to a seed tuple *after* that never reaches a running deployment.  Each
+#: entry below is the delta that closes that gap for one release; it is applied
+#: exactly once (recorded in ``seed_migrations``), and it only ever *adds* the
+#: points it names, so it can never resurrect an unrelated grant an
+#: administrator removed.  Keep the ids stable — they are the primary key.
+_SEED_TOPUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    # (id, built-in role code, points that release added to the seed)
+    (
+        "2026-09-npm-download",
+        P.AUTHENTICATED_ROLE,
+        (P.NPM_DOWNLOAD,),
+    ),
+    (
+        "2026-09-nodebuild",
+        P.AUTHENTICATED_ROLE,
+        (
+            P.NODE_BUILD_READ,
+            P.NODE_BUILD_DOWNLOAD,
+            P.NODE_BUILD_SHA256,
+        ),
+    ),
+    # `app:read` gates the SPA shell, so an existing deployment that does not
+    # receive it loses the whole web console — this entry is what keeps an
+    # upgrade from locking everybody out of the UI.
+    (
+        "2026-09-app-read",
+        P.AUTHENTICATED_ROLE,
+        (P.APP_READ,),
+    ),
 )
 
 
@@ -112,8 +172,10 @@ class AuthzService:
 
         Rows are never deleted — a point that disappears from the code may
         still be referenced by a role, and silently dropping it would be a
-        surprise.  Instead, unreferenced points are reported (see
-        :meth:`orphan_permissions`).
+        surprise.  Instead both directions of drift are reported:
+        :meth:`orphan_permissions` (declared but held by no role) and
+        :meth:`stale_permissions` (held in the database but no longer declared
+        by any guard).
         """
         catalog = P.seed_catalog()
         session = self._s
@@ -174,6 +236,17 @@ class AuthzService:
             if admin is not None:
                 self._set_role_permissions(session, admin, tuple(perms), perms, additive=True)
 
+            # Bring an already-existing role up to date with points a later
+            # release added to its seed, exactly once each.
+            self._apply_seed_topups(session, perms)
+
+            # Whatever is still missing after the top-ups is a genuine gap (an
+            # administrator revoked it, or the seed changed without a top-up).
+            # The admin role is topped up automatically, which means such a
+            # point looks "held" and never shows up as an orphan — say it out
+            # loud instead of letting signed-in users silently get 403.
+            self._warn_missing_authenticated_seed(session)
+
             session.commit()
             self.invalidate()
         except Exception:
@@ -181,6 +254,58 @@ class AuthzService:
             raise
         finally:
             session.close()
+
+    @staticmethod
+    def _apply_seed_topups(session, perms: dict[str, Permission]) -> list[str]:
+        """Apply each ``_SEED_TOPUPS`` entry at most once.  Returns applied ids.
+
+        Additive by construction: an entry names the exact points one release
+        added to a seed, so applying it cannot touch any other grant — an
+        administrator's deliberate revocation of some *other* point survives.
+        The ``seed_migrations`` row is written in the same transaction, so a
+        crash halfway through replays cleanly instead of double-granting.
+        """
+        applied: list[str] = []
+        for migration_id, role_code, codes in _SEED_TOPUPS:
+            if session.get(SeedMigration, migration_id) is not None:
+                continue
+            role = session.query(Role).filter(Role.code == role_code).first()
+            if role is None:
+                # The role will be created (and freshly seeded) later in a
+                # future boot; do not consume the migration.
+                continue
+            wanted = {perms[c].id for c in codes if c in perms}
+            current = {
+                rp.permission_id for rp in
+                session.query(RolePermission)
+                .filter(RolePermission.role_id == role.id).all()
+            }
+            added = wanted - current
+            for pid in added:
+                session.add(RolePermission(role_id=role.id, permission_id=pid))
+            session.add(SeedMigration(code=migration_id))
+            applied.append(migration_id)
+            log.info(
+                "Seed migration %r: granted %d point(s) to role %r (%s)",
+                migration_id, len(added), role_code,
+                ", ".join(sorted(codes)) if codes else "—",
+            )
+        return applied
+
+    @staticmethod
+    def _warn_missing_authenticated_seed(session) -> None:
+        """Log seeded points the ``authenticated`` role does not actually hold."""
+        if session.query(Role).filter(Role.code == P.AUTHENTICATED_ROLE).first() is None:
+            return
+        held = AuthzService._role_permission_codes(session, P.AUTHENTICATED_ROLE)
+        missing = sorted(set(_AUTHENTICATED_SEED) - held)
+        if missing:
+            log.warning(
+                "The %r role does not hold seeded point(s): %s — grant them on "
+                "/access (or with AuthzService.set_role_permissions); until then "
+                "signed-in users get 403 for those features.",
+                P.AUTHENTICATED_ROLE, ", ".join(missing),
+            )
 
     def bootstrap_superusers(self, identifiers: Iterable[str]) -> list[str]:
         """Promote configured admins **only when no superuser exists yet**.
@@ -663,15 +788,38 @@ class AuthzService:
     # ══════════════════════════════════════════════════════════════════
 
     def list_permissions(self) -> list[dict]:
+        """The catalogue, each row annotated with the drift signals the UI shows.
+
+        Two flags are computed per row:
+
+        * ``stale`` — the row exists in the database but no guard declares it
+          any more (a rename or a removed feature left it behind).  It stays
+          grantable and no route will ever check it.
+        * ``authenticated_pending`` — the code seeds the point to the
+          ``authenticated`` role, but that row does not hold it yet.  That is
+          exactly what an upgraded deployment looks like after a new point
+          ships, and it is otherwise invisible because the ``admin`` role is
+          topped up automatically and hides the gap.
+        """
+        catalog = set(P.seed_catalog())
+        expected = set(_AUTHENTICATED_SEED)
         session = self._s
         try:
             perms = session.query(Permission).order_by(Permission.module, Permission.code).all()
+            auth_held = self._role_permission_codes(session, P.AUTHENTICATED_ROLE)
             out = []
             for perm in perms:
                 count = session.query(RolePermission).filter(
                     RolePermission.permission_id == perm.id
                 ).count()
-                out.append(perm.to_dict(role_count=count))
+                row = perm.to_dict(role_count=count)
+                row["stale"] = perm.code not in catalog
+                row["expected_for_authenticated"] = perm.code in expected
+                row["held_by_authenticated"] = perm.code in auth_held
+                row["authenticated_pending"] = (
+                    perm.code in expected and perm.code not in auth_held
+                )
+                out.append(row)
             return out
         finally:
             session.close()
@@ -696,6 +844,37 @@ class AuthzService:
             session.close()
         return sorted(catalog - held)
 
+    def stale_permissions(self) -> list[str]:
+        """Catalogue rows no guard declares any more.
+
+        The mirror image of :meth:`orphan_permissions`.  ``sync_permissions``
+        never deletes, so a point that was renamed or whose feature was removed
+        stays in the catalogue: an administrator still sees it on ``/access``,
+        can still grant it, and no route will ever check it.  Logged as a
+        warning at startup.
+        """
+        catalog = set(P.seed_catalog())
+        session = self._s
+        try:
+            codes = {code for (code,) in session.query(Permission.code).all()}
+        finally:
+            session.close()
+        return sorted(codes - catalog)
+
+    @staticmethod
+    def _role_permission_codes(session, role_code: str) -> set[str]:
+        """Permission codes a built-in role holds.  Empty set when it is absent."""
+        role = session.query(Role).filter(Role.code == role_code).first()
+        if role is None:
+            return set()
+        return {
+            code for (code,) in
+            session.query(Permission.code)
+            .join(RolePermission, RolePermission.permission_id == Permission.id)
+            .filter(RolePermission.role_id == role.id)
+            .all()
+        }
+
 
 def bootstrap(authz: AuthzService, admin_users: Iterable[str] = ()) -> dict:
     """Idempotent startup seeding.
@@ -719,7 +898,23 @@ def bootstrap(authz: AuthzService, admin_users: Iterable[str] = ()) -> dict:
             ", ".join(orphans),
         )
 
-    return {"permissions": perms, "superusers": promoted, "orphans": orphans}
+    stale = authz.stale_permissions()
+    if stale:
+        # Drift in the other direction: a row survived a rename or a removed
+        # feature.  It is still offered on /access and can still be granted,
+        # but no guard checks it, so granting it changes nothing.
+        log.warning(
+            "Permission points no guard declares any more: %s — rename/remove "
+            "them, or drop the stale `permissions` rows; granting one has no effect",
+            ", ".join(stale),
+        )
+
+    return {
+        "permissions": perms,
+        "superusers": promoted,
+        "orphans": orphans,
+        "stale": stale,
+    }
 
 
 __all__ = ["AuthzService", "bootstrap"]

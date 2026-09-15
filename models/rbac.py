@@ -14,6 +14,11 @@ Split of authority (this is the important part):
 * ``user_roles`` /
   ``role_permissions`` — the actual grants.  Editing these is a database write,
   never a code change.
+
+Plus one bookkeeping table that is not part of the RBAC shape:
+``seed_migrations`` records which one-time seed top-ups have run, so a new
+permission point reaches an existing deployment exactly once without ever
+overwriting an administrator's edits.
 """
 
 from __future__ import annotations
@@ -155,4 +160,32 @@ class RolePermission(Base):
         return f"<RolePermission role={self.role_id} perm={self.permission_id}>"
 
 
-__all__ = ["Role", "Permission", "UserRole", "RolePermission", "utcnow", "iso"]
+class SeedMigration(Base):
+    """A one-time role-seed top-up that has already been applied.
+
+    ``sync_builtin_roles`` seeds a role only when its row is created, so a
+    permission point added to the seed data *later* never reaches an existing
+    deployment — that is how ``nodebuild:*`` and ``npm:download`` shipped
+    reachable by nobody but administrators.  Re-applying the whole seed on every
+    boot would instead resurrect a grant an administrator deliberately revoked.
+
+    So each top-up is named, listed in ``services.authz._SEED_TOPUPS``, and
+    recorded here the first time it runs.  A row in this table means "the code
+    has already handed this delta to the roles"; it is never deleted, so the
+    migration can never run twice.
+    """
+
+    __tablename__ = "seed_migrations"
+
+    code: Mapped[str] = Column(String(64), primary_key=True)
+    applied_at: Mapped[datetime] = Column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<SeedMigration {self.code}>"
+
+
+__all__ = [
+    "Role", "Permission", "UserRole", "RolePermission", "SeedMigration", "utcnow", "iso",
+]

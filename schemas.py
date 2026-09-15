@@ -345,6 +345,27 @@ class PermissionInfo(BaseModel):
         description="How many roles hold this point. 0 means no code path can reach "
                     "it except through a superuser — usually a typo.",
     )
+    stale: bool = Field(
+        default=False,
+        description="The row exists but no guard declares the code any more, so "
+                    "granting it changes nothing. Usually a renamed or removed point.",
+    )
+    expected_for_authenticated: bool = Field(
+        default=False,
+        description="The seed data hands this point to the auto-granted "
+                    "`authenticated` role.",
+    )
+    held_by_authenticated: bool = Field(
+        default=False,
+        description="The `authenticated` role holds it right now.",
+    )
+    authenticated_pending: bool = Field(
+        default=False,
+        description="Expected for ordinary users but not granted to them yet — the "
+                    "`authenticated` role needs the migration that ships with a new "
+                    "point. Invisible in `role_count`, because `admin` is topped up "
+                    "automatically and hides the gap.",
+    )
 
 
 class UserInfo(BaseModel):

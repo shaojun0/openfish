@@ -71,7 +71,14 @@ def _actor() -> str:
     description=(
         "Every permission point the server knows about, with the number of roles "
         "holding it. A point with `role_count: 0` cannot be reached by any role — "
-        "usually a typo in a route guard, or a grant somebody removed."
+        "usually a typo in a route guard, or a grant somebody removed.\n\n"
+        "Three drift flags ride along, because `role_count` alone cannot see them: "
+        "`stale` (the row survives a rename but no guard declares it any more), "
+        "`expected_for_authenticated` vs `held_by_authenticated`, and their "
+        "combination `authenticated_pending` — a point ordinary users are supposed "
+        "to have but the `authenticated` role was never migrated to, which is "
+        "invisible in `role_count` because the `admin` role is topped up "
+        "automatically."
     ),
     tags=["Access control"],
     responses={"200": ok("Permission points", array_of("PermissionInfo")), **_errors()},

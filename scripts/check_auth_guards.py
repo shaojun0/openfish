@@ -55,16 +55,13 @@ GUARD_NAMES = frozenset({
 #: list is the only thing standing between "intentionally public" and
 #: "accidentally unguarded".
 PUBLIC_ENDPOINTS: dict[str, str] = {
-    # The SPA shell is HTML; it holds no data.  The JSON behind it lives under
-    # /api/v1 and is guarded per blueprint.
-    "spa.index": "SPA shell",
-    "spa.page": "SPA shell",
-    "spa.fallback": "SPA shell",
-    # The compiled Vue bundle.  Narrow by construction: routes/spa.py serves
-    # only `static/dist/*`, never the whole `static/` tree — which matters,
-    # because `static/<ecosystem>/` holds the Jinja templates that
-    # `services/templates.py` loads and `static/certs/` was the TLS drop point.
-    "spa.dist_asset": "the SPA bundle a browser loads before it can log in",
+    # NOTE: the SPA is deliberately absent.  The shell, its catch-all and its
+    # bundle used to be listed here as "HTML, holds no data".  That is true, but
+    # "anonymous may read the docs and nothing else" has to include not opening
+    # the application at all, so `spa_bp` now carries a blueprint-wide
+    # `require_auth()` (routes/__init__.py).  Adding an endpoint back here would
+    # undo that decision — the runtime probe below fails if one is reachable
+    # anonymously and not listed, which is the point.
     # Contract publication — describes routes, never serves registry data.
     "discovery.openapi_json": "publishes the API contract",
     "discovery.docs": "renders the API contract",

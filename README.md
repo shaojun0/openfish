@@ -203,7 +203,7 @@ Nested fields can also be addressed with the `__` delimiter, e.g.
 
 | Variable                 | Description                                                       |
 | ------------------------ | ----------------------------------------------------------------- |
-| `AUTH_ENABLED`           | Master switch (default `true`)                                    |
+| `AUTH_ENABLED`           | Master switch (default `true`). Setting it to `false` makes credentials **optional, not ignored**: a request that presents none stays anonymous and is authorized by the `anonymous` role, which holds `doc:read` only. So "off" means *documentation-only*, not *open* — mirrors, catalogues and the web console still answer `403` |
 | `AUTH_USERNAME`          | HTTP Basic username                                               |
 | `AUTH_ASSERT`            | HTTP Basic password *(legacy name; leave empty to disable Basic)*  |
 | `OAUTH2_INTROSPECT_URL`  | RFC 7662 introspection endpoint — empty disables OAuth2 entirely  |
@@ -288,20 +288,34 @@ The permission points shipped today, and the routes that enforce them:
 | `model:write` | `POST /api/v1/models`, `PUT`/`DELETE /api/v1/models/<name>`, `POST /api/v1/models/probe`, `POST /api/v1/models/<name>/check` — adds, edits, removes and re-probes model routes |
 | `doc:read` | `GET /api/v1/docs*`, `/docs/<ecosystem>` (308 → `/docs/<ecosystem>/`), `/docs/<ecosystem>/`, `/docs/<ecosystem>/<id>`, `/docs/<ecosystem>/<id>/assets/<name>` — **everything under `/docs/`** |
 | `doc:upload` | `POST`/`PUT`/`DELETE` on `/api/v1/docs/<ecosystem>[/<id>[/assets/<name>]]` and `POST /api/v1/docs/<ecosystem>/<id>/preview` — creates, edits and deletes documents and their assets |
+| `app:read` | the browser console itself: `/`, every SPA route, the history-mode catch-all and `/static/dist/*`. It gates the **shell only** — each view's data is still checked by that ecosystem's own point. Held by `authenticated`; deliberately absent from `anonymous`, which is what keeps the console closed while `AUTH_ENABLED=false` |
 
-> **Adding a point is a migration.** The per-role seed data above applies only
-> when a built-in role is *first created*; an existing `authenticated` row is
-> never topped up, precisely so an administrator's edits survive. So when a
-> release introduces a point that gates previously-open routes — `npm:download`
-> being the most recent — grant it explicitly on `/access` (or with
-> `AuthzService.set_role_permissions`) for every role that should keep that
-> access, or its holders will start seeing `403`.
+> **Adding a point is a migration — and the server now applies it for you.**
+> The per-role seed data above applies only when a built-in role is *first
+> created*, so a point added to a seed in a later release would never reach an
+> existing `authenticated` row. `npm:download`, `nodebuild:*` and `app:read` all
+> shipped that way. Each of them is now listed in
+> `services.authz._SEED_TOPUPS` as a named one-time delta; `sync_builtin_roles`
+> grants it on the next boot and records it in the `seed_migrations` table, so it
+> runs exactly once. An upgrade therefore needs no manual step.
+>
+> The design is deliberately additive: a top-up names the exact points one
+> release added to one role, so it cannot resurrect a grant an administrator
+> removed from something else. If a seeded point is *still* missing after the
+> top-ups run — because somebody revoked it — startup logs a
+> `does not hold seeded point(s)` warning and `/access` marks the row. `admin` is
+> topped up automatically, which is why the gap is invisible there: the `admin`
+> role holding a point proves only that the point exists, never that ordinary
+> users can reach the feature. Which points a mirror ecosystem is *supposed* to
+> give every signed-in user, and which the anonymous role gets, are deliberate
+> decisions recorded in `scripts/check_permission_catalog.py`; a new built-in
+> point nobody has classified fails that gate.
 
 ### Built-in roles
 
 | Role | Behaviour |
 | ---- | --------- |
-| `anonymous` | Flagged `is_anonymous_default` — applies to requests that never authenticated (only reachable with `AUTH_ENABLED=false`) |
+| `anonymous` | Flagged `is_anonymous_default` — applies to requests that never authenticated (only reachable with `AUTH_ENABLED=false`). Holds **`doc:read` and nothing else**: an unauthenticated caller may read `/docs/*` and is refused everything else, including the web console (`app:read`) |
 | `authenticated` | Flagged `auto_grant` — handed to every account the moment it is created |
 | `admin` | Flagged `is_builtin` — always holds every permission point, and cannot be deleted |
 
@@ -642,6 +656,7 @@ on demand (and caches it), so opening the page never hashes gigabytes.
 | Method | Path                                          | Purpose                              |
 | ------ | --------------------------------------------- | ------------------------------------ |
 | GET    | `/health`                                     | Liveness probe (no auth)             |
+| GET    | `/certs/ca_chain.pem`                         | Private CA chain (`TLS_CA_FILE`, no auth) |
 | GET    | `/simple/`                                     | Package index (PEP 503 / PEP 691)    |
 | GET    | `/simple/<package>/`                           | Files for one package                |
 | GET    | `/simple/<package>/<filename>`                 | Download a file                      |
@@ -737,6 +752,22 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 `/admin` and `/access` all serve the SPA shell. A deep link such as `/api-keys`
 is handled by Flask's history-mode fallback, so links can be shared and
 bookmarked.
+
+**The console is not anonymous.** Every one of those routes, the catch-all and
+the bundle are behind `app:read`, so a visitor with no session is refused and a
+browser is redirected into the login flow. That is stronger than requiring
+authentication: with `AUTH_ENABLED=false` no credential is demanded, so
+`require_auth` would let an anonymous request through — `app:read` is a point the
+`anonymous` role does not hold, which is what actually keeps the UI shut. The
+public way to read the handbook without signing in is the server-rendered
+`/docs/<ecosystem>/` surface, not the SPA.
+
+The shell's JavaScript and CSS come from **`GET /static/dist/<path>`** (also
+behind `app:read`). Flask's built-in static handler is disabled
+(`static_folder=None`), so the rest of `static/` is not reachable: in particular
+the Jinja templates in `static/<ecosystem>/` that `services/templates.py`
+loads. `GET /certs/ca_chain.pem` is the one anonymous file route, because a
+client must be able to fetch the CA before it can trust the mirror at all.
 
 ### Discovery surface (anonymous)
 
@@ -925,11 +956,21 @@ Adding a feature usually means one new module in `extensions/`, one blueprint in
 
 - **No credentials live in this repository.** Secrets are injected through
   environment variables; `.env` and its Docker counterpart are git-ignored.
-- **TLS material is not shipped.** `*.pem`, `*.key` and `static/certs/` are
-  ignored. To serve a private CA to clients, drop your chain at
+- **TLS material is not shipped and is not in the web root.** `*.pem`, `*.key`
+  and `certs/` are ignored. To serve a private CA to clients, drop your chain at
   `docker/certs/ca_chain.pem` and uncomment the corresponding mount in
-  `docker/docker-compose.yml`; the dashboard links to it at
-  `/static/certs/ca_chain.pem`.
+  `docker/docker-compose.yml` — it lands on `/app/certs/ca_chain.pem`
+  (`TLS_CA_FILE`) and is published at **`GET /certs/ca_chain.pem`**. That route
+  serves exactly that one file: a private key sitting next to it is not
+  reachable. (`static/certs/` used to be the drop point; it is gone, because
+  Flask's blanket static handler would have served anything put there.)
+- **`static/` is not a public directory — only `static/dist/` is.** The built
+  Vue bundle is served by one explicit route, `GET /static/dist/<path>`
+  (`spa.dist_asset`), which a browser needs before it can log in. Everything
+  else under `static/` — the Jinja templates in `static/<ecosystem>/` that
+  `services/templates.py` reads, for instance — is **not** reachable over HTTP.
+  `scripts/check_auth_guards.py` fails the build if a blanket `static` handler
+  is ever reintroduced.
 - Generate `SECRET_KEY` with:
   `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
 - **OAuth2 introspection verifies TLS.** Set `OAUTH2_CA_BUNDLE` when the
