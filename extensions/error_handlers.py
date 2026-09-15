@@ -18,7 +18,7 @@ from auth.oauth import get_authorize_url
 #: makes them authenticate instead.
 _API_BLUEPRINTS = {
     "session", "api_keys", "admin", "access",
-    "npm", "docker", "debian", "hub",
+    "npm", "docker", "debian", "hub", "docs",
 }
 
 

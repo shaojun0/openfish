@@ -24,6 +24,7 @@ export default {
     nodeBuilds: 'Node Builds',
     index: 'Python Index',
     docs: 'API Docs',
+    doc: 'Docs',
     groupPython: 'Python',
     groupNpm: 'npm',
     groupDocker: 'Docker',
@@ -216,6 +217,7 @@ export default {
       build: 'Builds',
       key: 'API keys',
       admin: 'Administration',
+      doc: 'Docs',
       other: 'Other',
     },
     roles: {
@@ -464,6 +466,28 @@ export default {
     missingDesc:
       'The server could not find {root}. Check {env}, or copy release directories into that path.',
     loadFailed: 'Failed to load the build list',
+  },
+
+  docs: {
+    title: '{ecosystem} docs',
+    description:
+      "This ecosystem's Markdown documentation. Everyone can read and download it; only an administrator can change a document, by uploading a Markdown file.",
+    upload: 'Upload Markdown',
+    download: 'Download',
+    staticIndex: 'Static index',
+    documents: 'Documents',
+    selectOne: 'Pick a document on the left to start reading.',
+    empty: 'No documents for this ecosystem yet. An administrator can publish the first one with “Upload Markdown”.',
+    onlyMarkdown: 'Only .md Markdown files can be uploaded',
+    uploaded: 'Published {name}',
+    uploadFailed: 'Failed to upload the document',
+    deleteConfirm: 'Delete the document “{name}”? This cannot be undone.',
+    deleted: 'Document deleted',
+    deleteFailed: 'Failed to delete the document',
+    adminHintTitle: 'Administrators maintain the documentation',
+    adminHint:
+      'Uploading a Markdown file with the same name replaces the document. Everyone else can only read and download it.',
+    loadFailed: 'Failed to load the documentation',
   },
 
   notFound: {

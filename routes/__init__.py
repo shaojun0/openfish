@@ -12,6 +12,7 @@ Layout
 ``/npm/*``            npm index, ``/-/all``, ``/-/ping`` + tarball downloads
 ``/docker/*``         docker index, ``/v2/_catalog`` + image tarball downloads
 ``/debian/*``         debian index, flat ``Packages`` + .deb downloads
+``/docs/<eco>/*``     per-ecosystem Markdown documentation (index + downloads)
 ``/openapi.json``     OpenAPI 3.1 description; ``/docs`` and ``/llms.txt`` alongside
 ``/auth/*``           OAuth2 login flow
 ``/*``                the SPA shell (see ``routes/spa.py``)
@@ -39,6 +40,7 @@ def register_all(app):
     from routes.npm import npm_bp
     from routes.docker import docker_bp
     from routes.debian import debian_bp
+    from routes.docs import docs_bp
 
     prefix = settings.server.route_prefix
     api = prefix + "/api/v1"
@@ -89,6 +91,7 @@ def register_all(app):
     app.register_blueprint(npm_bp, url_prefix=prefix)
     app.register_blueprint(docker_bp, url_prefix=prefix)
     app.register_blueprint(debian_bp, url_prefix=prefix)
+    app.register_blueprint(docs_bp, url_prefix=prefix)
 
     # ── SPA shell. Machine routes above win by rule specificity, so this
     #    only ever handles browser-facing URLs.

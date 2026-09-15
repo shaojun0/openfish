@@ -24,6 +24,7 @@ export default {
     nodeBuilds: 'Node 构建',
     index: 'Python 索引',
     docs: '接口文档',
+    doc: '文档',
     groupPython: 'Python 生态',
     groupNpm: 'npm 生态',
     groupDocker: 'Docker 生态',
@@ -213,6 +214,7 @@ export default {
       build: '构建',
       key: '密钥',
       admin: '管理',
+      doc: '文档',
       other: '其他',
     },
     roles: {
@@ -450,6 +452,28 @@ export default {
     empty: '镜像目录中还没有构建产物。',
     missingDesc: '服务端未找到目录 {root}。请确认 {env} 配置，或把发布目录放入该路径。',
     loadFailed: '加载构建列表失败',
+  },
+
+  docs: {
+    title: '{ecosystem} 生态文档',
+    description:
+      '本生态的 Markdown 文档：任何人可查看和下载，仅管理员可上传 Markdown 文件来修改内容。',
+    upload: '上传 Markdown',
+    download: '下载原文',
+    staticIndex: '静态索引',
+    documents: '文档列表',
+    selectOne: '从左侧选择一篇文档开始阅读。',
+    empty: '该生态暂无文档。管理员可点击“上传 Markdown”发布第一篇。',
+    onlyMarkdown: '只能上传 .md 格式的 Markdown 文件',
+    uploaded: '已发布 {name}',
+    uploadFailed: '上传文档失败',
+    deleteConfirm: '确定要删除文档“{name}”吗？此操作不可撤销。',
+    deleted: '文档已删除',
+    deleteFailed: '删除文档失败',
+    adminHintTitle: '管理员可维护文档',
+    adminHint:
+      '上传同名 .md 文件即可覆盖文档内容；其他用户只能查看和下载，不能修改。',
+    loadFailed: '加载文档失败',
   },
 
   notFound: {

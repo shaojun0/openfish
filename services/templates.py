@@ -14,6 +14,7 @@ namespaces, so a new index element goes next to the siblings it belongs to::
     static/npm/       the npm catalog index
     static/docker/    the docker artifact index
     static/debian/    the debian package index
+    static/docs/      the per-ecosystem Markdown documentation index
 
 ``services/hub.py`` produces the data; the Jinja templates here only render it.
 """
@@ -27,6 +28,7 @@ _TOOLS = "static/tools"
 _NPM = "static/npm"
 _DOCKER = "static/docker"
 _DEBIAN = "static/debian"
+_DOCS = "static/docs"
 
 
 @lru_cache(maxsize=16)
@@ -79,3 +81,9 @@ def docker_index() -> str:
 
 def debian_index() -> str:
     return _load(f"{_DEBIAN}/index.html")
+
+
+# ── Per-ecosystem documentation ──────────────────────────────────────
+
+def docs_index() -> str:
+    return _load(f"{_DOCS}/index.html")

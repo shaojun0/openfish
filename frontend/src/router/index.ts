@@ -59,6 +59,14 @@ const routes: RouteRecordRaw[] = [
         meta: { titleKey: 'nav.debian', icon: 'Monitor' },
       },
       {
+        // One documentation leaf per ecosystem — the sidebar adds
+        // `/docs/<ecosystem>` to every ecosystem group.
+        path: 'docs/:ecosystem',
+        name: 'docs',
+        component: () => import('@/views/DocsView.vue'),
+        meta: { titleKey: 'nav.doc', icon: 'Document', requiresPermission: 'doc:read' },
+      },
+      {
         path: 'api-keys',
         name: 'api-keys',
         component: () => import('@/views/ApiKeysView.vue'),

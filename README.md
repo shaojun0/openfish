@@ -25,6 +25,12 @@ the codebase.
   Docker and Debian are read-through proxies: the local directory is the first
   source, an optional upstream mirror is fetched on demand and cached — see
   [Artifact hub](#artifact-hub-tools--npm--docker--debian--model-routing).
+- **Ecosystem documentation** — every ecosystem group owns its own
+  documentation leaf (`/docs/python`, `/docs/npm`, `/docs/docker`, …) holding
+  that ecosystem's Markdown documents, stored per ecosystem under `DOCS_DIR/`.
+  Any signed-in user can read and download them; only an administrator can
+  change a document, by **uploading a `.md` file** — there is no in-browser
+  editor. See [Ecosystem documentation](#ecosystem-documentation).
 - **API keys** — issue, list, revoke and track per-key usage from a web
   dashboard; keys are stored hashed in SQLite.
 - **Pluggable authentication** — HTTP Basic, twine-style `__token__` Basic,
@@ -181,6 +187,7 @@ Templates are provided at `.env.example` (local development) and
 | `DEBIAN_CACHE_MAX_MB`   | `256`                  | Byte budget for the apt metadata cache             |
 | `DEBIAN_METADATA_TTL`   | `300`                  | Seconds a proxied `Release`/`Packages` document is trusted |
 | `MODELS_FILE`           | `config/model_routes.json` | Model-routing table for downstream DSH         |
+| `DOCS_DIR`              | `docs`                 | Per-ecosystem Markdown documentation root — one sub-directory per ecosystem |
 
 Nested fields can also be addressed with the `__` delimiter, e.g.
 `SERVER__PORT=9091`.
@@ -265,6 +272,8 @@ The permission points shipped today, and the routes that enforce them:
 | `admin:view` | `/api/v1/admin/stats` |
 | `admin:refresh` | `POST /api/v1/admin/refresh-stats` |
 | `admin:roles` | `/api/v1/admin/{roles,permissions,users}` |
+| `doc:read` | `GET /api/v1/docs*`, `/docs/<ecosystem>/`, `/docs/<ecosystem>/<name>` |
+| `doc:upload` | `POST /api/v1/docs/<ecosystem>`, `DELETE /api/v1/docs/<ecosystem>/<name>` — publishes by uploading a Markdown file |
 
 ### Built-in roles
 
@@ -345,6 +354,7 @@ first, and an optional upstream mirror is fetched on demand and cached:
 | Debian       | `/debian`  | `DEBIAN_DIR`         | `DEBIAN_UPSTREAM`   | flat `Packages` + apt mirror proxy (`dists/`, `pool/`) |
 | 工具 / Tools | `/tools`   | `TOOLS_DIR`          | —                   | direct file downloads |
 | 模型路由     | `/models`  | `MODELS_FILE`        | —                   | publish-only JSON table |
+| 文档 / Docs  | `/docs/<eco>` | `DOCS_DIR/<eco>`  | —                   | Markdown documentation — read by everyone, **uploaded by admins** |
 
 The Python and npm pages each carry a **dropdown** that switches the page
 between its two sub-elements — packages vs. prebuilt builds for Python, npm
@@ -426,11 +436,53 @@ JSON document describing the endpoints a downstream intranet DSH may talk to.
 This server publishes the table; it does not proxy inference. The page renders a
 table plus an alias-expanded snippet ready to paste into a DSH config.
 
-All the catalogs are file-backed and read-only over HTTP: there is no upload
-API, by design — but *serving* is not read-only any more, so a package installed
-through a proxy does leave a cached copy behind. The Docker image creates
-`/app/tools`, `/app/npm`, `/app/node-builds`, `/app/docker-images` and
-`/app/debian`, and
+### Ecosystem documentation
+
+Every ecosystem group in the sidebar carries a **documentation leaf of its own**
+— `/docs/python`, `/docs/npm`, `/docs/docker`, `/docs/debian`, `/docs/tools` and
+`/docs/models` — rather than one shared entry at the top of the menu. The
+documents are plain Markdown and the storage mirrors the menu exactly: each
+ecosystem owns a sub-directory, and nothing lives in the top-level directory
+itself:
+
+```
+docs/
+  python/   getting-started.md
+  npm/      publishing.md
+  docker/   offline-images.md
+  debian/   apt-sources.md
+  tools/    authoring-tools.md
+  models/   dsh-routing.md
+```
+
+**Who may do what.** Reading and downloading require `doc:read`, which the
+built-in `authenticated` role holds — every signed-in user can read the
+handbook. Changing a document requires `doc:upload`, which only the built-in
+`admin` role holds: an administrator publishes by *uploading a `.md` file*
+(through the page's upload button, or `POST /api/v1/docs/<ecosystem>`), and
+uploading an existing filename replaces it. There is deliberately no in-browser
+editor, so a document's history is exactly its sequence of uploaded files.
+
+**Reading.** The SPA renders the document; the server does the Markdown → HTML
+conversion with a small, dependency-free renderer (`services/markdown.py`) that
+HTML-escapes the source *before* emitting any markup, so raw HTML in a document
+can never become live markup. Each document also has two raw forms:
+
+* `GET /docs/<ecosystem>/` — the server-rendered index (HTML, or JSON with
+  `?format=json`), the docs counterpart of `/tools/`.
+* `GET /docs/<ecosystem>/<name>` — the raw `.md` (`?download=1` for an
+  attachment), also available as JSON via
+  `GET /api/v1/docs/<ecosystem>/<name>`.
+
+The directory is the catalog, so a document that an administrator uploads is
+visible on the next request — no restart, no database.
+
+All the catalogs are file-backed and read-only over HTTP **except this one**:
+there is no upload API for tools, npm, Docker or Debian, by design — but a
+package installed through a proxy does leave a cached copy behind, and an
+administrator can publish documentation. The Docker image creates
+`/app/tools`, `/app/npm`, `/app/node-builds`, `/app/docker-images`,
+`/app/debian` and `/app/docs`, and
 `docker/docker-compose.yml` bind-mounts the repository copies so an operator can
 edit them in place; the caches live under `/app/data/cache`, on the same
 persistent volume as the API-key database.
@@ -450,6 +502,7 @@ in a new tab. Templates are grouped by ecosystem under `static/`:
 | npm    | `/npm/` | `npm/index.html` lists local packages | `?format=json` → the `/-/all` document |
 | Docker | `/docker/` | `docker/index.html` lists images and config snippets | `?format=json` → the `/api/v1/docker` document |
 | Debian | `/debian/` | `debian/index.html` lists `.deb` files | `?format=json` → the `/api/v1/debian` document |
+| Docs   | `/docs/<eco>/` | `docs/index.html` lists an ecosystem's Markdown documents | `?format=json` → the `/api/v1/docs/<eco>` document |
 
 Python and tools follow the content-negotiation convention already used by
 `/simple/`. npm has no official HTML index, so the JSON side follows the two
@@ -597,10 +650,16 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 | GET    | `/api/v1/docker`                  | Local docker catalog (docker:read)       |
 | GET    | `/api/v1/debian`                  | Local debian catalog (debian:read)       |
 | GET    | `/api/v1/models`                  | Model-routing table (model:read)         |
+| GET    | `/api/v1/docs`                    | Per-ecosystem document counts (doc:read) |
+| GET    | `/api/v1/docs/<ecosystem>`        | One ecosystem's document catalog (doc:read) |
+| GET    | `/api/v1/docs/<ecosystem>/<name>` | Document source + rendered HTML (doc:read) |
+| POST   | `/api/v1/docs/<ecosystem>`        | Upload/replace a `.md` document (doc:upload) |
+| DELETE | `/api/v1/docs/<ecosystem>/<name>` | Delete a document (doc:upload)           |
 
 ### Browser-facing
 
-`/`, `/packages`, `/npm`, `/docker`, `/debian`, `/tools`, `/models`, `/api-keys`,
+`/`, `/packages`, `/npm`, `/docker`, `/debian`, `/tools`, `/models`,
+`/docs/<ecosystem>`, `/api-keys`,
 `/admin` and `/access` all serve the SPA shell. A deep link such as `/api-keys`
 is handled by Flask's history-mode fallback, so links can be shared and
 bookmarked.
@@ -736,13 +795,15 @@ config/                pydantic-settings models (server, storage, auth, security
 extensions/            pluggable infrastructure + topological init registry
 routes/                Flask blueprints (pypi, python_build, node_build, api_keys,
                        admin, access, session, discovery, spa, auth) plus one per
-                       hub ecosystem: hub (tools, models), npm, docker, debian
+                       hub ecosystem: hub (tools, models), npm, docker, debian,
+                       docs (per-ecosystem Markdown documentation)
 openapi/               API description: metadata registry, spec builder, renderers
 auth/                  guards, decorators, permission points, API keys, OAuth2
 index/                 package / interpreter-build discovery and indexing
                        (packages.py, python_build.py, node_build.py)
 models/                SQLAlchemy models (users, roles, permissions, API keys, stats)
-services/              authorization service, hub catalogs, build-mirror catalogs
+services/              authorization service, hub catalogs, per-ecosystem Markdown
+                       documentation (docs.py, markdown.py), build-mirror catalogs
                        (build_mirror.py), the shared upstream proxy/cache
                        (upstream.py) and the per-ecosystem registry adapters
                        (npm_registry, docker_registry, debian_apt), templates,
@@ -754,12 +815,13 @@ scripts/               verification gates (check_openapi, check_contract,
                        check_docker_proxy, check_debian_proxy)
 frontend/              Vue 3 + Vite + Element Plus SPA (build-time only)
 static/                index templates grouped by ecosystem (python/ node/ tools/
-                       npm/) + the built SPA in static/dist/
+                       npm/ docs/) + the built SPA in static/dist/
 tools/                 artifact hub — tools/<category>/<file> + catalog.json
 npm/                   artifact hub — local npm tarballs + catalog.json
 node-builds/           artifact hub — nodejs.org/dist-shaped Node.js mirror
 docker-images/         artifact hub — image tarballs + compose/Dockerfile
 debian/                artifact hub — local .deb files + apt snippets
+docs/                  artifact hub — docs/<ecosystem>/*.md documentation
 docker/                docker-compose.yml and its .env template
 ```
 

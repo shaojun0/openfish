@@ -32,6 +32,7 @@ DOCUMENTED_PREFIXES: tuple[str, ...] = (
     "/npm/",
     "/docker/",
     "/debian/",
+    "/docs/",
     "/health",
 )
 
@@ -50,6 +51,7 @@ TAGS: list[dict[str, str]] = [
     {"name": "npm", "description": "npm registry protocol and local package catalog, consumed by `npm`/`pnpm`."},
     {"name": "Docker", "description": "Docker Registry v2 pull protocol and offline image catalog, consumed by `docker`/`skopeo`."},
     {"name": "Debian", "description": "Debian/apt repository — flat local index plus a read-through mirror proxy."},
+    {"name": "Docs", "description": "Per-ecosystem Markdown documentation. Reading requires `doc:read`; uploading or deleting requires `doc:upload`."},
     {"name": "Upload", "description": "Publish packages, as `twine` does."},
 ]
 
@@ -206,9 +208,22 @@ def _build_schemas(paths: dict[str, Any]) -> dict[str, Any]:
     return schemas
 
 
+def _is_machine_rule(rule) -> bool:
+    """Whether *rule* belongs to the machine contract.
+
+    The SPA shell is deliberately out of scope even when one of its history-mode
+    URLs shares a prefix with a documented namespace (``/docs/<ecosystem>`` is
+    the human page next to the machine index ``/docs/<ecosystem>/``); it serves
+    the same HTML for every route and holds no registry data.
+    """
+    if rule.endpoint == "static" or rule.endpoint.startswith("spa."):
+        return False
+    return str(rule).startswith(DOCUMENTED_PREFIXES)
+
+
 def _iter_documented(app: Flask) -> Iterable[tuple[Any, str, dict[str, Any]]]:
     for rule in app.url_map.iter_rules():
-        if not str(rule).startswith(DOCUMENTED_PREFIXES):
+        if not _is_machine_rule(rule):
             continue
         view = app.view_functions.get(rule.endpoint)
         meta = operation_of(view) if view is not None else None
@@ -223,11 +238,11 @@ def undocumented_endpoints(app: Flask) -> list[str]:
 
     An empty list means the spec covers the whole contract.  Used by
     ``scripts/check_openapi.py`` so that adding a route without documenting it
-    fails the check rather than silently vanishing from `/openapi.json`.
+    fails the check rather than silently vanishing from ``/openapi.json``.
     """
     missing: list[str] = []
     for rule in app.url_map.iter_rules():
-        if rule.endpoint == "static" or not str(rule).startswith(DOCUMENTED_PREFIXES):
+        if not _is_machine_rule(rule):
             continue
         view = app.view_functions.get(rule.endpoint)
         if operation_of(view) is None:

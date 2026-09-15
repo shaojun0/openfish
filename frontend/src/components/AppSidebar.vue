@@ -19,6 +19,8 @@ interface NavItem {
   icon: string
   /** Set for machine-facing / static index links — opened in a new tab. */
   href?: string
+  /** When set, the item is hidden unless the caller holds this permission. */
+  permission?: string
 }
 
 interface NavGroup {
@@ -34,21 +36,36 @@ interface NavGroup {
  * Sidebar taxonomy
  * ----------------
  * The menu is grouped by ecosystem, and **every entry that belongs to an
- * ecosystem lives inside its group** — the rich SPA page and the machine-facing
- * index elements alike:
+ * ecosystem lives inside its group** — the rich SPA page, the machine-facing
+ * index elements and the group's own documentation leaf alike:
  *
- *   Python 生态 → 包管理 (SPA) · Python 索引 (/simple/) · Python 构建
- *   npm 生态    → npm 目录 (SPA) · npm 静态索引 (/npm/) · Node 构建
- *   Docker 生态 → Docker 目录 (SPA) · Docker 静态索引 (/docker/)
- *   Debian 生态 → Debian 目录 (SPA) · Debian 静态索引 (/debian/)
- *   工具        → 工具目录 (SPA) · 工具静态索引 (/tools/)
- *   模型路由    → 模型路由 (SPA) · 路由表 JSON (/api/v1/models)
+ *   Python 生态 → 包管理 (SPA) · Python 索引 (/simple/) · Python 构建 · 文档
+ *   npm 生态    → npm 目录 (SPA) · npm 静态索引 (/npm/) · Node 构建 · 文档
+ *   Docker 生态 → Docker 目录 (SPA) · Docker 静态索引 (/docker/) · 文档
+ *   Debian 生态 → Debian 目录 (SPA) · Debian 静态索引 (/debian/) · 文档
+ *   工具        → 工具目录 (SPA) · 工具静态索引 (/tools/) · 文档
+ *   模型路由    → 模型路由 (SPA) · 路由表 JSON (/api/v1/models) · 文档
  *   系统        → API 密钥 · 系统统计 · 访问控制 · 接口文档
+ *
+ * "文档" is a **leaf node inside each ecosystem group**, not one shared entry at
+ * the top of the menu: each ecosystem owns its own Markdown documentation
+ * (`/docs/<ecosystem>`) and the server stores it under `DOCS_DIR/<ecosystem>/`.
+ * Reading needs `doc:read`; uploading to change the content needs `doc:upload`.
  *
  * Items with an `href` are machine-facing (no JavaScript) and open in a new
  * tab; the rest are SPA routes.
  */
 const home: NavItem = { index: '/', titleKey: 'nav.home', icon: 'Odometer' }
+
+/** The documentation leaf every ecosystem group carries. */
+function docItem(ecosystem: string): NavItem {
+  return {
+    index: `/docs/${ecosystem}`,
+    titleKey: 'nav.doc',
+    icon: 'Document',
+    permission: 'doc:read',
+  }
+}
 
 const groups = computed<NavGroup[]>(() => {
   const groups: NavGroup[] = [
@@ -66,6 +83,7 @@ const groups = computed<NavGroup[]>(() => {
           titleKey: 'nav.builds',
           icon: 'Download',
         },
+        docItem('python'),
       ],
     },
     {
@@ -82,6 +100,7 @@ const groups = computed<NavGroup[]>(() => {
           titleKey: 'nav.nodeBuilds',
           icon: 'Download',
         },
+        docItem('npm'),
       ],
     },
     {
@@ -92,6 +111,7 @@ const groups = computed<NavGroup[]>(() => {
       items: [
         { index: '/docker', titleKey: 'nav.docker', icon: 'Ship' },
         { index: '/docker/', href: '/docker/', titleKey: 'nav.dockerIndex', icon: 'Link' },
+        docItem('docker'),
       ],
     },
     {
@@ -102,6 +122,7 @@ const groups = computed<NavGroup[]>(() => {
       items: [
         { index: '/debian', titleKey: 'nav.debian', icon: 'Monitor' },
         { index: '/debian/', href: '/debian/', titleKey: 'nav.debianIndex', icon: 'Link' },
+        docItem('debian'),
       ],
     },
     {
@@ -112,6 +133,7 @@ const groups = computed<NavGroup[]>(() => {
       items: [
         { index: '/tools', titleKey: 'nav.tools', icon: 'Tools' },
         { index: '/tools/', href: '/tools/', titleKey: 'nav.toolsIndex', icon: 'Link' },
+        docItem('tools'),
       ],
     },
     {
@@ -127,6 +149,7 @@ const groups = computed<NavGroup[]>(() => {
           titleKey: 'nav.modelsJson',
           icon: 'Document',
         },
+        docItem('models'),
       ],
     },
     {
@@ -147,7 +170,13 @@ const groups = computed<NavGroup[]>(() => {
   if (session.can('admin:roles')) {
     system.items.push({ index: '/access', titleKey: 'nav.access', icon: 'Lock' })
   }
-  return groups.filter((group) => !group.permission || session.can(group.permission))
+  return groups
+    .filter((group) => !group.permission || session.can(group.permission))
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => !item.permission || session.can(item.permission)),
+    }))
+    .filter((group) => group.items.length > 0)
 })
 
 /** Every visible item, for turning a menu selection back into an action. */

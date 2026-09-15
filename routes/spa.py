@@ -31,6 +31,7 @@ _RESERVED_PREFIXES = (
     "npm/",
     "docker/",
     "debian/",
+    "docs/",
     "static/",
     "auth/",
     "health",
@@ -75,7 +76,8 @@ def index():
 @spa_bp.route("/docker")
 @spa_bp.route("/debian")
 @spa_bp.route("/models")
-def page():
+@spa_bp.route("/docs/<ecosystem>")
+def page(ecosystem: str | None = None):
     return _shell()
 
 

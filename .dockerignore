@@ -47,6 +47,9 @@ tests/
 
 # ── Data / archives / docs ──────────────────────────────────────────
 packages/
+# Ecosystem documentation is uploaded at runtime and bind-mounted; the image
+# creates an empty /app/docs rather than baking the repository's samples in.
+docs/
 # Interpreter mirrors hold multi-gigabyte archives and are bind-mounted at
 # runtime; never send them as build context.
 node-builds/

@@ -6,6 +6,9 @@ directory on disk (or a small JSON file) rather than a database:
 
 * ``tools_dir``    — a directory tree whose sub-directories are *categories*
   and whose files are the downloadable tools themselves.
+* ``docs_dir``     — one sub-directory per ecosystem holding that ecosystem's
+  Markdown documentation. Read-only over HTTP except for the admin-only
+  upload/delete endpoints.
 * ``npm_dir``      — the local npm cache/registry directory.  A read-through
   proxy in front of ``npm_upstream`` serves the registry protocol, so a client
   pointed at ``npm config set registry`` can install anything the upstream
@@ -40,6 +43,16 @@ class HubConfig(BaseSettings):
         description=(
             "Root of the tools catalog. Each immediate sub-directory is a "
             "category; files below a category are downloadable tools."
+        ),
+    )
+    docs_dir: str = Field(
+        default="docs",
+        description=(
+            "Root of the per-ecosystem Markdown documentation. Each immediate "
+            "sub-directory is one ecosystem (python/, npm/, docker/, debian/, "
+            "tools/, models/) and holds that ecosystem's *.md documents. The "
+            "directory is the catalog: an administrator publishes by uploading "
+            "a .md file, everyone else reads and downloads it."
         ),
     )
     npm_dir: str = Field(

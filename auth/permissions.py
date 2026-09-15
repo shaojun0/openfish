@@ -63,6 +63,10 @@ DEBIAN_DOWNLOAD = "debian:download"
 # Artifact hub — model routing table for downstream DSH
 MODEL_READ = "model:read"
 
+# Artifact hub — per-ecosystem Markdown documentation
+DOC_READ = "doc:read"
+DOC_UPLOAD = "doc:upload"
+
 # API key self-service
 KEY_LIST = "key:list"
 KEY_CREATE = "key:create"
@@ -94,6 +98,8 @@ BUILTIN: dict[str, tuple[str, str]] = {
     DEBIAN_READ: ("浏览 Debian 目录", "查看本地 .deb 包与 apt 配置清单"),
     DEBIAN_DOWNLOAD: ("下载 Debian 包", "下载本地 .deb 与 apt 配置片段"),
     MODEL_READ: ("浏览模型路由", "查看供内网 DSH 使用的模型路由表"),
+    DOC_READ: ("浏览生态文档", "查看与下载各生态的 Markdown 文档"),
+    DOC_UPLOAD: ("上传生态文档", "通过上传 Markdown 文件新增、覆盖或删除各生态文档"),
     KEY_LIST: ("列出 API 密钥", "查看自己名下的 API 密钥"),
     KEY_CREATE: ("创建 API 密钥", "签发新的 API 密钥"),
     KEY_DELETE: ("吊销 API 密钥", "删除 API 密钥"),
@@ -195,6 +201,7 @@ __all__ = [
     "NODE_BUILD_READ", "NODE_BUILD_DOWNLOAD", "NODE_BUILD_SHA256",
     "TOOL_READ", "TOOL_DOWNLOAD", "NPM_READ", "MODEL_READ",
     "DOCKER_READ", "DOCKER_DOWNLOAD", "DEBIAN_READ", "DEBIAN_DOWNLOAD",
+    "DOC_READ", "DOC_UPLOAD",
     "KEY_LIST", "KEY_CREATE", "KEY_DELETE", "KEY_STATS",
     "ADMIN_VIEW", "ADMIN_REFRESH", "ADMIN_ROLES",
     "BUILTIN", "BUILTIN_ROLES",

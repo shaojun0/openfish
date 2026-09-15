@@ -244,6 +244,49 @@ export interface DebianCatalog {
   artifacts: FlatArtifact[]
 }
 
+// ── Per-ecosystem documentation ──────────────────────────────────────
+//
+// Each ecosystem group in the sidebar owns a documentation leaf.  Reading and
+// downloading needs `doc:read`; uploading or deleting a Markdown file needs
+// `doc:upload`, which only the built-in admin role holds.
+
+/** One Markdown document in an ecosystem's documentation leaf. */
+export interface DocEntry {
+  /** Filename on disk — the key used to read/download/delete. */
+  name: string
+  /** The document's first `#` heading, or the filename stem. */
+  title: string
+  filename: string
+  size: number
+  size_human: string
+  modified: string | null
+  /** Raw `.md` download (an attachment), served by Flask. */
+  download_url: string
+  /** Raw `.md` served inline as `text/markdown`. */
+  raw_url: string
+}
+
+export interface DocCatalog {
+  ecosystem: string
+  root: string
+  exists: boolean
+  url_prefix: string
+  doc_count: number
+  documents: DocEntry[]
+}
+
+/** A document plus its source and server-rendered, HTML-escaped body. */
+export interface DocDetail extends DocEntry {
+  content: string
+  html: string
+}
+
+export interface DocsOverview {
+  root: string
+  url_prefix: string
+  ecosystems: Array<{ key: string; exists: boolean; doc_count: number }>
+}
+
 // ── Prebuilt interpreter mirrors (CPython / Node.js) ─────────────────
 //
 // `/api/v1/python-builds` and `/api/v1/node-builds` describe the same thing
@@ -370,6 +413,53 @@ export async function fetchDockerCatalog(): Promise<DockerCatalog> {
 
 export async function fetchDebianCatalog(): Promise<DebianCatalog> {
   const { data } = await http.get<DebianCatalog>('/debian')
+  return data
+}
+
+// ── Per-ecosystem documentation ──────────────────────────────────────
+
+export async function fetchDocsOverview(): Promise<DocsOverview> {
+  const { data } = await http.get<DocsOverview>('/docs')
+  return data
+}
+
+export async function fetchDocCatalog(ecosystem: string): Promise<DocCatalog> {
+  const { data } = await http.get<DocCatalog>(`/docs/${encodeURIComponent(ecosystem)}`)
+  return data
+}
+
+export async function fetchDoc(ecosystem: string, name: string): Promise<DocDetail> {
+  const { data } = await http.get<DocDetail>(
+    `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(name)}`,
+  )
+  return data
+}
+
+/**
+ * Publish (or replace) one Markdown document.  Admin-only: the server enforces
+ * `doc:upload`, so a non-admin gets a 403 here.  Passing the same filename
+ * again is how an administrator changes a document's content.
+ */
+export async function uploadDoc(
+  ecosystem: string,
+  file: File,
+  name?: string,
+): Promise<DocEntry> {
+  const form = new FormData()
+  form.append('file', file)
+  if (name) form.append('name', name)
+  // Let the browser set the multipart boundary — do not set Content-Type.
+  const { data } = await http.post<DocEntry>(
+    `/docs/${encodeURIComponent(ecosystem)}`,
+    form,
+  )
+  return data
+}
+
+export async function deleteDoc(ecosystem: string, name: string): Promise<DocEntry> {
+  const { data } = await http.delete<DocEntry>(
+    `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(name)}`,
+  )
   return data
 }
 

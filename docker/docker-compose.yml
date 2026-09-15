@@ -27,6 +27,9 @@ services:
       - ./../docker-images:/app/docker-images
       # Debian 本地包与 apt 配置片段
       - ./../debian:/app/debian
+      # 各生态 Markdown 文档：docs/<生态>/*.md。
+      # 只有管理员（doc:upload）能通过上传 .md 修改内容，其他人只能查看/下载。
+      - ./../docs:/app/docs
       # 模型路由表：只读挂载，改完刷新页面即可
       - ./../config/model_routes.json:/app/config/model_routes.json:ro
       # 持久化 keyring/公开包，放在主 packages 目录统一管理
@@ -53,6 +56,7 @@ services:
       - NODE_BUILDS_DIR=/app/node-builds
       - DOCKER_DIR=/app/docker-images
       - DEBIAN_DIR=/app/debian
+      - DOCS_DIR=/app/docs
       - MODELS_FILE=/app/config/model_routes.json
       - NPM_UPSTREAM=${NPM_UPSTREAM:-https://registry.npmmirror.com}
       - DOCKER_REGISTRY=${DOCKER_REGISTRY:-}
@@ -117,6 +121,7 @@ services:
       - ./../node-builds:/app/node-builds
       - ./../docker-images:/app/docker-images
       - ./../debian:/app/debian
+      - ./../docs:/app/docs
       - ./../config/model_routes.json:/app/config/model_routes.json:ro
     environment:
       - SERVER_NAME=cpypiserver
@@ -130,6 +135,7 @@ services:
       - NODE_BUILDS_DIR=/app/node-builds
       - DOCKER_DIR=/app/docker-images
       - DEBIAN_DIR=/app/debian
+      - DOCS_DIR=/app/docs
       - MODELS_FILE=/app/config/model_routes.json
       - NPM_UPSTREAM=${NPM_UPSTREAM:-https://registry.npmmirror.com}
       - DOCKER_REGISTRY=${DOCKER_REGISTRY:-}
