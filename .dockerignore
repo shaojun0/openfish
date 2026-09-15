@@ -47,6 +47,10 @@ tests/
 
 # ── Data / archives / docs ──────────────────────────────────────────
 packages/
+# Interpreter mirrors hold multi-gigabyte archives and are bind-mounted at
+# runtime; never send them as build context.
+node-builds/
+python-build-standalone/
 *.zip
 *.tar.gz
 *.md
