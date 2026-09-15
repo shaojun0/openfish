@@ -60,6 +60,11 @@ PUBLIC_ENDPOINTS: dict[str, str] = {
     "spa.index": "SPA shell",
     "spa.page": "SPA shell",
     "spa.fallback": "SPA shell",
+    # The compiled Vue bundle.  Narrow by construction: routes/spa.py serves
+    # only `static/dist/*`, never the whole `static/` tree — which matters,
+    # because `static/<ecosystem>/` holds the Jinja templates that
+    # `services/templates.py` loads and `static/certs/` was the TLS drop point.
+    "spa.dist_asset": "the SPA bundle a browser loads before it can log in",
     # Contract publication — describes routes, never serves registry data.
     "discovery.openapi_json": "publishes the API contract",
     "discovery.docs": "renders the API contract",
@@ -75,6 +80,10 @@ PUBLIC_ENDPOINTS: dict[str, str] = {
     "node_build.health": "mirror status probe",
     # Answers "who am I?" — returns the anonymous principal when unauthenticated.
     "session.whoami": "identity probe",
+    # The private CA chain: pip/npm/docker/apt refuse the mirror until they
+    # trust its chain, so this must be reachable before credentials exist.
+    # Serves exactly one configured file (TLS_CA_FILE), never a directory.
+    "certs.ca_chain": "clients must fetch the CA before they can trust the mirror",
 }
 
 #: Statuses that prove the guard ran.
@@ -150,9 +159,14 @@ def check_endpoints_deny_anonymous() -> list[str]:
     client = app.test_client()
 
     for rule in sorted(app.url_map.iter_rules(), key=lambda r: str(r)):
-        if rule.endpoint == "static":
-            continue
-
+        # NOTE: there is deliberately no `if rule.endpoint == "static": continue`
+        # escape hatch here any more.  That skip is what let Flask's blanket
+        # static handler stay anonymous — and unexamined — while it published
+        # the Jinja templates under `static/<ecosystem>/` and anything an
+        # operator dropped into `static/certs/`.  `app.py` now disables the
+        # built-in handler (`static_folder=None`) and the SPA bundle is served
+        # by the explicit, declared-public `spa.dist_asset` route, so removing
+        # the skip costs nothing and re-enabling a blanket handler fails here.
         methods = sorted(m for m in rule.methods
                          if m in {"GET", "POST", "PUT", "PATCH", "DELETE"})
         if not methods:

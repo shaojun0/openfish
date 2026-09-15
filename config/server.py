@@ -38,3 +38,12 @@ class ServerConfig(BaseSettings):
         ge=60,
         description="Admin stats background refresh interval in seconds",
     )
+    tls_ca_file: str = Field(
+        default="certs/ca_chain.pem",
+        description=(
+            "Private-CA chain published at GET /certs/ca_chain.pem so intranet "
+            "clients can install it. Deliberately outside the web root: exactly "
+            "this one file is served, never a directory, so a key dropped next "
+            "to it is not reachable."
+        ),
+    )

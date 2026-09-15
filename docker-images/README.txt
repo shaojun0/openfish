@@ -22,7 +22,7 @@ docker-images/ —— Docker 离线制品目录与 Registry v2 代理
 
 静态索引
 --------
-    GET /docker/                  HTML 索引（模板 static/docker/index.html）
+    GET /docker/                  HTML 索引（模板 static/docker/index.html，仅服务端读取，不经 HTTP 暴露）
     GET /docker/?format=json      与 /api/v1/docker 相同的 JSON
     GET /docker/v2/_catalog       仓库名列表，OCI distribution spec 形状
     GET /docker/v2/<name>/manifests/<ref>    清单（需要 docker:read 权限）

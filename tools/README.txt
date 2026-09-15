@@ -23,7 +23,7 @@ tools/ —— 内网工具目录（脚手架）
 
 静态索引
 --------
-/tools/ 是服务端渲染的静态索引（模板 static/tools/index.html）：
+/tools/ 是服务端渲染的静态索引（模板 static/tools/index.html，仅服务端读取，不经 HTTP 暴露）：
     GET /tools/                   HTML 索引，浏览器/脚本都能读
     GET /tools/?format=json       与 /api/v1/tools 相同的 JSON
 两者都需要 tool:read 权限。控制台里的「静态索引」按钮也指向这里。

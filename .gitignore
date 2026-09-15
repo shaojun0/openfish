@@ -61,7 +61,10 @@ node-builds/*
 *.crt
 *.p12
 *.pfx
-static/certs/
+# TLS material lives outside the web root.  Only the one file named by
+# TLS_CA_FILE is ever served (GET /certs/ca_chain.pem) — `static/` is not a
+# drop point any more, so a key here cannot be reached over HTTP.
+certs/
 
 # ── Editors / OS ────────────────────────────────────────────────────
 .idea/

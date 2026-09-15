@@ -29,7 +29,7 @@ api_keys_data/
 *.pem
 *.key
 *.crt
-static/certs/
+certs/
 
 # Private test-environment bundle: plaintext passwords, TLS cert and runtime
 # data. Its files are root-owned 0600, which also makes the build context

@@ -20,7 +20,7 @@ debian/ —— Debian 包目录与 apt 镜像代理
 
 静态索引
 --------
-    GET /debian/                  HTML 索引（模板 static/debian/index.html）
+    GET /debian/                  HTML 索引（模板 static/debian/index.html，仅服务端读取，不经 HTTP 暴露）
     GET /debian/?format=json      与 /api/v1/debian 相同的 JSON
     GET /debian/Packages          扁平静态索引，由本地 .deb 生成
     GET /debian/files/<文件名>    下载 .deb（需要 debian:download 权限）

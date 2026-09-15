@@ -10,7 +10,7 @@ npm registry 协议（packument / version manifest / tarball 协商 / `/-/v1/sea
     GET /npm/<包名>/<版本>            单个版本 manifest
     GET /npm/<包名>/-/<文件名>        tarball
     GET /npm/-/v1/search             搜索（现代约定）
-    GET /npm/                        HTML 索引（模板 static/npm/index.html）
+    GET /npm/                        HTML 索引（模板 static/npm/index.html，仅服务端读取，不经 HTTP 暴露）
     GET /npm/?format=json            全量索引 JSON
     GET /npm/-/all                   全量索引 JSON（npm 旧版约定，见下）
     GET /npm/-/ping                  健康检查，返回 {}

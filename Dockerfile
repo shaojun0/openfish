@@ -57,7 +57,8 @@ COPY --from=frontend /static/dist ./static/dist
 # shipped in the repo) and are normally bind-mounted so an operator can drop
 # files in without rebuilding the image.
 RUN mkdir -p /app/packages /app/data \
-    /app/tools /app/npm /app/node-builds /app/docker-images /app/debian /app/docs
+    /app/tools /app/npm /app/node-builds /app/docker-images /app/debian /app/docs \
+    /app/certs
 
 # config/server.py defaults PORT to 9090; pin it to 8080 so the app matches
 # the EXPOSE / HEALTHCHECK below (and the compose port mapping).

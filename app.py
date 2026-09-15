@@ -24,7 +24,14 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 
-app = Flask(__name__)
+# No built-in static handler.  Flask's default serves *everything* under
+# ``static/`` anonymously, which would publish the Jinja templates in
+# ``static/<ecosystem>/`` (services/templates.py reads them) and anything an
+# operator drops into ``static/certs/``.  The only asset a browser needs before
+# it has a session is the compiled Vue bundle, and ``routes/spa.py`` serves
+# that one directory explicitly.  This also means an unguarded endpoint can no
+# longer hide behind the ``static`` endpoint — see scripts/check_auth_guards.py.
+app = Flask(__name__, static_folder=None)
 app.config.from_mapping(settings.model_dump())
 app.secret_key = settings.server.secret_key
 app.config["MAX_CONTENT_LENGTH"] = settings.storage.max_content_length

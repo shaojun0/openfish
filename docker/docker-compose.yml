@@ -36,9 +36,11 @@ services:
       # - ./../packages/keyring*.whl:/app/packages/
       # API keys 持久化
       - ./api_keys_data:/app/data
-      # 自备 TLS 证书（可选）：把证书放到 docker/certs/ca_chain.pem 后取消注释。
+      # 自备 TLS 证书（可选）：把 CA 链放到 docker/certs/ca_chain.pem 后取消注释。
       # 证书文件已被 .gitignore 忽略，不会进入仓库。
-      # - ./certs/ca_chain.pem:/app/static/certs/ca_chain.pem:ro
+      # 注意挂载点是 /app/certs（**不在** web 根目录）：服务端只会匿名供应
+      # GET /certs/ca_chain.pem 这一个文件，同目录下的私钥不会被暴露。
+      # - ./certs/ca_chain.pem:/app/certs/ca_chain.pem:ro
       # 持久化包文件，容器删除后数据不丢失
       # - ${SHARE_DIR:-/data/share}/cpypiserver_public/packages:/app/packages
       # - ${SHARE_DIR:-/data/share}/cpypiserver_public/python-build-standalone:/app/cpython
