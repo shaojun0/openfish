@@ -308,7 +308,7 @@ def docker_manifest(name: str, reference: str):
 
 
 @docker_bp.route("/docker/v2/<path:name>/blobs/<digest>", methods=["GET", "HEAD"])
-@require_permission(DOCKER_READ)
+@require_permission(DOCKER_DOWNLOAD)
 @api_operation(
     summary="Get a blob",
     description=(

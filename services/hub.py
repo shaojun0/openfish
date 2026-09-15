@@ -26,6 +26,9 @@ Layout
 ``config/model_routes.json``::
 
     {"routes": [{"name": ..., "provider": ..., "base_url": ...}]}
+
+The model-route document is the one catalog an administrator edits in the
+browser rather than on disk; :mod:`services.model_routes` owns it.
 """
 
 from __future__ import annotations
@@ -551,55 +554,10 @@ def debian_packages_index(catalog: dict[str, Any]) -> str:
 
 
 # ── Model routes ─────────────────────────────────────────────────────
-
-def load_model_routes(path: str) -> dict[str, Any]:
-    """Read the model-routing description; a missing file is not an error."""
-    file_path = Path(path)
-    if not file_path.is_file():
-        return {
-            "source": str(file_path),
-            "exists": False,
-            "error": None,
-            "routes": [],
-        }
-
-    try:
-        data = json.loads(file_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        log.warning("cannot read model routes from %s: %s", file_path, exc)
-        return {
-            "source": str(file_path),
-            "exists": True,
-            "error": str(exc),
-            "routes": [],
-        }
-
-    raw = data.get("routes") if isinstance(data, dict) else data
-    routes: list[dict[str, Any]] = []
-    if isinstance(raw, list):
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            routes.append({
-                "name": item.get("name") or item.get("model") or "unnamed",
-                "provider": item.get("provider") or "openai-compatible",
-                "base_url": item.get("base_url") or item.get("baseUrl") or "",
-                "model": item.get("model") or item.get("name") or "",
-                "aliases": list(item.get("aliases") or []),
-                "path": item.get("path") or "/v1/chat/completions",
-                "enabled": item.get("enabled", True) is not False,
-                "description": item.get("description"),
-                "tags": list(item.get("tags") or []),
-            })
-
-    return {
-        "source": str(file_path),
-        "exists": True,
-        "error": None,
-        "version": data.get("version") if isinstance(data, dict) else None,
-        "routes": routes,
-    }
-
+# The route table is no longer read-only: an administrator edits it through the
+# routing panel, so its whole lifecycle — read, validate, write and probe —
+# lives in :mod:`services.model_routes` rather than being split across two
+# modules.  This module keeps only the artifact catalogs.
 
 __all__ = [
     "human_size",
@@ -610,5 +568,4 @@ __all__ = [
     "scan_debian",
     "docker_registry_catalog",
     "debian_packages_index",
-    "load_model_routes",
 ]

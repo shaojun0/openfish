@@ -187,16 +187,52 @@ export interface NpmCatalog {
   packages: NpmPackage[]
 }
 
+/**
+ * Result of one connectivity probe against a route's URL.
+ *
+ * The server only checks that the endpoint answers; it never sends an
+ * inference request. `status` classifies the answer so the table can colour
+ * it: `ok` (2xx/3xx), `auth` (401/403), `method` (405 — the URL exists but
+ * does not answer GET), `not_found` (404), `client_error`, `server_error`,
+ * `unreachable` (no answer at all).
+ */
+export interface ModelRouteHealth {
+  reachable: boolean
+  ok: boolean
+  status:
+    | 'ok'
+    | 'auth'
+    | 'method'
+    | 'not_found'
+    | 'client_error'
+    | 'server_error'
+    | 'unreachable'
+  http_status: number | null
+  latency_ms: number | null
+  /** The exact URL that was probed. */
+  url: string
+  error: string | null
+  checked_at: string | null
+}
+
 export interface ModelRoute {
   name: string
+  /** Wire format: `openai` | `mineru` | `anthropic`. */
   provider: string
   base_url: string
+  /** Always null — the stored API key is never returned. */
+  api_key: null
+  has_api_key: boolean
+  /** Non-secret hint (last four characters), or null. */
+  api_key_hint: string | null
   model: string
   aliases: string[]
   path: string
   enabled: boolean
   description: string | null
   tags: string[]
+  /** The last probe, when one has run. */
+  health: ModelRouteHealth | null
 }
 
 export interface ModelRoutes {
@@ -204,7 +240,25 @@ export interface ModelRoutes {
   exists: boolean
   error: string | null
   version?: number | null
+  /** The wire formats an administrator may choose. */
+  providers: string[]
+  /** Provider -> endpoint path used when a route omits one. */
+  default_paths: Record<string, string>
   routes: ModelRoute[]
+}
+
+/** Body of a create/update/probe request. */
+export interface ModelRoutePayload {
+  name: string
+  provider: string
+  base_url: string
+  description: string
+  /** Omit (or null) to keep the stored key on update; `''` clears it. */
+  api_key?: string | null
+  model?: string
+  aliases?: string[]
+  path?: string
+  enabled?: boolean
 }
 
 /** One entry of a flat artifact catalog (docker images, .deb packages, …). */
@@ -423,6 +477,57 @@ export async function fetchNpmCatalog(): Promise<NpmCatalog> {
 
 export async function fetchModelRoutes(): Promise<ModelRoutes> {
   const { data } = await http.get<ModelRoutes>('/models')
+  return data
+}
+
+/**
+ * Add a route.  Admin-only (`model:write`); the server validates it, writes it
+ * to `MODELS_FILE` and probes the URL, returning both.
+ */
+export async function createModelRoute(
+  payload: ModelRoutePayload,
+): Promise<{ route: ModelRoute; health: ModelRouteHealth }> {
+  const { data } = await http.post<{ route: ModelRoute; health: ModelRouteHealth }>(
+    '/models',
+    payload,
+  )
+  return data
+}
+
+/** Edit a route by its current name.  Admin-only (`model:write`). */
+export async function updateModelRoute(
+  name: string,
+  payload: ModelRoutePayload,
+): Promise<{ route: ModelRoute; health: ModelRouteHealth }> {
+  const { data } = await http.put<{ route: ModelRoute; health: ModelRouteHealth }>(
+    `/models/${encodeURIComponent(name)}`,
+    payload,
+  )
+  return data
+}
+
+/** Remove a route.  Admin-only (`model:write`). */
+export async function deleteModelRoute(name: string): Promise<ModelRoute> {
+  const { data } = await http.delete<ModelRoute>(`/models/${encodeURIComponent(name)}`)
+  return data
+}
+
+/** Probe a draft route that has not been saved yet.  Admin-only. */
+export async function probeModelRoute(payload: {
+  provider: string
+  base_url: string
+  api_key?: string | null
+  path?: string
+}): Promise<ModelRouteHealth> {
+  const { data } = await http.post<ModelRouteHealth>('/models/probe', payload)
+  return data
+}
+
+/** Re-probe a saved route and remember the result.  Admin-only. */
+export async function checkModelRoute(name: string): Promise<ModelRouteHealth> {
+  const { data } = await http.post<ModelRouteHealth>(
+    `/models/${encodeURIComponent(name)}/check`,
+  )
   return data
 }
 

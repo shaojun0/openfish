@@ -187,7 +187,9 @@ Templates are provided at `.env.example` (local development) and
 | `DEBIAN_CACHE_DIR`      | `data/cache/debian`    | Proxied apt metadata cache                         |
 | `DEBIAN_CACHE_MAX_MB`   | `256`                  | Byte budget for the apt metadata cache             |
 | `DEBIAN_METADATA_TTL`   | `300`                  | Seconds a proxied `Release`/`Packages` document is trusted |
-| `MODELS_FILE`           | `config/model_routes.json` | Model-routing table for downstream DSH         |
+| `MODELS_FILE`           | `config/model_routes.json` | Model-routing table for downstream DSH; editable from `/models` by `model:write`, so it must be writable |
+| `MODEL_HEALTH_FILE`     | `data/model_health.json` | Last connectivity probe per route (kept out of `MODELS_FILE`) |
+| `MODEL_PROBE_TIMEOUT`   | `5`                    | Seconds allowed for one route connectivity probe    |
 | `DOCS_DIR`              | `docs`                 | Per-ecosystem Markdown documentation root — one sub-directory per ecosystem, one folder project per document |
 
 Nested fields can also be addressed with the `__` delimiter, e.g.
@@ -269,12 +271,30 @@ The permission points shipped today, and the routes that enforce them:
 | `nodebuild:read` | `/node-builds/` listings, `index.json`, `index.tab`, `GET /api/v1/node-builds` |
 | `nodebuild:download` | `/node-builds/<tag>/<file>` and `/node-builds/<tag>/SHASUMS256.txt` |
 | `nodebuild:sha256` | `/node-builds/<tag>/<file>/sha256` |
+| `tool:read` | `/tools/` listing, `GET /api/v1/tools` |
+| `tool:download` | `/tools/<path>` |
+| `npm:read` | `/npm/` packuments, `/-/all`, `/-/ping`, `/-/v1/search`, `GET /api/v1/npm` |
+| `npm:download` | `/npm/<pkg>/-/<file>` and `/npm/files/<file>` (tarballs, local or upstream-cached) |
+| `docker:read` | `/docker/` listing, `/docker/v2/_catalog`, `/docker/v2/<name>/tags/list`, `/docker/v2/<name>/manifests/<ref>`, `GET /api/v1/docker` |
+| `docker:download` | `/docker/v2/<name>/blobs/<digest>` (layer/config bytes) and `/docker/files/<file>` |
+| `debian:read` | `/debian/` index, `/debian/Packages`, `/debian/dists/<path>`, `GET /api/v1/debian` |
+| `debian:download` | `/debian/pool/<path>` (package bytes) and `/debian/files/<file>` |
 | `key:list` / `key:create` / `key:delete` / `key:stats` | the matching `/api/v1/keys*` endpoints |
 | `admin:view` | `/api/v1/admin/stats` |
 | `admin:refresh` | `POST /api/v1/admin/refresh-stats` |
 | `admin:roles` | `/api/v1/admin/{roles,permissions,users}` |
+| `model:read` | `GET /api/v1/models` |
+| `model:write` | `POST /api/v1/models`, `PUT`/`DELETE /api/v1/models/<name>`, `POST /api/v1/models/probe`, `POST /api/v1/models/<name>/check` — adds, edits, removes and re-probes model routes |
 | `doc:read` | `GET /api/v1/docs*`, `/docs/<ecosystem>/`, `/docs/<ecosystem>/<id>`, `/docs/<ecosystem>/<id>/assets/<name>` |
 | `doc:upload` | `POST`/`PUT`/`DELETE` on `/api/v1/docs/<ecosystem>[/<id>[/assets/<name>]]` and `POST /api/v1/docs/<ecosystem>/<id>/preview` — creates, edits and deletes documents and their assets |
+
+> **Adding a point is a migration.** The per-role seed data above applies only
+> when a built-in role is *first created*; an existing `authenticated` row is
+> never topped up, precisely so an administrator's edits survive. So when a
+> release introduces a point that gates previously-open routes — `npm:download`
+> being the most recent — grant it explicitly on `/access` (or with
+> `AuthzService.set_role_permissions`) for every role that should keep that
+> access, or its holders will start seeing `403`.
 
 ### Built-in roles
 
@@ -354,7 +374,7 @@ first, and an optional upstream mirror is fetched on demand and cached:
 | Docker       | `/docker`  | `DOCKER_DIR`         | `DOCKER_UPSTREAM`   | Docker Registry v2 — tags, manifests, blobs |
 | Debian       | `/debian`  | `DEBIAN_DIR`         | `DEBIAN_UPSTREAM`   | flat `Packages` + apt mirror proxy (`dists/`, `pool/`) |
 | 工具 / Tools | `/tools`   | `TOOLS_DIR`          | —                   | direct file downloads |
-| 模型路由     | `/models`  | `MODELS_FILE`        | —                   | publish-only JSON table |
+| 模型路由     | `/models`  | `MODELS_FILE` + `MODEL_HEALTH_FILE` | —    | JSON route table — read by everyone, **added/edited/probed by admins** |
 | 文档 / Docs  | `/docs/<eco>` | `DOCS_DIR/<eco>/<id>/` | —                | Markdown folder projects — read by everyone, **created/edited by admins** |
 
 The Python and npm pages each carry a **dropdown** that switches the page
@@ -434,8 +454,33 @@ are forwarded so a resumed download still works.
 
 **Model routing.** `MODELS_FILE` (default `config/model_routes.json`) is a small
 JSON document describing the endpoints a downstream intranet DSH may talk to.
-This server publishes the table; it does not proxy inference. The page renders a
-table plus an alias-expanded snippet ready to paste into a DSH config.
+This server publishes the table and **lets an administrator maintain it in the
+browser**; it does not proxy inference. Reading needs `model:read` (held by the
+`authenticated` role), while adding, editing, deleting or re-probing a route
+needs `model:write` (admin only).
+
+Each route names a wire format — `openai`, `mineru` or `anthropic` — a
+`base_url`, an optional `api_key`, a `path` (defaulted per provider:
+`/v1/chat/completions`, `/file_parse`, `/v1/messages`), an optional `model` id
+and display `aliases`. `name` and `description` are mandatory; the API key may
+be empty. The raw key is **never returned by the API** — the SPA sees
+`has_api_key` and a last-four hint, and an edit that leaves the field blank
+keeps the stored key (an empty value clears it).
+
+On the page, “新增路由” opens an **inline editor as the first table row**; the
+same row edits an existing route. Saving validates the entry, rewrites the
+document atomically, and immediately **probes the URL for reachability** — a
+plain `GET` that never sends an inference request. Any HTTP answer proves the
+endpoint is reachable and is classified as `ok` / `auth` / `method` /
+`not_found` / `client_error` / `server_error`, with `unreachable` for no answer
+at all; a per-row “重新检测” and a “检测全部” button re-run it. Results live in
+`MODEL_HEALTH_FILE` (default `data/model_health.json`), keyed by route name, so
+the document downstream DSH reads stays a pure route table. The page also
+renders an alias-expanded snippet ready to paste into a DSH config.
+
+Because the panel writes `MODELS_FILE`, the file and its directory must be
+writable by the server process — a container bind-mount of that one file must
+not use `:ro`.
 
 ### Ecosystem documentation
 
@@ -660,7 +705,12 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 | GET    | `/api/v1/npm`                     | Local npm catalog scaffold (npm:read)    |
 | GET    | `/api/v1/docker`                  | Local docker catalog (docker:read)       |
 | GET    | `/api/v1/debian`                  | Local debian catalog (debian:read)       |
-| GET    | `/api/v1/models`                  | Model-routing table (model:read)         |
+| GET    | `/api/v1/models`                  | Model-routing table, keys masked (model:read) |
+| POST   | `/api/v1/models`                  | Add a route + probe it (model:write)     |
+| PUT    | `/api/v1/models/<name>`           | Edit (or rename) a route + re-probe (model:write) |
+| DELETE | `/api/v1/models/<name>`           | Remove a route (model:write)             |
+| POST   | `/api/v1/models/probe`            | Probe an unsaved draft URL (model:write) |
+| POST   | `/api/v1/models/<name>/check`     | Re-probe a saved route (model:write)     |
 | GET    | `/api/v1/docs`                    | Per-ecosystem document counts (doc:read) |
 | GET    | `/api/v1/docs/<ecosystem>`        | One ecosystem's document catalog (doc:read) |
 | POST   | `/api/v1/docs/<ecosystem>`        | Create/replace a document, optional `.md` seed (doc:upload) |

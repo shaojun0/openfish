@@ -26,37 +26,37 @@ const routes: RouteRecordRaw[] = [
         path: 'packages',
         name: 'packages',
         component: () => import('@/views/PackagesView.vue'),
-        meta: { titleKey: 'nav.packages', icon: 'Box' },
+        meta: { titleKey: 'nav.packages', icon: 'Box', requiresPermission: 'package:read' },
       },
       {
         path: 'npm',
         name: 'npm',
         component: () => import('@/views/NpmView.vue'),
-        meta: { titleKey: 'nav.npm', icon: 'ShoppingBag' },
+        meta: { titleKey: 'nav.npm', icon: 'ShoppingBag', requiresPermission: 'npm:read' },
       },
       {
         path: 'tools',
         name: 'tools',
         component: () => import('@/views/ToolsView.vue'),
-        meta: { titleKey: 'nav.tools', icon: 'Tools' },
+        meta: { titleKey: 'nav.tools', icon: 'Tools', requiresPermission: 'tool:read' },
       },
       {
         path: 'models',
         name: 'models',
         component: () => import('@/views/ModelsView.vue'),
-        meta: { titleKey: 'nav.models', icon: 'Cpu' },
+        meta: { titleKey: 'nav.models', icon: 'Cpu', requiresPermission: 'model:read' },
       },
       {
         path: 'docker',
         name: 'docker',
         component: () => import('@/views/DockerView.vue'),
-        meta: { titleKey: 'nav.docker', icon: 'Ship' },
+        meta: { titleKey: 'nav.docker', icon: 'Ship', requiresPermission: 'docker:read' },
       },
       {
         path: 'debian',
         name: 'debian',
         component: () => import('@/views/DebianView.vue'),
-        meta: { titleKey: 'nav.debian', icon: 'Monitor' },
+        meta: { titleKey: 'nav.debian', icon: 'Monitor', requiresPermission: 'debian:read' },
       },
       {
         // One documentation leaf per ecosystem — the sidebar adds
@@ -70,7 +70,7 @@ const routes: RouteRecordRaw[] = [
         path: 'api-keys',
         name: 'api-keys',
         component: () => import('@/views/ApiKeysView.vue'),
-        meta: { titleKey: 'nav.apiKeys', icon: 'Key' },
+        meta: { titleKey: 'nav.apiKeys', icon: 'Key', requiresPermission: 'key:list' },
       },
       {
         path: 'admin',

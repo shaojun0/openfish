@@ -25,6 +25,14 @@ debian/ —— Debian 包目录与 apt 镜像代理
     GET /debian/Packages          扁平静态索引，由本地 .deb 生成
     GET /debian/files/<文件名>    下载 .deb（需要 debian:download 权限）
 
+回源代理（配置 DEBIAN_UPSTREAM 后）
+----------------------------------
+    GET /debian/dists/<路径>      Release / Packages 等元数据（需要 debian:read 权限）
+    GET /debian/pool/<路径>       .deb 实体字节（需要 debian:download 权限）
+
+dists/ 是元数据、pool/ 是包实体，所以权限点分开：只授 debian:read 的角色
+能看索引，但装不了包。
+
 客户端接入
 ----------
     sudo apt install ./<包名>.deb

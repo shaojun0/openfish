@@ -15,6 +15,14 @@ npm registry 协议（packument / version manifest / tarball 协商 / `/-/v1/sea
     GET /npm/-/all                   全量索引 JSON（npm 旧版约定，见下）
     GET /npm/-/ping                  健康检查，返回 {}
 
+权限
+----
+    packument / 版本 manifest / 索引 / 搜索 / ping      需要 npm:read 权限
+    tarball（/-/<文件名> 与 /npm/files/<文件名>）        需要 npm:download 权限
+
+浏览目录与下载 tarball 是两个权限点：只授 npm:read 的角色能解析依赖，
+但拉不到包文件。
+
 为什么是 /-/all
 ---------------
 npm 官方没有 HTML 索引页；它的 registry 是 JSON 优先（每个包一个 packument）。

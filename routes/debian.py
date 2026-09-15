@@ -178,7 +178,7 @@ def debian_dists(path: str):
 
 
 @debian_bp.route("/debian/pool/<path:path>", methods=["GET", "HEAD"])
-@require_permission(DEBIAN_READ)
+@require_permission(DEBIAN_DOWNLOAD)
 @api_operation(
     summary="Proxy an apt package file from the upstream mirror",
     description=(

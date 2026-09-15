@@ -218,7 +218,29 @@ class HubConfig(BaseSettings):
     )
     models_file: str = Field(
         default="config/model_routes.json",
-        description="JSON file describing the model routes for downstream DSH",
+        description=(
+            "JSON file describing the model routes for downstream DSH. Read by "
+            "everyone holding `model:read`; written by administrators holding "
+            "`model:write` through the routing panel, so the file (and the "
+            "directory holding it) must be writable by the server process."
+        ),
+    )
+    model_health_file: str = Field(
+        default="data/model_health.json",
+        description=(
+            "Where the result of the last connectivity probe of each model "
+            "route is remembered, keyed by route name. Kept out of models_file "
+            "so the document downstream DSH reads stays a pure route table."
+        ),
+    )
+    model_probe_timeout: float = Field(
+        default=5.0,
+        ge=0.5,
+        description=(
+            "Timeout in seconds for one model-route connectivity probe. The "
+            "probe only checks that the URL answers; it never sends an "
+            "inference request body."
+        ),
     )
 
 

@@ -51,6 +51,7 @@ TOOL_DOWNLOAD = "tool:download"
 
 # Artifact hub — npm catalog scaffold
 NPM_READ = "npm:read"
+NPM_DOWNLOAD = "npm:download"
 
 # Artifact hub — docker image/compose catalog
 DOCKER_READ = "docker:read"
@@ -62,6 +63,7 @@ DEBIAN_DOWNLOAD = "debian:download"
 
 # Artifact hub — model routing table for downstream DSH
 MODEL_READ = "model:read"
+MODEL_WRITE = "model:write"
 
 # Artifact hub — per-ecosystem Markdown documentation
 DOC_READ = "doc:read"
@@ -93,11 +95,13 @@ BUILTIN: dict[str, tuple[str, str]] = {
     TOOL_READ: ("浏览工具目录", "查看内网工具目录的分类与文件清单"),
     TOOL_DOWNLOAD: ("下载工具", "从工具目录下载脚本或二进制文件"),
     NPM_READ: ("浏览 npm 目录", "查看本地 npm 包目录（脚手架）"),
+    NPM_DOWNLOAD: ("下载 npm 包", "下载 npm tarball（本地或上游缓存）"),
     DOCKER_READ: ("浏览 Docker 目录", "查看离线镜像与 compose/Dockerfile 清单"),
     DOCKER_DOWNLOAD: ("下载 Docker 制品", "下载镜像 tar 与 compose/Dockerfile 文件"),
     DEBIAN_READ: ("浏览 Debian 目录", "查看本地 .deb 包与 apt 配置清单"),
     DEBIAN_DOWNLOAD: ("下载 Debian 包", "下载本地 .deb 与 apt 配置片段"),
     MODEL_READ: ("浏览模型路由", "查看供内网 DSH 使用的模型路由表"),
+    MODEL_WRITE: ("管理模型路由", "新增、修改、删除模型路由并检测其连通性"),
     DOC_READ: ("浏览生态文档", "查看与下载各生态的 Markdown 文档"),
     DOC_UPLOAD: ("上传生态文档", "通过上传 Markdown 文件新增、覆盖或删除各生态文档"),
     KEY_LIST: ("列出 API 密钥", "查看自己名下的 API 密钥"),
@@ -199,7 +203,7 @@ __all__ = [
     "PACKAGE_READ", "PACKAGE_WRITE",
     "BUILD_READ", "BUILD_DOWNLOAD", "BUILD_SHA256",
     "NODE_BUILD_READ", "NODE_BUILD_DOWNLOAD", "NODE_BUILD_SHA256",
-    "TOOL_READ", "TOOL_DOWNLOAD", "NPM_READ", "MODEL_READ",
+    "TOOL_READ", "TOOL_DOWNLOAD", "NPM_READ", "NPM_DOWNLOAD", "MODEL_READ", "MODEL_WRITE",
     "DOCKER_READ", "DOCKER_DOWNLOAD", "DEBIAN_READ", "DEBIAN_DOWNLOAD",
     "DOC_READ", "DOC_UPLOAD",
     "KEY_LIST", "KEY_CREATE", "KEY_DELETE", "KEY_STATS",

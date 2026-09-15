@@ -38,7 +38,7 @@ from flask import (
 from werkzeug.routing import BaseConverter
 
 from auth.decorators import require_permission
-from auth.permissions import NPM_READ
+from auth.permissions import NPM_DOWNLOAD, NPM_READ
 from config import settings
 from openapi import api_operation, binary, errors, json_body, ok
 from routes.hub_common import spa_url, wants_json
@@ -414,7 +414,7 @@ def npm_version(package: str, version: str):
 
 
 @npm_bp.route("/npm/<pkg:package>/-/<path:filename>")
-@require_permission(NPM_READ)
+@require_permission(NPM_DOWNLOAD)
 @api_operation(
     summary="npm tarball",
     description=(
@@ -443,7 +443,7 @@ def npm_tarball(package: str, filename: str):
 
 
 @npm_bp.route("/npm/files/<path:filename>")
-@require_permission(NPM_READ)
+@require_permission(NPM_DOWNLOAD)
 @api_operation(
     summary="Download a local npm tarball",
     description=(

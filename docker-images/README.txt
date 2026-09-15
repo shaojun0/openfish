@@ -25,6 +25,10 @@ docker-images/ —— Docker 离线制品目录与 Registry v2 代理
     GET /docker/                  HTML 索引（模板 static/docker/index.html）
     GET /docker/?format=json      与 /api/v1/docker 相同的 JSON
     GET /docker/v2/_catalog       仓库名列表，OCI distribution spec 形状
+    GET /docker/v2/<name>/manifests/<ref>    清单（需要 docker:read 权限）
+    GET /docker/v2/<name>/blobs/<digest>     层/配置实体（需要 docker:download 权限）
     GET /docker/files/<文件名>    下载制品（需要 docker:download 权限）
 
 `/v2/_catalog` 是 registry 协议里唯一的枚举端点，等价于 npm 的 `/-/all`。
+清单是元数据、blob 是实体字节，所以权限点分开：只授 docker:read 的角色能
+浏览目录与清单，但拉不动镜像层。

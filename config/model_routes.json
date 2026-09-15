@@ -1,33 +1,43 @@
 {
   "version": 1,
-  "_comment": "内网模型路由表（只发布，不代理推理）。openfish 只负责登记与展示；下游 DSH 读取本文件后自行决定 upstream 与鉴权方式。base_url 请替换成实际内网地址。",
+  "_comment": "内网模型路由表（只发布，不代理推理）。openfish 负责登记、展示与连通性检测；持有 model:write 的管理员可在 /models 页面在线维护本文件。下游 DSH 读取本文件后自行决定 upstream 与鉴权方式。base_url 请替换成实际内网地址。provider 可选 openai / mineru / anthropic。",
   "routes": [
     {
       "name": "deepseek-v4-flash",
-      "provider": "openai-compatible",
+      "provider": "openai",
       "base_url": "http://10.0.0.10:8000",
+      "api_key": "",
       "model": "deepseek-v4-flash",
-      "aliases": ["flash", "default"],
+      "aliases": [
+        "flash",
+        "default"
+      ],
       "path": "/v1/chat/completions",
       "enabled": true,
       "description": "默认对话模型，走内网 vLLM 推理服务"
     },
     {
       "name": "deepseek-v4",
-      "provider": "openai-compatible",
+      "provider": "openai",
       "base_url": "http://10.0.0.10:8001",
+      "api_key": "",
       "model": "deepseek-v4",
-      "aliases": ["pro"],
+      "aliases": [
+        "pro"
+      ],
       "path": "/v1/chat/completions",
       "enabled": true,
       "description": "长上下文主力模型"
     },
     {
       "name": "bge-m3-embedding",
-      "provider": "openai-compatible",
+      "provider": "openai",
       "base_url": "http://10.0.0.11:8002",
+      "api_key": "",
       "model": "bge-m3",
-      "aliases": ["embedding"],
+      "aliases": [
+        "embedding"
+      ],
       "path": "/v1/embeddings",
       "enabled": false,
       "description": "向量化模型，尚未上线（示例：enabled=false）"

@@ -150,6 +150,7 @@ for (const [path, markers] of Object.entries(EXPECTED)) {
       'key:list',
       'key:stats',
       'model:read',
+      'model:write',
       'npm:read',
       'package:read',
       'package:write',

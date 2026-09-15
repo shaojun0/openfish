@@ -82,6 +82,9 @@ const groups = computed<NavGroup[]>(() => {
           href: '/python-builds/',
           titleKey: 'nav.builds',
           icon: 'Download',
+          // Listing CPython builds is `build:read`, which `package:read` does
+          // not imply — without this the item shows and then 403s.
+          permission: 'build:read',
         },
         docItem('python'),
       ],
@@ -99,6 +102,8 @@ const groups = computed<NavGroup[]>(() => {
           href: '/node-builds/',
           titleKey: 'nav.nodeBuilds',
           icon: 'Download',
+          // `nodebuild:read`, not `npm:read` — see the CPython item above.
+          permission: 'nodebuild:read',
         },
         docItem('npm'),
       ],
@@ -157,7 +162,7 @@ const groups = computed<NavGroup[]>(() => {
       titleKey: 'nav.groupSystem',
       icon: 'Setting',
       items: [
-        { index: '/api-keys', titleKey: 'nav.apiKeys', icon: 'Key' },
+        { index: '/api-keys', titleKey: 'nav.apiKeys', icon: 'Key', permission: 'key:list' },
         { index: '/docs', href: '/docs', titleKey: 'nav.docs', icon: 'Document' },
       ],
     },

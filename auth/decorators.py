@@ -39,6 +39,7 @@ from flask import current_app, g
 
 from auth.permissions import ADMIN_VIEW, PACKAGE_READ, PACKAGE_WRITE, declare
 from auth.guards import AUTH_METHODS
+from config import settings
 from errors import ForbiddenError, UnauthorizedError
 
 
@@ -84,6 +85,13 @@ def _authenticate(allowed: list[str]) -> bool:
     A blueprint-wide ``require_auth()`` plus a per-route ``require_permission()``
     would otherwise authenticate twice — and for a bearer token that means a
     second introspection round trip to the identity provider.
+
+    ``AUTH_ENABLED=false`` makes credentials *optional* rather than ignored:
+    a caller that presents a valid credential is still identified (so an
+    administrator can keep using the dashboard), while a caller that presents
+    none proceeds **anonymously**.  Authorization then falls through to the
+    ``anonymous`` role, which is exactly what that role is documented to be
+    for — see ``auth.permissions.BUILTIN_ROLES``.
     """
     if getattr(g, "auth_user", None) is not None:
         return True
@@ -91,7 +99,9 @@ def _authenticate(allowed: list[str]) -> bool:
         fn = AUTH_METHODS.get(method)
         if fn and fn():
             return True
-    return False
+    # No credential worked.  With the master switch off that is not an error:
+    # the request stays anonymous and the guard decides from anonymous grants.
+    return not settings.auth.auth_enabled
 
 
 def _unauthorized(allowed: list[str]) -> UnauthorizedError:
