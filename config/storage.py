@@ -37,6 +37,14 @@ class StorageConfig(BaseSettings):
         default="python-build-standalone",
         description="Path to python-build-standalone releases directory",
     )
+    node_builds_dir: str = Field(
+        default="node-builds",
+        description=(
+            "Path to a nodejs.org/dist-shaped mirror of prebuilt Node.js "
+            "archives (release directories named vX.Y.Z), consumed by nvm, fnm "
+            "and node-gyp through NODEJS_ORG_MIRROR"
+        ),
+    )
     api_keys_file: str = Field(
         default="data/cpypiserver.db",
         description="SQLite database path for API keys and stats",

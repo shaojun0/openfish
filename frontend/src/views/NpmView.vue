@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 
 import { fetchNpmCatalog, type NpmCatalog, type NpmPackage } from '@/api'
 import { apiError } from '@/api/client'
+import BuildCatalogView from '@/components/BuildCatalogView.vue'
 import CodeBlock from '@/components/CodeBlock.vue'
 import TablePager from '@/components/TablePager.vue'
 import { usePagination } from '@/composables/usePagination'
@@ -12,11 +13,24 @@ import { formatDate } from '@/utils/format'
 
 const { t } = useI18n()
 
+/**
+ * One Node page, two sub-elements: the npm package catalog and the prebuilt
+ * Node.js mirror.  The dropdown picks which one the page is showing — the
+ * same pattern the Python page uses for packages vs CPython builds.
+ */
+const infoType = ref<'package' | 'build'>('package')
+
 const catalog = ref<NpmCatalog | null>(null)
 const loading = ref(true)
 
 const packages = computed<NpmPackage[]>(() => catalog.value?.packages ?? [])
 const { page, pageSize, pageSizes, total, rows } = usePagination(packages)
+
+const heading = computed(() =>
+  infoType.value === 'package'
+    ? { title: t('npm.title'), description: t('npm.description') }
+    : { title: t('build.nodeTitle'), description: t('build.nodeDescription') },
+)
 
 /** The URL clients would point at once the registry proxy lands. */
 const registryUrl = computed(() => `${window.location.origin}/npm/`)
@@ -46,35 +60,54 @@ function openStaticIndex(): void {
   window.open('/npm/', '_blank', 'noopener')
 }
 
-onMounted(load)
+function openTab(url: string): void {
+  window.open(url, '_blank', 'noopener')
+}
+
+onMounted(() => {
+  if (infoType.value === 'package') load()
+})
 </script>
 
 <template>
   <div class="page">
     <div class="page__header">
       <div class="page__heading">
-        <h1 class="page__title">{{ t('npm.title') }}</h1>
-        <p class="page__description">{{ t('npm.description') }}</p>
+        <h1 class="page__title">{{ heading.title }}</h1>
+        <p class="page__description">{{ heading.description }}</p>
       </div>
       <div class="toolbar">
-        <el-button @click="openStaticIndex">
+        <el-select v-model="infoType" class="toolbar__type">
+          <el-option value="package" :label="t('npm.infoPackages')" />
+          <el-option value="build" :label="t('npm.infoBuilds')" />
+        </el-select>
+        <template v-if="infoType === 'package'">
+          <el-button @click="openStaticIndex">
+            <el-icon><Link /></el-icon>
+            <span class="btn-label">{{ t('npm.staticIndex') }}</span>
+          </el-button>
+          <el-button :loading="loading" @click="load">
+            <el-icon><Refresh /></el-icon>
+            <span class="btn-label">{{ t('common.refresh') }}</span>
+          </el-button>
+        </template>
+        <el-button v-else @click="openTab('/node-builds/')">
           <el-icon><Link /></el-icon>
-          <span class="btn-label">{{ t('npm.staticIndex') }}</span>
-        </el-button>
-        <el-button :loading="loading" @click="load">
-          <el-icon><Refresh /></el-icon>
-          <span class="btn-label">{{ t('common.refresh') }}</span>
+          <span class="btn-label">{{ t('build.staticIndex') }}</span>
         </el-button>
       </div>
     </div>
 
-    <el-alert
-      type="info"
-      show-icon
-      :closable="false"
-      :title="t('npm.proxyTitle')"
-      :description="t('npm.proxyDesc')"
-    />
+    <BuildCatalogView v-if="infoType === 'build'" kind="node" />
+
+    <template v-else>
+      <el-alert
+        type="info"
+        show-icon
+        :closable="false"
+        :title="t('npm.proxyTitle')"
+        :description="t('npm.proxyDesc')"
+      />
 
     <el-card shadow="never">
       <template #header>
@@ -160,7 +193,8 @@ onMounted(load)
         :page-sizes="pageSizes"
         :total="total"
       />
-    </el-card>
+      </el-card>
+    </template>
   </div>
 </template>
 
@@ -173,6 +207,10 @@ onMounted(load)
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.toolbar__type {
+  width: 160px;
 }
 
 .btn-label {

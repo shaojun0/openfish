@@ -5,11 +5,19 @@ import { useI18n } from 'vue-i18n'
 
 import { fetchPackages, type PackageSummary } from '@/api'
 import { apiError } from '@/api/client'
+import BuildCatalogView from '@/components/BuildCatalogView.vue'
 import TablePager from '@/components/TablePager.vue'
 import { usePagination } from '@/composables/usePagination'
 import { formatBytes } from '@/utils/format'
 
 const { t } = useI18n()
+
+/**
+ * One Python page, two sub-elements: the package list and the prebuilt
+ * CPython mirror.  The dropdown picks which one the page is showing, so the
+ * two live together instead of as separate sidebar entries.
+ */
+const infoType = ref<'package' | 'build'>('package')
 
 const packages = ref<PackageSummary[]>([])
 const loading = ref(true)
@@ -22,6 +30,12 @@ const filtered = computed(() => {
 })
 
 const { page, pageSize, pageSizes, total, rows, onSortChange, reset } = usePagination(filtered)
+
+const heading = computed(() =>
+  infoType.value === 'package'
+    ? { title: t('packages.title'), description: t('packages.description') }
+    : { title: t('build.pythonTitle'), description: t('build.pythonDescription') },
+)
 
 // A new search is a new result set: start it from the first page.
 watch(query, reset)
@@ -54,33 +68,47 @@ function openTab(url: string): void {
   window.open(url, '_blank', 'noopener')
 }
 
-onMounted(load)
+onMounted(() => {
+  if (infoType.value === 'package') load()
+})
 </script>
 
 <template>
   <div class="page">
     <div class="page__header">
       <div class="page__heading">
-        <h1 class="page__title">{{ t('packages.title') }}</h1>
-        <p class="page__description">{{ t('packages.description') }}</p>
+        <h1 class="page__title">{{ heading.title }}</h1>
+        <p class="page__description">{{ heading.description }}</p>
       </div>
       <div class="toolbar">
-        <el-input
-          v-model="query"
-          class="toolbar__search"
-          clearable
-          :placeholder="t('packages.filterPlaceholder')"
-        >
-          <template #prefix><el-icon><Search /></el-icon></template>
-        </el-input>
-        <el-button :loading="loading" @click="load">
-          <el-icon><Refresh /></el-icon>
-          <span class="btn-label">{{ t('common.refresh') }}</span>
+        <el-select v-model="infoType" class="toolbar__type">
+          <el-option value="package" :label="t('packages.infoPackages')" />
+          <el-option value="build" :label="t('packages.infoBuilds')" />
+        </el-select>
+        <template v-if="infoType === 'package'">
+          <el-input
+            v-model="query"
+            class="toolbar__search"
+            clearable
+            :placeholder="t('packages.filterPlaceholder')"
+          >
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-button :loading="loading" @click="load">
+            <el-icon><Refresh /></el-icon>
+            <span class="btn-label">{{ t('common.refresh') }}</span>
+          </el-button>
+        </template>
+        <el-button v-else @click="openTab('/python-builds/')">
+          <el-icon><Link /></el-icon>
+          <span class="btn-label">{{ t('build.staticIndex') }}</span>
         </el-button>
       </div>
     </div>
 
-    <el-card shadow="never">
+    <BuildCatalogView v-if="infoType === 'build'" kind="python" />
+
+    <el-card v-else shadow="never">
       <el-table
         v-loading="loading"
         :data="rows"
@@ -162,6 +190,10 @@ onMounted(load)
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.toolbar__type {
+  width: 160px;
 }
 
 .toolbar__search {

@@ -50,6 +50,10 @@ api_keys_data/
 docker/api_keys_data/
 packages/
 python-build-standalone/
+# The Node.js mirror holds multi-gigabyte archives; commit only the README that
+# documents the layout it expects.
+node-builds/*
+!node-builds/README.txt
 
 # ── TLS material (private CA / certs / keys) ────────────────────────
 *.pem

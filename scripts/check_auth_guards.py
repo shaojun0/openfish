@@ -72,6 +72,7 @@ PUBLIC_ENDPOINTS: dict[str, str] = {
     # Liveness probes.
     "health.health": "liveness probe",
     "python_build.health": "mirror status probe",
+    "node_build.health": "mirror status probe",
     # Answers "who am I?" — returns the anonymous principal when unauthenticated.
     "session.whoami": "identity probe",
 }

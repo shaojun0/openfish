@@ -42,6 +42,11 @@
       "description": "把 npm registry 指向 openfish（registry 协议已实现，未命中会回源上游）",
       "tags": ["npm", "network"]
     },
+    "net/node-builds-mirror.sh": {
+      "name": "Node.js 预编译镜像同步",
+      "description": "从 nodejs.org/dist 拉取指定版本的 Node.js 预编译包到 NODE_BUILDS_DIR，供 nvm / fnm 内网安装",
+      "tags": ["node", "nodejs", "network"]
+    },
     "net/docker-registry.sh": {
       "name": "Docker Registry 代理配置",
       "description": "说明如何让 docker pull 走 openfish 的 /docker/v2 只读代理（含 insecure-registries 提示）",

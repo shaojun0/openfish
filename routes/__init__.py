@@ -7,6 +7,7 @@ Layout
 ``/api/v1/*``         JSON contract consumed by the Vue SPA and by API-key clients
 ``/simple/*``         PEP 503 / PEP 691 — consumed by pip, uv, twine
 ``/python-builds/*``  uv CPython mirror
+``/node-builds/*``    nvm/fnm/node-gyp Node.js mirror
 ``/tools/*``          tool index + downloads (``/api/v1/tools`` for JSON)
 ``/npm/*``            npm index, ``/-/all``, ``/-/ping`` + tarball downloads
 ``/docker/*``         docker index, ``/v2/_catalog`` + image tarball downloads
@@ -29,6 +30,7 @@ def register_all(app):
     from routes.api_keys import api_keys_bp
     from routes.admin import admin_bp
     from routes.python_build import python_build_bp
+    from routes.node_build import node_build_bp
     from routes.session import session_bp
     from routes.discovery import discovery_bp
     from routes.spa import spa_bp
@@ -52,16 +54,18 @@ def register_all(app):
     # holding admin:view does not let you edit roles.
     access_bp.before_request(require_permission(ADMIN_ROLES))
     pypi_bp.before_request(require_auth())
-    # `python_build_bp` intentionally has no blueprint-wide guard: its
-    # `/python-builds/health` endpoint is a public mirror probe.  The other
-    # routes there carry `@require_auth()` decorators, and
-    # `scripts/check_auth_guards.py` fails the build if one of them is ever
-    # written above its `@route` decorator and silently stops running.
+    # `python_build_bp` and `node_build_bp` intentionally have no
+    # blueprint-wide guard: their `/*-builds/health` endpoints are public
+    # mirror probes.  The other routes there carry `@require_permission`
+    # decorators, and `scripts/check_auth_guards.py` fails the build if one of
+    # them is ever written above its `@route` decorator and silently stops
+    # running.
 
     # ── Machine-facing endpoints ────────────────────────────────────
     app.register_blueprint(health_bp)
     app.register_blueprint(pypi_bp, url_prefix=prefix)
     app.register_blueprint(python_build_bp, url_prefix=prefix)
+    app.register_blueprint(node_build_bp, url_prefix=prefix)
     app.register_blueprint(auth_router, url_prefix=prefix)
 
     # ── API discovery: /openapi.json, /docs, /llms.txt, /.well-known/... ──

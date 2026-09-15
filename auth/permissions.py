@@ -40,6 +40,11 @@ BUILD_READ = "build:read"
 BUILD_DOWNLOAD = "build:download"
 BUILD_SHA256 = "build:sha256"
 
+# nodejs.org/dist mirror (nvm / fnm / node-gyp)
+NODE_BUILD_READ = "nodebuild:read"
+NODE_BUILD_DOWNLOAD = "nodebuild:download"
+NODE_BUILD_SHA256 = "nodebuild:sha256"
+
 # Artifact hub — tools catalog (downloadable scripts/binaries)
 TOOL_READ = "tool:read"
 TOOL_DOWNLOAD = "tool:download"
@@ -78,6 +83,9 @@ BUILTIN: dict[str, tuple[str, str]] = {
     BUILD_READ: ("浏览 CPython 构建", "查看 python-build-standalone 发布列表"),
     BUILD_DOWNLOAD: ("下载 CPython 构建", "下载预编译的 CPython 发行版"),
     BUILD_SHA256: ("读取构建校验和", "查询构建产物的 SHA256"),
+    NODE_BUILD_READ: ("浏览 Node 构建", "查看 nodejs.org/dist 预编译 Node.js 发布列表"),
+    NODE_BUILD_DOWNLOAD: ("下载 Node 构建", "下载预编译的 Node.js 发行版与 SHASUMS256.txt"),
+    NODE_BUILD_SHA256: ("读取 Node 构建校验和", "查询 Node.js 构建产物的 SHA256"),
     TOOL_READ: ("浏览工具目录", "查看内网工具目录的分类与文件清单"),
     TOOL_DOWNLOAD: ("下载工具", "从工具目录下载脚本或二进制文件"),
     NPM_READ: ("浏览 npm 目录", "查看本地 npm 包目录（脚手架）"),
@@ -184,6 +192,7 @@ BUILTIN_ROLES: dict[str, tuple[str, str, bool, bool, bool]] = {
 __all__ = [
     "PACKAGE_READ", "PACKAGE_WRITE",
     "BUILD_READ", "BUILD_DOWNLOAD", "BUILD_SHA256",
+    "NODE_BUILD_READ", "NODE_BUILD_DOWNLOAD", "NODE_BUILD_SHA256",
     "TOOL_READ", "TOOL_DOWNLOAD", "NPM_READ", "MODEL_READ",
     "DOCKER_READ", "DOCKER_DOWNLOAD", "DEBIAN_READ", "DEBIAN_DOWNLOAD",
     "KEY_LIST", "KEY_CREATE", "KEY_DELETE", "KEY_STATS",

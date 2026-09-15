@@ -27,7 +27,7 @@ from config import settings
 from auth.decorators import require_permission
 from auth.permissions import BUILD_DOWNLOAD, BUILD_READ, BUILD_SHA256
 from openapi import api_operation, binary, errors, ok
-from services import templates
+from services import build_mirror, templates
 
 logger = logging.getLogger("cpypiserver.python_build")
 python_build_bp = Blueprint("python_build", __name__)
@@ -35,6 +35,18 @@ python_build_bp = Blueprint("python_build", __name__)
 
 def _index():
     return current_app.extensions.get("python_build_index")
+
+
+def _payload(idx) -> dict:
+    """The build catalog the SPA's `/packages` page renders."""
+    prefix = settings.server.route_prefix.rstrip("/") + "/python-builds"
+    return build_mirror.python_catalog(
+        idx,
+        url_prefix=prefix,
+        mirror_url=url_for("python_build.discovery", _external=True),
+        index_url=url_for("python_build.discovery", _external=True),
+        exists=Path(settings.storage.python_builds_dir).is_dir(),
+    )
 
 
 @python_build_bp.route("/python-builds/")
@@ -165,3 +177,35 @@ def sha256(release_tag: str, filename: str):
         return jsonify({"error": f"Build '{filename}' not found"}), 404
     digest = idx.get_sha256(f)
     return jsonify({"filename": f.filename, "release_tag": f.release_tag, "version": f.version, "sha256": digest, "size": f.size})
+
+
+# ── JSON API for the SPA ─────────────────────────────────────────────
+
+@python_build_bp.route("/api/v1/python-builds")
+@require_permission(BUILD_READ)
+@api_operation(
+    summary="CPython build catalog",
+    description=(
+        "Every mirrored `python-build-standalone` release and archive, shaped "
+        "for the SPA's `/packages` page: the CPython counterpart of "
+        "`GET /api/v1/node-builds`, and the same document the node page shows "
+        "under its build tab. `mirror_url` and `env_var` are what a client "
+        "should copy to install an interpreter from this server."
+    ),
+    tags=["Python builds"],
+    responses={
+        "200": ok("CPython build catalog", build_mirror.CATALOG_SCHEMA),
+        **errors("401", "403", "500"),
+    },
+)
+def catalog():
+    idx = _index()
+    if idx is None:
+        return jsonify({
+            "kind": "python", "root": settings.storage.python_builds_dir,
+            "exists": False, "url_prefix": "", "mirror_url": "", "index_url": "",
+            "env_var": "UV_PYTHON_INSTALL_MIRROR", "client": "uv",
+            "releases": [], "release_count": 0, "file_count": 0,
+            "total_size": 0, "total_size_human": "0 B",
+        })
+    return jsonify(_payload(idx))

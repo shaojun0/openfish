@@ -116,6 +116,11 @@ class WatchdogIndex(ABC):
         self._lock = threading.Lock()
         self._observer: object | None = None
 
+    @property
+    def root(self) -> str:
+        """The directory this index watches; safe to read from a route."""
+        return self._dir
+
     # ── Subclass contract ───────────────────────────────────────────
 
     @abstractmethod

@@ -21,6 +21,7 @@ export default {
     admin: '系统统计',
     access: '访问控制',
     builds: 'Python 构建',
+    nodeBuilds: 'Node 构建',
     index: 'Python 索引',
     docs: '接口文档',
     groupPython: 'Python 生态',
@@ -104,6 +105,8 @@ export default {
     twineDesc: '使用 API 密钥作为密码上传构建产物。',
     uvTitle: 'Python 解释器镜像（uv）',
     uvDesc: '把 UV_PYTHON_INSTALL_MIRROR 指向本仓库以下载预编译 CPython。',
+    nodeTitle: 'Node.js 运行时镜像（nvm / fnm）',
+    nodeDesc: '把 NVM_NODEJS_ORG_MIRROR 或 FNM_NODE_DIST_MIRROR 指向本仓库以下载预编译 Node.js。',
     copy: '复制',
   },
 
@@ -120,6 +123,8 @@ export default {
   packages: {
     title: '包管理',
     description: '仓库中所有可安装的包。索引地址可直接用于 pip 与 uv。',
+    infoPackages: 'Python 包',
+    infoBuilds: 'Python 构建',
     name: '包名',
     files: '文件数',
     size: '占用空间',
@@ -308,6 +313,8 @@ export default {
   npm: {
     title: 'npm 目录',
     description: 'npm registry 协议（packument / tarball / 搜索）与本地包清单。',
+    infoPackages: 'npm 包',
+    infoBuilds: 'Node 构建',
     staticIndex: '静态索引',
     proxyTitle: 'npm registry 协议已接入',
     proxyDesc: '本地 tarball 与 catalog.json 优先；未命中且配置了 NPM_UPSTREAM 时按需回源并缓存，npm install / view / search 可直接指向本服务。',
@@ -403,6 +410,46 @@ export default {
     snippetTitle: 'DSH 侧配置片段',
     snippetDesc: '按别名展开的模型映射，可直接粘贴到 DSH 配置中（仅含已启用条目）。',
     loadFailed: '加载模型路由失败',
+  },
+
+  build: {
+    pythonTitle: 'Python 构建',
+    pythonDescription:
+      'python-build-standalone 预编译 CPython 镜像，供 uv 从内网安装解释器。',
+    nodeTitle: 'Node 构建',
+    nodeDescription:
+      'nodejs.org/dist 预编译 Node.js 镜像，供 nvm / fnm / node-gyp 从内网安装运行时。',
+    pythonProxyTitle: 'CPython 镜像已接入',
+    pythonProxyDesc:
+      '把 UV_PYTHON_INSTALL_MIRROR 指向本服务，uv python install 即可从内网下载预编译 CPython；下方只列出镜像中实际存在的构建产物。',
+    nodeProxyTitle: 'Node.js 镜像已接入',
+    nodeProxyDesc:
+      '把 NVM_NODEJS_ORG_MIRROR（或 FNM_NODE_DIST_MIRROR）指向本服务，nvm / fnm install 即可从内网下载预编译 Node.js；index.json、index.tab 与 SHASUMS256.txt 均已提供。',
+    staticIndex: '静态索引',
+    setupTitle: '接入方式',
+    mirrorLabel: '镜像地址',
+    indexLabel: '索引端点',
+    envLabel: '环境变量',
+    usageLabel: '命令行',
+    usageCommentPython: '指向本仓库的 CPython 镜像',
+    usageCommentNode: '指向本仓库的 Node.js 镜像',
+    usageCommentFnm: 'fnm 使用同一个地址',
+    listTitle: '构建产物',
+    summary: '{releases} 个版本 · {files} 个文件 · {size}',
+    allReleases: '全部版本',
+    filterPlaceholder: '按文件名、版本或平台筛选',
+    name: '文件',
+    version: '版本',
+    release: '发布版本',
+    platform: '平台',
+    variant: '变体',
+    format: '格式',
+    size: '大小',
+    checksum: '校验和',
+    download: '下载',
+    empty: '镜像目录中还没有构建产物。',
+    missingDesc: '服务端未找到目录 {root}。请确认 {env} 配置，或把发布目录放入该路径。',
+    loadFailed: '加载构建列表失败',
   },
 
   notFound: {

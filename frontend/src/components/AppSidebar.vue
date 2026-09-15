@@ -38,7 +38,7 @@ interface NavGroup {
  * index elements alike:
  *
  *   Python 生态 → 包管理 (SPA) · Python 索引 (/simple/) · Python 构建
- *   npm 生态    → npm 目录 (SPA) · npm 静态索引 (/npm/)
+ *   npm 生态    → npm 目录 (SPA) · npm 静态索引 (/npm/) · Node 构建
  *   Docker 生态 → Docker 目录 (SPA) · Docker 静态索引 (/docker/)
  *   Debian 生态 → Debian 目录 (SPA) · Debian 静态索引 (/debian/)
  *   工具        → 工具目录 (SPA) · 工具静态索引 (/tools/)
@@ -76,6 +76,12 @@ const groups = computed<NavGroup[]>(() => {
       items: [
         { index: '/npm', titleKey: 'nav.npm', icon: 'ShoppingBag' },
         { index: '/npm/', href: '/npm/', titleKey: 'nav.npmIndex', icon: 'Link' },
+        {
+          index: '/node-builds/',
+          href: '/node-builds/',
+          titleKey: 'nav.nodeBuilds',
+          icon: 'Download',
+        },
       ],
     },
     {

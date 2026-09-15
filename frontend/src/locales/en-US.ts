@@ -21,6 +21,7 @@ export default {
     admin: 'Statistics',
     access: 'Access control',
     builds: 'Python Builds',
+    nodeBuilds: 'Node Builds',
     index: 'Python Index',
     docs: 'API Docs',
     groupPython: 'Python',
@@ -104,6 +105,8 @@ export default {
     twineDesc: 'Use an API key as the password when uploading build artifacts.',
     uvTitle: 'CPython mirror (uv)',
     uvDesc: 'Point UV_PYTHON_INSTALL_MIRROR here to download prebuilt CPython.',
+    nodeTitle: 'Node.js runtime mirror (nvm / fnm)',
+    nodeDesc: 'Point NVM_NODEJS_ORG_MIRROR or FNM_NODE_DIST_MIRROR here to download prebuilt Node.js.',
     copy: 'Copy',
   },
 
@@ -120,6 +123,8 @@ export default {
   packages: {
     title: 'Packages',
     description: 'Every installable package in this registry. The index URL works with pip and uv.',
+    infoPackages: 'Python packages',
+    infoBuilds: 'Python builds',
     name: 'Package',
     files: 'Files',
     size: 'Size',
@@ -318,6 +323,8 @@ export default {
     title: 'npm catalog',
     description:
       'The npm registry protocol (packuments, tarballs, search) plus the local package list.',
+    infoPackages: 'npm packages',
+    infoBuilds: 'Node builds',
     staticIndex: 'Static index',
     proxyTitle: 'The npm registry protocol is served',
     proxyDesc:
@@ -416,6 +423,47 @@ export default {
     snippetDesc:
       'Alias-expanded model map, ready to paste into a DSH config (enabled routes only).',
     loadFailed: 'Failed to load model routes',
+  },
+
+  build: {
+    pythonTitle: 'Python Builds',
+    pythonDescription:
+      'Prebuilt CPython mirror (python-build-standalone) for installing interpreters from the intranet with uv.',
+    nodeTitle: 'Node Builds',
+    nodeDescription:
+      'Prebuilt Node.js mirror (nodejs.org/dist) for installing runtimes from the intranet with nvm, fnm or node-gyp.',
+    pythonProxyTitle: 'CPython mirror is live',
+    pythonProxyDesc:
+      'Point UV_PYTHON_INSTALL_MIRROR at this server and `uv python install` fetches prebuilt CPython over the intranet. Only artifacts actually present on disk are listed below.',
+    nodeProxyTitle: 'Node.js mirror is live',
+    nodeProxyDesc:
+      'Point NVM_NODEJS_ORG_MIRROR (or FNM_NODE_DIST_MIRROR) at this server and `nvm install` / `fnm install` fetches prebuilt Node.js over the intranet. index.json, index.tab and SHASUMS256.txt are all served.',
+    staticIndex: 'Static index',
+    setupTitle: 'Getting started',
+    mirrorLabel: 'Mirror URL',
+    indexLabel: 'Index endpoint',
+    envLabel: 'Environment variable',
+    usageLabel: 'Command line',
+    usageCommentPython: 'Point at this CPython mirror',
+    usageCommentNode: 'Point at this Node.js mirror',
+    usageCommentFnm: 'fnm uses the same URL',
+    listTitle: 'Build artifacts',
+    summary: '{releases} release(s) · {files} file(s) · {size}',
+    allReleases: 'All releases',
+    filterPlaceholder: 'Filter by filename, version or platform',
+    name: 'File',
+    version: 'Version',
+    release: 'Release',
+    platform: 'Platform',
+    variant: 'Variant',
+    format: 'Format',
+    size: 'Size',
+    checksum: 'Checksum',
+    download: 'Download',
+    empty: 'No build artifacts in the mirror directory yet.',
+    missingDesc:
+      'The server could not find {root}. Check {env}, or copy release directories into that path.',
+    loadFailed: 'Failed to load the build list',
   },
 
   notFound: {

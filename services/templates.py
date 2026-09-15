@@ -9,6 +9,7 @@ Templates are grouped **by ecosystem**, mirroring the sidebar and the URL
 namespaces, so a new index element goes next to the siblings it belongs to::
 
     static/python/    PEP 503 index + python-build-standalone listings
+    static/node/      the nodejs.org/dist build mirror listings
     static/tools/     the tools directory index
     static/npm/       the npm catalog index
     static/docker/    the docker artifact index
@@ -21,6 +22,7 @@ from functools import lru_cache
 
 #: ``static/<ecosystem>/<file>`` — one place to change if the tree moves.
 _PYTHON = "static/python"
+_NODE = "static/node"
 _TOOLS = "static/tools"
 _NPM = "static/npm"
 _DOCKER = "static/docker"
@@ -49,6 +51,16 @@ def build_discovery() -> str:
 
 def build_release() -> str:
     return _load(f"{_PYTHON}/build_release.html")
+
+
+# ── Node.js ──────────────────────────────────────────────────────────
+
+def node_build_discovery() -> str:
+    return _load(f"{_NODE}/build_discovery.html")
+
+
+def node_build_release() -> str:
+    return _load(f"{_NODE}/build_release.html")
 
 
 # ── Tools / npm ──────────────────────────────────────────────────────

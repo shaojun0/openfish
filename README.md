@@ -13,6 +13,9 @@ the codebase.
   (`/simple/`, upload via `POST /`).
 - **python-build-standalone hosting** — serve and checksum prebuilt CPython
   distributions.
+- **nodejs.org/dist mirror** — serve prebuilt Node.js archives alongside the
+  `index.json`, `index.tab`, `SHASUMS256.txt` and `latest` / `latest-v20.x`
+  aliases that `nvm`, `fnm` and `node-gyp` resolve against.
 - **Artifact hub** — beyond Python, the sidebar is grouped by ecosystem and each
   group is a real protocol server, not a listing: an **npm registry**
   (packuments, manifests, tarballs, `/-/v1/search`), a **Docker Registry v2**
@@ -30,7 +33,8 @@ the codebase.
   `permissions`, `user_roles`, `role_permissions`). Roles are rows, not code:
   granting one is a database write that takes effect on the next request. Every
   permission point is enforced by the route that names it —
-  see [Roles and permissions](#roles-and-permissions).- **Extension registry** — extensions declare dependencies and are initialized
+  see [Roles and permissions](#roles-and-permissions).
+- **Extension registry** — extensions declare dependencies and are initialized
   in topological order (`extensions/`), so `app.py` stays short.
 - **Local packages over HTTP** — packages are served directly from disk with an
   in-memory index kept fresh by `watchdog`.
@@ -148,6 +152,7 @@ Templates are provided at `.env.example` (local development) and
 | `ROUTE_PREFIX`          | *(empty)*              | Global URL prefix for every route                  |
 | `PACKAGES_DIR`          | `packages`             | Where uploaded packages live                       |
 | `PYTHON_BUILDS_DIR`     | `python-build-standalone` | Prebuilt CPython releases                       |
+| `NODE_BUILDS_DIR`       | `node-builds`          | Prebuilt Node.js mirror (`nodejs.org/dist` layout) |
 | `API_KEYS_FILE`         | `data/cpypiserver.db`  | SQLite database for API keys and stats             |
 | `STORAGE__OVERWRITE`    | `false`                | Allow re-uploading an existing filename            |
 | `MAX_CONTENT_LENGTH`    | `104857600` (100 MiB)  | Maximum upload size                                |
@@ -250,9 +255,12 @@ The permission points shipped today, and the routes that enforce them:
 | ---------- | ------ |
 | `package:read` | `/simple/*`, `/packages/<file>`, `GET /api/v1/packages` |
 | `package:write` | `POST /` and `/legacy/` (twine upload) |
-| `build:read` | `/python-builds/` listings |
+| `build:read` | `/python-builds/` listings, `GET /api/v1/python-builds` |
 | `build:download` | `/python-builds/<tag>/<file>` |
 | `build:sha256` | `/python-builds/<tag>/<file>/sha256` |
+| `nodebuild:read` | `/node-builds/` listings, `index.json`, `index.tab`, `GET /api/v1/node-builds` |
+| `nodebuild:download` | `/node-builds/<tag>/<file>` and `/node-builds/<tag>/SHASUMS256.txt` |
+| `nodebuild:sha256` | `/node-builds/<tag>/<file>/sha256` |
 | `key:list` / `key:create` / `key:delete` / `key:stats` | the matching `/api/v1/keys*` endpoints |
 | `admin:view` | `/api/v1/admin/stats` |
 | `admin:refresh` | `POST /api/v1/admin/refresh-stats` |
@@ -331,12 +339,20 @@ first, and an optional upstream mirror is fetched on demand and cached:
 
 | Group        | Page       | Local store          | Upstream (optional) | Protocol served |
 | ------------ | ---------- | -------------------- | ------------------- | --------------- |
-| Python       | `/packages`| `PACKAGES_DIR` + CPython mirror | —        | PEP 503 / PEP 691 |
-| npm          | `/npm`     | `NPM_DIR`            | `NPM_UPSTREAM`      | npm registry — packuments, manifests, tarballs, `/-/v1/search` |
+| Python       | `/packages` (dropdown) | `PACKAGES_DIR` + `PYTHON_BUILDS_DIR` | — | PEP 503 / PEP 691 + uv CPython mirror |
+| npm / Node   | `/npm` (dropdown) | `NPM_DIR` + `NODE_BUILDS_DIR` | `NPM_UPSTREAM` | npm registry — packuments, manifests, tarballs, `/-/v1/search` — plus a `nodejs.org/dist` mirror for nvm/fnm |
 | Docker       | `/docker`  | `DOCKER_DIR`         | `DOCKER_UPSTREAM`   | Docker Registry v2 — tags, manifests, blobs |
 | Debian       | `/debian`  | `DEBIAN_DIR`         | `DEBIAN_UPSTREAM`   | flat `Packages` + apt mirror proxy (`dists/`, `pool/`) |
 | 工具 / Tools | `/tools`   | `TOOLS_DIR`          | —                   | direct file downloads |
 | 模型路由     | `/models`  | `MODELS_FILE`        | —                   | publish-only JSON table |
+
+The Python and npm pages each carry a **dropdown** that switches the page
+between its two sub-elements — packages vs. prebuilt builds for Python, npm
+packages vs. the Node.js mirror for Node — so related views share one page
+instead of multiplying sidebar entries. Both build views are the same Vue
+component (`BuildCatalogView.vue`) fed by `/api/v1/python-builds` and
+`/api/v1/node-builds`; see
+[Prebuilt interpreter mirrors](#prebuilt-interpreter-mirrors).
 
 The three proxies share one caching contract, implemented once in
 `services/upstream.py` and used by `services/npm_registry.py`,
@@ -413,7 +429,8 @@ table plus an alias-expanded snippet ready to paste into a DSH config.
 All the catalogs are file-backed and read-only over HTTP: there is no upload
 API, by design — but *serving* is not read-only any more, so a package installed
 through a proxy does leave a cached copy behind. The Docker image creates
-`/app/tools`, `/app/npm`, `/app/docker-images` and `/app/debian`, and
+`/app/tools`, `/app/npm`, `/app/node-builds`, `/app/docker-images` and
+`/app/debian`, and
 `docker/docker-compose.yml` bind-mounts the repository copies so an operator can
 edit them in place; the caches live under `/app/data/cache`, on the same
 persistent volume as the API-key database.
@@ -464,6 +481,43 @@ Both protocols are proxied now: with `DOCKER_UPSTREAM` and `DEBIAN_UPSTREAM`
 set, `docker pull` and `apt update` work against this server, and the static
 indexes above remain the enumeration surface for scripts.
 
+### Prebuilt interpreter mirrors
+
+The Python and Node ecosystems each have a **prebuilt-runtime mirror** next to
+their package registry. Both are plain directories on disk — the filesystem is
+the source of truth, so publishing is a file copy and the next request sees it —
+and both are surfaced twice: a machine-facing index a tool consumes directly,
+and a table in the SPA behind the page dropdown.
+
+| Mirror | Directory | Machine-facing index | Client |
+| ------ | --------- | -------------------- | ------ |
+| CPython (`python-build-standalone`) | `PYTHON_BUILDS_DIR`, one directory per release date | `GET /python-builds/` (HTML listing) | `uv python install`, via `UV_PYTHON_INSTALL_MIRROR` |
+| Node.js (`nodejs.org/dist`) | `NODE_BUILDS_DIR`, one directory per `vX.Y.Z` | `GET /node-builds/`, `/node-builds/index.json`, `/node-builds/index.tab` | `nvm` / `fnm` / `node-gyp`, via `NVM_NODEJS_ORG_MIRROR` |
+
+**Node.js.** The mirror is shaped exactly like `nodejs.org/dist`, so the real
+clients need no special casing: `index.json` and `index.tab` list the versions
+`nvm ls-remote` / `fnm ls-remote` enumerate, `SHASUMS256.txt` is what they verify
+a download against, and `latest` / `latest-v20.x` are the aliases `nvm install
+node` and `nvm install 20` resolve through before they know a version number.
+Only releases that are actually on disk are listed, so the mirror can never
+advertise a version it would then 404. When an authentic `SHASUMS256.txt` was
+mirrored alongside the archives it is served as-is; otherwise it is generated
+from the files on disk (hashed on first access, then cached). An authentic
+`index.json` at the mirror root is read as an overlay for the metadata a filename
+cannot carry (`lts`, `date`, `npm`, …) without ever inventing a release. See
+`node-builds/README.txt` for the layout and `tools/net/node-builds-mirror.sh`
+for a sync helper.
+
+**CPython.** `GET /python-builds/` returns the release listing `uv` expects when
+`UV_PYTHON_INSTALL_MIRROR` points here; each release directory is a date tag and
+each archive is individually downloadable and checksummable. Its JSON catalog
+(`GET /api/v1/python-builds`) is what the `/packages` dropdown renders.
+
+Both catalogs answer the same JSON shape — `releases[]` of `files[]`, each file
+carrying a `download_url` and a `sha256_url` — which is why one Vue component
+renders both. Digests are *not* computed while listing: `sha256_url` resolves one
+on demand (and caches it), so opening the page never hashes gigabytes.
+
 ## API overview
 
 ### Machine-facing (consumed by clients — no JavaScript)
@@ -480,6 +534,13 @@ indexes above remain the enumeration surface for scripts.
 | GET    | `/python-builds/<tag>/<filename>`              | Download a build                     |
 | GET    | `/python-builds/<tag>/<filename>/sha256`       | Build checksum                       |
 | GET    | `/python-builds/health`                        | Build mirror status                  |
+| GET    | `/node-builds/`                                | Available Node.js builds (HTML, or JSON with `?format=json`) |
+| GET    | `/node-builds/index.json`                      | Node version index (`nvm ls-remote`, fnm) |
+| GET    | `/node-builds/index.tab`                       | The same index, tab-separated        |
+| GET    | `/node-builds/<tag>/SHASUMS256.txt`            | Per-release checksums (`<tag>` may be `latest` / `latest-v20.x`) |
+| GET    | `/node-builds/<tag>/<filename>`                | Download a build                     |
+| GET    | `/node-builds/<tag>/<filename>/sha256`         | Build checksum                       |
+| GET    | `/node-builds/health`                          | Build mirror status                  |
 | GET    | `/tools/`                                       | Tools index (HTML, or JSON with `?format=json`) |
 | GET    | `/tools/<category>/<filename>`                  | Download a tool from the hub         |
 | GET    | `/npm/`                                         | npm catalog index (HTML, or the `/-/all` JSON) |
@@ -530,6 +591,8 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 | DELETE | `/api/v1/admin/users/<id>/roles/<role>` | Revoke a role (admin:roles)        |
 | PUT    | `/api/v1/admin/users/<id>/superuser` | Toggle the superuser bypass (superuser only) |
 | GET    | `/api/v1/tools`                   | Tools catalog grouped by category (tool:read) |
+| GET    | `/api/v1/python-builds`           | CPython build catalog for the SPA (build:read) |
+| GET    | `/api/v1/node-builds`             | Node.js build catalog for the SPA (nodebuild:read) |
 | GET    | `/api/v1/npm`                     | Local npm catalog scaffold (npm:read)    |
 | GET    | `/api/v1/docker`                  | Local docker catalog (docker:read)       |
 | GET    | `/api/v1/debian`                  | Local debian catalog (debian:read)       |
@@ -645,12 +708,17 @@ The split is by **audience**, not by convenience:
 | Audience | Owned by | Why |
 | -------- | -------- | --- |
 | A human in a browser (`/`, `/packages`, `/api-keys`, `/admin`) | Vue 3 SPA in `frontend/` | Rich interaction, no crawler contract |
-| A package manager (`/simple/`, `/packages/<f>`, `/python-builds/`) | Flask + Jinja (`static/*_template/`) | `pip` and `uv` **parse the HTML directly and never run JavaScript** — these are wire protocols, not web pages |
+| A package manager (`/simple/`, `/packages/<f>`, `/python-builds/`, `/node-builds/`) | Flask + Jinja (`static/<ecosystem>/`) | `pip`, `uv`, `nvm` and `fnm` **parse the HTML/JSON directly and never run JavaScript** — these are wire protocols, not web pages |
 | A script or agent (`/api/v1/*`, `/health`) | Flask JSON | Stable contract for API-key clients |
 
 Adding a new package ecosystem (npm, Maven, …) means adding a backend adapter
 plus its protocol routes; the SPA stays unchanged as long as the ecosystem is
-surfaced through `/api/v1`.
+surfaced through `/api/v1`. A page that covers two related sub-elements puts a
+small dropdown in its toolbar rather than growing another sidebar entry: the
+Python page switches between packages and CPython builds, the npm page between
+npm packages and the Node.js mirror. Both build sub-views are the one
+`BuildCatalogView.vue`, because the server flattens the two mirrors into a
+single JSON shape.
 
 Every SPA table pages **client-side**: the catalog endpoints return the whole
 list, `usePagination()` slices it in the browser and `TablePager.vue` renders a
@@ -666,27 +734,30 @@ app.py                 entry point — wires extensions, then routes
 cli.py                 administrative CLI (roles, grants, superuser bootstrap)
 config/                pydantic-settings models (server, storage, auth, security, hub)
 extensions/            pluggable infrastructure + topological init registry
-routes/                Flask blueprints (pypi, python_build, api_keys, admin,
-                       access, session, discovery, spa, auth) plus one per hub
-                       ecosystem: hub (tools, models), npm, docker, debian
+routes/                Flask blueprints (pypi, python_build, node_build, api_keys,
+                       admin, access, session, discovery, spa, auth) plus one per
+                       hub ecosystem: hub (tools, models), npm, docker, debian
 openapi/               API description: metadata registry, spec builder, renderers
 auth/                  guards, decorators, permission points, API keys, OAuth2
-index/                 package / build discovery and indexing
+index/                 package / interpreter-build discovery and indexing
+                       (packages.py, python_build.py, node_build.py)
 models/                SQLAlchemy models (users, roles, permissions, API keys, stats)
-services/              authorization service, hub catalogs, the shared upstream
-                       proxy/cache (upstream.py) and the per-ecosystem registry
-                       adapters (npm_registry, docker_registry, debian_apt),
-                       templates, stats, validation
+services/              authorization service, hub catalogs, build-mirror catalogs
+                       (build_mirror.py), the shared upstream proxy/cache
+                       (upstream.py) and the per-ecosystem registry adapters
+                       (npm_registry, docker_registry, debian_apt), templates,
+                       stats, validation
 schemas.py             request + response models (single source for /openapi.json)
 scripts/               verification gates (check_openapi, check_contract,
                        check_auth_guards, check_rbac, and one offline
                        conformance gate per proxy: check_npm_proxy,
                        check_docker_proxy, check_debian_proxy)
 frontend/              Vue 3 + Vite + Element Plus SPA (build-time only)
-static/                index templates grouped by ecosystem (python/ tools/ npm/)
-                       + the built SPA in static/dist/
+static/                index templates grouped by ecosystem (python/ node/ tools/
+                       npm/) + the built SPA in static/dist/
 tools/                 artifact hub — tools/<category>/<file> + catalog.json
 npm/                   artifact hub — local npm tarballs + catalog.json
+node-builds/           artifact hub — nodejs.org/dist-shaped Node.js mirror
 docker-images/         artifact hub — image tarballs + compose/Dockerfile
 debian/                artifact hub — local .deb files + apt snippets
 docker/                docker-compose.yml and its .env template

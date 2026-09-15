@@ -53,6 +53,21 @@ class PythonBuildFile:
     sha256_digest: Optional[str] = None
 
 
+# ── Node-build file ──────────────────────────────────────────────────
+
+@dataclass
+class NodeBuildFile:
+    filename: str
+    path: str
+    release_tag: str       # e.g. "v20.11.0"
+    version: str           # e.g. "20.11.0"
+    platform: str          # "linux" | "darwin" | "win" | "headers" | ...
+    arch: str              # "x64" | "arm64" | ... — empty for `headers`
+    extension: str         # e.g. "tar.xz"
+    size: int = 0
+    sha256_digest: Optional[str] = None
+
+
 # ── Sort helpers ─────────────────────────────────────────────────────
 
 OS_ORDER = {

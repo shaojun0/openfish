@@ -244,6 +244,60 @@ export interface DebianCatalog {
   artifacts: FlatArtifact[]
 }
 
+// ── Prebuilt interpreter mirrors (CPython / Node.js) ─────────────────
+//
+// `/api/v1/python-builds` and `/api/v1/node-builds` describe the same thing
+// with different filenames, so both pages render the one `BuildCatalogView`
+// off this shape.
+
+/** One downloadable archive in a build mirror. */
+export interface BuildFile {
+  filename: string
+  /** The release directory it lives in — a date tag, or `v20.11.0`. */
+  release_tag: string
+  version: string
+  /** Human label the server prepared, e.g. `cpython 3.12.13` / `node 20.11.0`. */
+  label: string
+  /** Target triple for CPython, `linux-x64` for Node. */
+  platform: string
+  /** `install_only_stripped` for CPython, the archive format for Node. */
+  variant: string
+  extension: string
+  size: number | null
+  size_human: string
+  download_url: string
+  /** Endpoint that computes the digest on demand. */
+  sha256_url: string
+  /** Only present once the digest has been computed and cached. */
+  sha256: string | null
+}
+
+export interface BuildRelease {
+  release_tag: string
+  file_count: number
+  total_size: number
+  total_size_human: string
+  files: BuildFile[]
+}
+
+export interface BuildCatalog {
+  kind: 'python' | 'node'
+  root: string
+  exists: boolean
+  url_prefix: string
+  /** What a client points its mirror env var at. */
+  mirror_url: string
+  /** The machine-facing index document (uv's listing, or `index.json`). */
+  index_url: string
+  env_var: string
+  client: string
+  release_count: number
+  file_count: number
+  total_size: number
+  total_size_human: string
+  releases: BuildRelease[]
+}
+
 // ── Endpoints ────────────────────────────────────────────────────────
 
 export async function fetchSession(): Promise<SessionInfo> {
@@ -316,6 +370,12 @@ export async function fetchDockerCatalog(): Promise<DockerCatalog> {
 
 export async function fetchDebianCatalog(): Promise<DebianCatalog> {
   const { data } = await http.get<DebianCatalog>('/debian')
+  return data
+}
+
+/** Prebuilt-interpreter mirror: `python` is CPython/uv, `node` is Node/nvm. */
+export async function fetchBuildCatalog(kind: 'python' | 'node'): Promise<BuildCatalog> {
+  const { data } = await http.get<BuildCatalog>(`/${kind}-builds`)
   return data
 }
 

@@ -44,6 +44,7 @@ export default defineConfig({
       '/simple': 'http://127.0.0.1:9090',
       '/packages': 'http://127.0.0.1:9090',
       '/python-builds': 'http://127.0.0.1:9090',
+      '/node-builds': 'http://127.0.0.1:9090',
     },
   },
 })

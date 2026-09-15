@@ -3,6 +3,7 @@
 from index.base import WatchdogIndex, compute_sha256
 from index.packages import PackageIndex, normalize_package_name, PackageFile
 from index.python_build import PythonBuildIndex
+from index.node_build import NodeBuildIndex
 
 
 def register_all(app):
@@ -20,9 +21,14 @@ def register_all(app):
     app.extensions["python_build_index"] = build_index
     atexit.register(build_index.stop)
 
+    node_index = NodeBuildIndex(settings.storage.node_builds_dir)
+    node_index.start()
+    app.extensions["node_build_index"] = node_index
+    atexit.register(node_index.stop)
+
 
 __all__ = [
     "WatchdogIndex", "compute_sha256",
     "PackageIndex", "normalize_package_name", "PackageFile",
-    "PythonBuildIndex", "register_all",
+    "PythonBuildIndex", "NodeBuildIndex", "register_all",
 ]

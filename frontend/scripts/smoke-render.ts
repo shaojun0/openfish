@@ -183,13 +183,40 @@ for (const [path, markers] of Object.entries(EXPECTED)) {
   })
 }
 
+// ── Build sub-views ─────────────────────────────────────────────────
+// The Python and npm pages swap in `BuildCatalogView` only when their dropdown
+// is on "builds", a state `renderToString` cannot reach (it never runs
+// `onMounted`).  Render the component directly for both mirrors so a template
+// error in that sub-element still fails this smoke run.
+const { h } = await import('vue')
+const { default: BuildCatalogView } = await import('../src/components/BuildCatalogView.vue')
+for (const kind of ['python', 'node'] as const) {
+  const subApp = createSSRApp({ render: () => h(BuildCatalogView, { kind }) })
+  const subPinia = createPinia()
+  subApp.use(subPinia)
+  setActivePinia(subPinia)
+  subApp.use(i18n)
+  subApp.use(ElementPlus)
+  for (const [name, component] of Object.entries(ElementPlusIcons)) {
+    if (name !== 'default') subApp.component(name, component)
+  }
+  const html = await renderToString(subApp)
+  const missing = [`${kind}-builds`, 'setup'].filter((m) => !html.includes(m))
+  results.push({
+    path: `build:${kind}`,
+    route: kind,
+    bytes: html.length,
+    missing,
+    ok: html.length > 400 && missing.length === 0,
+  })
+}
+
 const realProblems = problems.filter(
   (p) =>
     !p.includes('network disabled by smoke test') &&
     // jsdom does not implement scrolling; harmless for a render check.
     !p.includes("Not implemented: Window's scrollTo"),
 )
-
 console.log('')
 console.log('route        resolved      bytes   result')
 console.log('─'.repeat(60))

@@ -53,6 +53,16 @@ const uvSnippet = computed(
     `$env:UV_PYTHON_INSTALL_MIRROR = "${baseUrl.value}/python-builds/"`,
 )
 
+const nodeSnippet = computed(
+  () =>
+    `# nvm\n` +
+    `export NVM_NODEJS_ORG_MIRROR="${baseUrl.value}/node-builds"\n` +
+    `nvm install 20\n\n` +
+    `# fnm\n` +
+    `export FNM_NODE_DIST_MIRROR="${baseUrl.value}/node-builds"\n` +
+    `fnm install 20`,
+)
+
 const shortcuts = computed(() => [
   {
     key: 'packages',
@@ -219,6 +229,10 @@ onMounted(load)
         <el-tab-pane :label="t('home.uvTitle')">
           <p class="hint">{{ t('home.uvDesc') }}</p>
           <CodeBlock :code="uvSnippet" />
+        </el-tab-pane>
+        <el-tab-pane :label="t('home.nodeTitle')">
+          <p class="hint">{{ t('home.nodeDesc') }}</p>
+          <CodeBlock :code="nodeSnippet" />
         </el-tab-pane>
       </el-tabs>
     </el-card>
