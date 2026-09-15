@@ -42,11 +42,18 @@ logger = logging.getLogger("cpypiserver.node_build")
 #: an unrestricted tail backtracks into ``-linux-x64`` and leaves the platform
 #: wrong (``v21.0.0-rc.1-linux-x64`` parses as version ``21.0.0-rc.1-linux``,
 #: platform ``x64``).
+#:
+#: The platform/arch group is optional because nodejs.org also publishes two
+#: platform-less artifacts per release: the source tarball
+#: (``node-v20.11.0.tar.xz``) and the universal macOS installer
+#: (``node-v20.11.0.pkg``).  ``arch`` accepts a dash-separated *tail* because
+#: Alpine's build is ``linux-x64-musl`` — a genuine target, not a variant to
+#: drop.
 _NODE_PATTERN = re.compile(
     r"^node-v"
     r"(?P<version>\d+\.\d+\.\d+(?:-(?:rc|beta|alpha|nightly)[0-9A-Za-z.]*)?)"
-    r"-(?P<platform>[a-z0-9]+)"
-    r"(?:-(?P<arch>[a-z0-9_]+))?"
+    r"(?:-(?P<platform>[a-z0-9]+)"
+    r"(?:-(?P<arch>[a-z0-9_]+(?:-[a-z0-9_]+)*))?)?"
     r"\.(?P<ext>tar\.gz|tar\.xz|tar\.bz2|zip|7z|msi|pkg|tar)$"
 )
 
@@ -89,14 +96,21 @@ def _parse_node_filename(filename: str) -> Optional[NodeBuildFile]:
     match = _NODE_PATTERN.match(filename)
     if match is None:
         return None
+    extension = match.group("ext")
+    # No platform segment: the source tarball or the universal macOS installer.
+    # Name the pseudo-platform after what it is, so the UI and `file_token`
+    # never have to special-case an empty string.
+    platform = match.group("platform") or (
+        "src" if extension in ("tar.gz", "tar.xz", "tar.bz2", "tar") else extension
+    )
     return NodeBuildFile(
         filename=filename,
         path="",
         release_tag="",
         version=match.group("version"),
-        platform=match.group("platform"),
+        platform=platform,
         arch=match.group("arch") or "",
-        extension=match.group("ext"),
+        extension=extension,
     )
 
 
@@ -113,10 +127,11 @@ def _entry(full_path: Path, release_tag: str) -> Optional[NodeBuildFile]:
 def file_token(bf: NodeBuildFile) -> str:
     """The token node's ``index.json`` uses for this artifact.
 
-    ``linux-x64``, ``osx-arm64-tar``, ``win-x64-zip``, ``headers``, ``src`` —
-    enough for a client filtering releases by platform to recognise one.
+    ``linux-x64``, ``linux-x64-musl``, ``osx-arm64-tar``, ``win-x64-zip``,
+    ``headers``, ``src`` — enough for a client filtering releases by platform
+    to recognise one.
     """
-    if bf.platform in ("headers", "src"):
+    if bf.platform in ("headers", "src", "pkg"):
         return bf.platform
     platform = "osx" if bf.platform == "darwin" else bf.platform
     token = f"{platform}-{bf.arch}" if bf.arch else platform
