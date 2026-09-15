@@ -30,6 +30,7 @@ import errno
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -70,6 +71,11 @@ RESERVED_NAMES: frozenset[str] = frozenset({"probe"})
 
 #: A probe is a liveness check, not an inference call.
 _PROBE_USER_AGENT = "cpypiserver-model-probe/1.0"
+
+#: An ``api_key_env`` is an environment-variable *name*, so it must be a POSIX
+#: shell identifier.  Enforced so a value pasted into the field is rejected at
+#: write time instead of silently never resolving.
+_API_KEY_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 #: ``name``/``description`` ceilings — generous, but bounded so one edit cannot
 #: balloon the published document.
@@ -198,6 +204,49 @@ def resolve_api_key(payload: Mapping[str, Any], existing: Mapping[str, Any]) -> 
     return str(payload.get("api_key") or "").strip()
 
 
+def normalize_api_key_env(value: Any) -> str:
+    """Validate an environment-variable *name* a route's key is read from.
+
+    The whole point of ``api_key_env`` is that the route document can be
+    committed and shared while the secret stays in the process environment —
+    so this field holds a name, never a value, and is validated as one.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if not _API_KEY_ENV_RE.match(text):
+        raise ValueError(
+            f"api_key_env 必须是合法的环境变量名（[A-Za-z_][A-Za-z0-9_]*），得到 {text!r}"
+        )
+    return text
+
+
+def resolve_api_key_env(payload: Mapping[str, Any], existing: Mapping[str, Any]) -> str:
+    """Three-state edit rule for ``api_key_env``, mirroring :func:`resolve_api_key`."""
+    if "api_key_env" not in payload or payload.get("api_key_env") is None:
+        return str(existing.get("api_key_env") or "")
+    return normalize_api_key_env(payload.get("api_key_env"))
+
+
+def effective_api_key(route: Mapping[str, Any]) -> tuple[str, str]:
+    """The key a route authenticates with, and where it came from.
+
+    A stored ``api_key`` wins; otherwise an ``api_key_env`` naming a non-empty
+    environment variable is used.  The second element is a non-secret label for
+    configuration surfaces: ``stored``, ``env``, ``env-missing`` (the name is
+    set but the variable is empty/absent — a deployment mistake worth showing
+    rather than silently sending an unauthenticated probe) or ``none``.
+    """
+    stored = str(route.get("api_key") or "").strip()
+    if stored:
+        return stored, "stored"
+    env_name = str(route.get("api_key_env") or "").strip()
+    if not env_name:
+        return "", "none"
+    value = os.environ.get(env_name, "").strip()
+    return (value, "env") if value else ("", "env-missing")
+
+
 def mask_api_key(api_key: str) -> str | None:
     """A non-secret hint that a key is set — the last four characters."""
     if not api_key:
@@ -223,6 +272,7 @@ def build_route(
         "provider": provider,
         "base_url": normalize_base_url(payload.get("base_url", existing.get("base_url"))),
         "api_key": resolve_api_key(payload, existing),
+        "api_key_env": resolve_api_key_env(payload, existing),
         "model": str(payload.get("model", existing.get("model") or "") or "").strip(),
         "aliases": normalize_aliases(payload.get("aliases", existing.get("aliases"))),
         "path": normalize_path(payload.get("path", existing.get("path")), provider),
@@ -238,8 +288,14 @@ def build_route(
 
 
 def public_route(item: Mapping[str, Any], *, health: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """One route shaped for the API — the raw API key is never included."""
-    api_key = str(item.get("api_key") or "")
+    """One route shaped for the API — the raw API key is never included.
+
+    ``api_key_env`` names the variable an injected key is read from, so the
+    console can show *how* a route is authenticated (and flags
+    ``env-missing`` when the name resolves to nothing) without ever seeing a
+    value.
+    """
+    api_key, key_source = effective_api_key(item)
     return {
         "name": item.get("name") or item.get("model") or "unnamed",
         "provider": canonical_provider(item.get("provider")),
@@ -247,6 +303,8 @@ def public_route(item: Mapping[str, Any], *, health: Mapping[str, Any] | None = 
         "api_key": None,
         "has_api_key": bool(api_key),
         "api_key_hint": mask_api_key(api_key),
+        "api_key_env": str(item.get("api_key_env") or ""),
+        "api_key_source": key_source,
         "model": item.get("model") or "",
         "aliases": normalize_aliases(item.get("aliases")),
         "path": item.get("path") or normalize_path("", canonical_provider(item.get("provider"))),
@@ -456,6 +514,87 @@ def raw_route(path: str | Path, name: str) -> dict[str, Any]:
     return routes[index]
 
 
+def resolve(path: str | Path, *, health_path: str | Path | None = None) -> dict[str, Any]:
+    """The route table **with** each route's API key — for a downstream client.
+
+    :func:`load` is the browsing view: it masks every secret, which is right for
+    the SPA but useless to a client that has to actually authenticate against a
+    route's upstream.  This is that machine view, and it exists because the DSH
+    ``enterprise-intranet`` plugin has to configure a provider from the table
+    without a human copying keys around.
+
+    The exposure is deliberate and bounded: the endpoint that serves this is
+    guarded by ``model:resolve`` (seeded to the ``authenticated`` role), so an
+    anonymous caller and a docs-only role can never reach it.  Each route is
+    returned exactly as stored, with ``api_key`` set to the stored value (or an
+    empty string when the route needs no key), plus the derived ``endpoint_url``
+    so a client does not have to join ``base_url`` and ``path`` itself.
+    """
+    file_path = Path(path)
+    if not file_path.is_file():
+        return {
+            "source": str(file_path),
+            "exists": False,
+            "error": None,
+            "providers": list(PROVIDERS),
+            "default_paths": dict(DEFAULT_PATHS),
+            "routes": [],
+        }
+
+    try:
+        data = json.loads(file_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.warning("cannot read model routes from %s: %s", file_path, exc)
+        return {
+            "source": str(file_path),
+            "exists": True,
+            "error": str(exc),
+            "providers": list(PROVIDERS),
+            "default_paths": dict(DEFAULT_PATHS),
+            "routes": [],
+        }
+
+    raw = data.get("routes") if isinstance(data, dict) else data
+    health = load_health(health_path)
+    routes: list[dict[str, Any]] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("model") or "unnamed")
+            route = dict(item)
+            route["name"] = name
+            route["provider"] = canonical_provider(item.get("provider"))
+            # The value may be stored inline OR injected via the environment;
+            # the client only cares that it authenticates, so hand it the
+            # resolved value and a non-secret label saying where it came from.
+            api_key, key_source = effective_api_key(item)
+            route["api_key"] = api_key
+            route["api_key_env"] = str(item.get("api_key_env") or "")
+            route["api_key_source"] = key_source
+            route["has_api_key"] = bool(api_key)
+            route["model"] = str(item.get("model") or "")
+            route["aliases"] = normalize_aliases(item.get("aliases"))
+            route["path"] = item.get("path") or normalize_path("", route["provider"])
+            route["enabled"] = item.get("enabled", True) is not False
+            route["health"] = dict(health[name]) if name in health else None
+            try:
+                route["endpoint_url"] = endpoint_url(route)
+            except ValueError:
+                route["endpoint_url"] = ""
+            routes.append(route)
+
+    return {
+        "source": str(file_path),
+        "exists": True,
+        "error": None,
+        "version": data.get("version") if isinstance(data, dict) else None,
+        "providers": list(PROVIDERS),
+        "default_paths": dict(DEFAULT_PATHS),
+        "routes": routes,
+    }
+
+
 def create(path: str | Path, payload: Mapping[str, Any]) -> dict[str, Any]:
     with _lock:
         document, routes = _read_document(path)
@@ -504,9 +643,14 @@ def endpoint_url(route: Mapping[str, Any]) -> str:
 
 
 def request_headers(route: Mapping[str, Any]) -> dict[str, str]:
-    """Auth headers for the route's provider, when a key is configured."""
+    """Auth headers for the route's provider, when a key is configured.
+
+    Uses :func:`effective_api_key`, so a route whose key is injected through
+    ``api_key_env`` probes authenticated too — otherwise a perfectly good route
+    would report ``auth`` after every check.
+    """
     headers = {"User-Agent": _PROBE_USER_AGENT, "Accept": "*/*"}
-    api_key = str(route.get("api_key") or "").strip()
+    api_key, _source = effective_api_key(route)
     if not api_key:
         return headers
     if canonical_provider(route.get("provider")) == "anthropic":
@@ -632,10 +776,14 @@ __all__ = [
     "normalize_aliases",
     "normalize_enabled",
     "resolve_api_key",
+    "resolve_api_key_env",
+    "normalize_api_key_env",
+    "effective_api_key",
     "mask_api_key",
     "build_route",
     "public_route",
     "load",
+    "resolve",
     "raw_route",
     "create",
     "update",

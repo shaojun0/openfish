@@ -41,7 +41,9 @@ from flask import (
 )
 
 from auth.decorators import require_permission
-from auth.permissions import MODEL_READ, MODEL_WRITE, TOOL_DOWNLOAD, TOOL_READ
+from auth.permissions import (
+    MODEL_READ, MODEL_RESOLVE, MODEL_WRITE, TOOL_DOWNLOAD, TOOL_READ,
+)
 from config import settings
 from errors import BadRequestError, PypiError
 from openapi import api_operation, binary, errors, ok
@@ -105,6 +107,21 @@ _MODEL_ROUTE_SCHEMA = {
             "type": ["string", "null"],
             "description": "Non-secret hint: the last four characters of the key",
         },
+        "api_key_env": {
+            "type": "string",
+            "description": (
+                "Environment-variable *name* the key is read from when no key is "
+                "stored inline. Lets the route document be committed and shared "
+                "while the secret stays in the process environment."
+            ),
+        },
+        "api_key_source": {
+            "type": "string",
+            "description": (
+                "stored | env | env-missing | none — where the effective key came "
+                "from. `env-missing` means api_key_env names an unset variable."
+            ),
+        },
         "model": {"type": "string"},
         "aliases": {"type": "array", "items": {"type": "string"}},
         "path": {"type": "string"},
@@ -138,6 +155,33 @@ _MODELS_SCHEMA = {
     },
 }
 
+_MODEL_ROUTE_RESOLVED_SCHEMA = {
+    "type": "object",
+    "properties": {
+        **_MODEL_ROUTE_SCHEMA["properties"],
+        "api_key": {
+            "type": "string",
+            "description": (
+                "The **effective** upstream key, verbatim — the stored value, or "
+                "the value `api_key_env` resolved to (empty string when the route "
+                "needs none). Only `/api/v1/models/resolved` ever returns this."
+            ),
+        },
+        "endpoint_url": {
+            "type": "string",
+            "description": "`base_url` + `path` already joined",
+        },
+    },
+}
+
+_MODELS_RESOLVED_SCHEMA = {
+    "type": "object",
+    "properties": {
+        **_MODELS_SCHEMA["properties"],
+        "routes": {"type": "array", "items": _MODEL_ROUTE_RESOLVED_SCHEMA},
+    },
+}
+
 _ROUTE_WRITE_BODY = {
     "required": True,
     "content": {
@@ -153,6 +197,16 @@ _ROUTE_WRITE_BODY = {
                         "description": (
                             "Omitted or null keeps the stored key (the API never "
                             "returns it), empty string clears it."
+                        ),
+                    },
+                    "api_key_env": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Environment-variable name to read the key from when "
+                            "no key is stored inline — the way to keep the route "
+                            "document free of secrets. Omitted or null keeps the "
+                            "current value; empty string clears it. Must match "
+                            "[A-Za-z_][A-Za-z0-9_]*."
                         ),
                     },
                     "model": {"type": "string"},
@@ -295,6 +349,35 @@ def tools_catalog():
 def model_routes_index():
     return jsonify(
         model_routes.load(
+            settings.hub.models_file,
+            health_path=settings.hub.model_health_file,
+        )
+    )
+
+
+@hub_bp.route("/api/v1/models/resolved")
+@require_permission(MODEL_RESOLVE)
+@api_operation(
+    summary="Model routing table with upstream keys",
+    description=(
+        "The same table as `GET /api/v1/models`, except each route carries its "
+        "**real** `api_key` and a pre-joined `endpoint_url`. This is what the "
+        "DSH `enterprise-intranet` plugin reads to register a provider and adopt "
+        "the route whose aliases include `default` as the agent default model.\n\n"
+        "Deliberately a separate endpoint from the browsing view: the console "
+        "must never round-trip a secret, while a downstream client cannot do "
+        "anything with a masked one. Guarded by `model:resolve`, which the "
+        "`authenticated` role holds and the `anonymous` role does not."
+    ),
+    tags=["Hub"],
+    responses={
+        "200": ok("Model routes including secrets", _MODELS_RESOLVED_SCHEMA),
+        **errors("401", "403", "500"),
+    },
+)
+def model_routes_resolved():
+    return jsonify(
+        model_routes.resolve(
             settings.hub.models_file,
             health_path=settings.hub.model_health_file,
         )

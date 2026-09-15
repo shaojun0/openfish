@@ -72,6 +72,7 @@ _AUTHENTICATED_SEED = (
     P.BUILD_READ, P.BUILD_DOWNLOAD, P.BUILD_SHA256,
     P.NODE_BUILD_READ, P.NODE_BUILD_DOWNLOAD, P.NODE_BUILD_SHA256,
     P.TOOL_READ, P.TOOL_DOWNLOAD, P.NPM_READ, P.NPM_DOWNLOAD, P.MODEL_READ,
+    P.MODEL_RESOLVE,
     P.DOCKER_READ, P.DOCKER_DOWNLOAD, P.DEBIAN_READ, P.DEBIAN_DOWNLOAD,
     P.DOC_READ,
     P.APP_READ,
@@ -109,6 +110,14 @@ _SEED_TOPUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "2026-09-app-read",
         P.AUTHENTICATED_ROLE,
         (P.APP_READ,),
+    ),
+    # The DSH enterprise-intranet plugin resolves the model routing table (with
+    # each route's upstream key) as an ordinary signed-in user; without this the
+    # feature would be silently admin-only on an upgraded deployment.
+    (
+        "2026-09-model-resolve",
+        P.AUTHENTICATED_ROLE,
+        (P.MODEL_RESOLVE,),
     ),
 )
 

@@ -64,6 +64,11 @@ DEBIAN_DOWNLOAD = "debian:download"
 # Artifact hub — model routing table for downstream DSH
 MODEL_READ = "model:read"
 MODEL_WRITE = "model:write"
+# Hands the *raw* route table (including each route's upstream api_key) to an
+# authenticated client — the DSH enterprise-intranet plugin.  Kept separate from
+# `model:read` because the SPA's browsing view deliberately masks secrets, while
+# a downstream client cannot do anything with a masked key.
+MODEL_RESOLVE = "model:resolve"
 
 # Artifact hub — per-ecosystem Markdown documentation
 DOC_READ = "doc:read"
@@ -112,6 +117,10 @@ BUILTIN: dict[str, tuple[str, str]] = {
     DEBIAN_DOWNLOAD: ("下载 Debian 包", "下载本地 .deb 与 apt 配置片段"),
     MODEL_READ: ("浏览模型路由", "查看供内网 DSH 使用的模型路由表"),
     MODEL_WRITE: ("管理模型路由", "新增、修改、删除模型路由并检测其连通性"),
+    MODEL_RESOLVE: (
+        "下发模型路由密钥",
+        "读取含上游 api_key 的完整模型路由表，供下游 DSH 客户端自动接入默认模型",
+    ),
     DOC_READ: ("浏览生态文档", "查看与下载各生态的 Markdown 文档"),
     DOC_UPLOAD: ("上传生态文档", "通过上传 Markdown 文件新增、覆盖或删除各生态文档"),
     APP_READ: ("打开 Web 控制台", "加载并进入浏览器控制台外壳；其中的数据仍由各自的权限点控制"),
@@ -216,6 +225,7 @@ __all__ = [
     "BUILD_READ", "BUILD_DOWNLOAD", "BUILD_SHA256",
     "NODE_BUILD_READ", "NODE_BUILD_DOWNLOAD", "NODE_BUILD_SHA256",
     "TOOL_READ", "TOOL_DOWNLOAD", "NPM_READ", "NPM_DOWNLOAD", "MODEL_READ", "MODEL_WRITE",
+    "MODEL_RESOLVE",
     "DOCKER_READ", "DOCKER_DOWNLOAD", "DEBIAN_READ", "DEBIAN_DOWNLOAD",
     "DOC_READ", "DOC_UPLOAD",
     "APP_READ",

@@ -51,6 +51,7 @@ def register_all(app):
     from routes.debian import debian_bp
     from routes.docs import docs_bp
     from routes.certs import certs_bp
+    from routes.device import device_bp
 
     prefix = settings.server.route_prefix
     api = prefix + "/api/v1"
@@ -118,6 +119,13 @@ def register_all(app):
     #    fetch the CA before it can trust the mirror.  Serves exactly one
     #    configured file, replacing the old `static/certs/` static directory.
     app.register_blueprint(certs_bp, url_prefix=prefix)
+
+    # ── Device authorization (the DSH plugin's key hand-off).  Registered at
+    #    the bare prefix because it deliberately straddles both surfaces: the
+    #    JSON machine half lives under /api/v1/device/* and is anonymous by
+    #    design (the caller has no credential yet), while the HTML approval
+    #    page at /device is reached through the normal browser login flow.
+    app.register_blueprint(device_bp, url_prefix=prefix)
 
     # ── SPA shell. Machine routes above win by rule specificity, so this
     #    only ever handles browser-facing URLs.

@@ -1,46 +1,50 @@
 {
   "version": 1,
-  "_comment": "内网模型路由表（只发布，不代理推理）。openfish 负责登记、展示与连通性检测；持有 model:write 的管理员可在 /models 页面在线维护本文件。下游 DSH 读取本文件后自行决定 upstream 与鉴权方式。base_url 请替换成实际内网地址。provider 可选 openai / mineru / anthropic。",
+  "_comment": "模型路由表（只发布，不代理推理）。openfish 负责登记、展示与连通性检测；持有 model:write 的管理员可在 /models 页面在线维护本文件。下游 DSH 通过 GET /api/v1/models/resolved（model:resolve 权限）读取本表，据此自动注册 provider 并接入 aliases 含 default 的路由作为默认模型。provider 可选 openai / mineru / anthropic；aliases 中的 default 表示「企业内网默认模型」。",
+  "_secrets": "本文件**不含任何密钥**（仓库根 README 的安全声明要求如此）。上游 key 用 api_key_env 指向进程环境变量，值由部署时注入，例如 ENTERPRISE_DEEPSEEK_API_KEY。key 也可以直接写进 api_key 字段（/models 页面就是这样做的），但那样文件就带密了，不要再提交进仓库。",
   "routes": [
     {
-      "name": "deepseek-v4-flash",
+      "name": "deepseek-flash",
       "provider": "openai",
-      "base_url": "http://10.0.0.10:8000",
+      "base_url": "https://api.deepseek.com",
       "api_key": "",
-      "model": "deepseek-v4-flash",
+      "api_key_env": "ENTERPRISE_DEEPSEEK_API_KEY",
+      "model": "deepseek-flash",
       "aliases": [
         "flash",
         "default"
       ],
       "path": "/v1/chat/completions",
       "enabled": true,
-      "description": "默认对话模型，走内网 vLLM 推理服务"
+      "description": "默认对话模型（DeepSeek 官方 API）。DSH 企业内网模式会把默认模型设为该路由。"
     },
     {
-      "name": "deepseek-v4",
+      "name": "deepseek-v4-pro",
       "provider": "openai",
-      "base_url": "http://10.0.0.10:8001",
+      "base_url": "https://api.deepseek.com",
       "api_key": "",
-      "model": "deepseek-v4",
+      "api_key_env": "ENTERPRISE_DEEPSEEK_API_KEY",
+      "model": "deepseek-v4-pro",
       "aliases": [
         "pro"
       ],
       "path": "/v1/chat/completions",
       "enabled": true,
-      "description": "长上下文主力模型"
+      "description": "长上下文 / 复杂推理主力模型。"
     },
     {
       "name": "bge-m3-embedding",
       "provider": "openai",
       "base_url": "http://10.0.0.11:8002",
       "api_key": "",
+      "api_key_env": "",
       "model": "bge-m3",
       "aliases": [
         "embedding"
       ],
       "path": "/v1/embeddings",
       "enabled": false,
-      "description": "向量化模型，尚未上线（示例：enabled=false）"
+      "description": "向量化模型示例，尚未上线（示例：enabled=false，下游 DSH 会跳过）。"
     }
   ]
 }

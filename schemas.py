@@ -195,6 +195,66 @@ class DeleteResult(BaseModel):
     deleted: str = Field(description="Identifier of the removed resource")
 
 
+# ── Device authorization (the DSH plugin's key hand-off) ─────────────
+
+class DeviceCodeResponse(BaseModel):
+    """Result of `POST /api/v1/device/code` — one pending request."""
+
+    device_code: str = Field(
+        description=(
+            "Secret bearer of the exchange. Returned exactly once and stored "
+            "only as a SHA-256 hash; present it to `POST /api/v1/device/token`."
+        ),
+    )
+    user_code: str = Field(
+        description="Short human code, shown in DSH and confirmed on the approval page",
+    )
+    verification_uri: str = Field(description="Absolute approval page URL")
+    verification_uri_complete: str = Field(
+        description="The same URL with `?user_code=` pre-filled",
+    )
+    expires_in: int = Field(description="Seconds until the request is abandoned")
+    interval: int = Field(description="Minimum seconds between token polls")
+
+
+class DeviceTokenRequest(BaseModel):
+    """Body of `POST /api/v1/device/token`."""
+
+    device_code: str = Field(min_length=1, description="From the code response")
+
+
+class DeviceTokenResponse(BaseModel):
+    """Result of an approved `POST /api/v1/device/token`.
+
+    The request is consumed by this response: the same `device_code` can never
+    yield the key twice.
+    """
+
+    api_key: str = Field(description="Raw API key — capture it now, it is shown once")
+    key_id: str = Field(description="Stable identifier of the minted key")
+    key_name: str | None = Field(default=None, description="Label recorded on the key")
+    key_prefix: str | None = Field(default=None, description="Non-secret prefix of the key")
+    key_expires_at: str | None = Field(
+        default=None, description="ISO 8601 UTC, or null when permanent"
+    )
+    user: str | None = Field(default=None, description="Account that approved the request")
+    display_name: str | None = Field(default=None, description="Human name of that account")
+    platform_url: str = Field(description="Base URL of this server")
+    token_type: str = Field(default="Bearer", description="How to present `api_key`")
+
+
+class DeviceTokenError(BaseModel):
+    """Body of a 400 from `POST /api/v1/device/token`."""
+
+    error: str = Field(
+        description="authorization_pending | expired_token | invalid_request",
+    )
+    error_description: str = Field(description="Human readable reason")
+    interval: int | None = Field(
+        default=None, description="Present on `authorization_pending`"
+    )
+
+
 class PackageSummary(BaseModel):
     """One package in `GET /api/v1/packages`."""
 

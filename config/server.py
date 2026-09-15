@@ -33,6 +33,18 @@ class ServerConfig(BaseSettings):
         default=[],
         description="Whitelist of admin user identifiers",
     )
+    public_base_url: str = Field(
+        default="",
+        description=(
+            "Absolute base URL this server is reached at from the public "
+            "internet, e.g. https://47.97.243.86:9443. Used to build the "
+            "absolute verification_uri the device-authorization flow hands "
+            "back to a non-browser client (the DSH enterprise-intranet plugin). "
+            "Empty = derive it from the incoming request's Host / "
+            "X-Forwarded-* headers, which is correct behind the shipped nginx "
+            "reverse proxy and needs no configuration there."
+        ),
+    )
     stats_cache_seconds: int = Field(
         default=7200,
         ge=60,

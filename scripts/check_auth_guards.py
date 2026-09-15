@@ -81,6 +81,11 @@ PUBLIC_ENDPOINTS: dict[str, str] = {
     # trust its chain, so this must be reachable before credentials exist.
     # Serves exactly one configured file (TLS_CA_FILE), never a directory.
     "certs.ca_chain": "clients must fetch the CA before they can trust the mirror",
+    # The device-authorization landing page: an unauthenticated visitor is
+    # *supposed* to be redirected into the login flow, with `next` pointing back
+    # here (including `?user_code=…`). The page itself exposes nothing; the
+    # approval it leads to is the guarded `POST /device/approve`.
+    "device.authorize": "device-authorization page; redirects into the login flow",
 }
 
 #: Statuses that prove the guard ran.

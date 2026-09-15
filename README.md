@@ -285,6 +285,7 @@ The permission points shipped today, and the routes that enforce them:
 | `admin:refresh` | `POST /api/v1/admin/refresh-stats` |
 | `admin:roles` | `/api/v1/admin/{roles,permissions,users}` |
 | `model:read` | `GET /api/v1/models` |
+| `model:resolve` | `GET /api/v1/models/resolved` — the same table **with** each route's real upstream `api_key`, for a downstream DSH client; the console's masked view stays on `model:read` |
 | `model:write` | `POST /api/v1/models`, `PUT`/`DELETE /api/v1/models/<name>`, `POST /api/v1/models/probe`, `POST /api/v1/models/<name>/check` — adds, edits, removes and re-probes model routes |
 | `doc:read` | `GET /api/v1/docs*`, `/docs/<ecosystem>` (308 → `/docs/<ecosystem>/`), `/docs/<ecosystem>/`, `/docs/<ecosystem>/<id>`, `/docs/<ecosystem>/<id>/assets/<name>` — **everything under `/docs/`** |
 | `doc:upload` | `POST`/`PUT`/`DELETE` on `/api/v1/docs/<ecosystem>[/<id>[/assets/<name>]]` and `POST /api/v1/docs/<ecosystem>/<id>/preview` — creates, edits and deletes documents and their assets |
@@ -481,6 +482,25 @@ and display `aliases`. `name` and `description` are mandatory; the API key may
 be empty. The raw key is **never returned by the API** — the SPA sees
 `has_api_key` and a last-four hint, and an edit that leaves the field blank
 keeps the stored key (an empty value clears it).
+
+**Keep the document secret-free: prefer `api_key_env`.** A route may name an
+**environment variable** instead of carrying a value:
+
+```json
+{ "name": "deepseek-flash", "base_url": "https://api.deepseek.com",
+  "api_key": "", "api_key_env": "ENTERPRISE_DEEPSEEK_API_KEY", "…": "…" }
+```
+
+The key is then read from the process environment whenever it is needed, so
+`config/model_routes.json` can be committed and shared — which matters because
+this repository's own rule is that no credentials live in it (see
+[Security notes](#security-notes)). A stored `api_key` wins over the variable;
+a variable that is set but resolves to nothing is reported as
+`api_key_source: "env-missing"` in `GET /api/v1/models` rather than quietly
+looking configured, and connectivity probes authenticate with the resolved key
+so an env-backed route does not report `auth` after every check. Values are
+injected at deploy time (`--env-file`, or `.env` for local runs); only the
+*name* is ever written to the document.
 
 On the page, “新增路由” opens an **inline editor as the first table row**; the
 same row edits an existing route. Saving validates the entry, rewrites the
@@ -729,6 +749,7 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 | GET    | `/api/v1/docker`                  | Local docker catalog (docker:read)       |
 | GET    | `/api/v1/debian`                  | Local debian catalog (debian:read)       |
 | GET    | `/api/v1/models`                  | Model-routing table, keys masked (model:read) |
+| GET    | `/api/v1/models/resolved`         | Same table **with** upstream keys + `endpoint_url` (model:resolve) |
 | POST   | `/api/v1/models`                  | Add a route + probe it (model:write)     |
 | PUT    | `/api/v1/models/<name>`           | Edit (or rename) a route + re-probe (model:write) |
 | DELETE | `/api/v1/models/<name>`           | Remove a route (model:write)             |
@@ -745,6 +766,46 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 | POST   | `/api/v1/docs/<ecosystem>/<id>/assets` | Upload an asset into the document (doc:upload) |
 | DELETE | `/api/v1/docs/<ecosystem>/<id>/assets/<name>` | Delete an asset (doc:upload) |
 
+### Device authorization (the DSH key hand-off)
+
+A browser-less client — the DSH `enterprise-intranet` plugin — cannot copy a
+secret out of the console. These endpoints let it ask this server to mint one on
+its behalf once a human has signed in. Both JSON halves are **anonymous on
+purpose**: the caller has no credential yet, which is the entire point.
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| POST   | `/api/v1/device/code`  | Start a request — returns `device_code`, `user_code`, `verification_uri_complete`, `expires_in`, `interval` |
+| POST   | `/api/v1/device/token` | Poll with `device_code`; `400 authorization_pending` until approved, then the minted `api_key` **exactly once** |
+| GET    | `/device`              | Approval page. Bounces an unauthenticated visitor through `/auth/login?next=…` (so it works with the corporate OAuth2/4A provider) and renders a one-button confirm |
+| POST   | `/device/approve`      | Mints the key for the signed-in account and binds it to the `user_code` (`key:create`) |
+
+The `device_code` is the only secret and is stored SHA-256-hashed; the
+`user_code` is a short, single-use, human-typed confirmation and is not a
+credential. The user's explicit confirmation is required by design — silently
+auto-approving a `user_code` from a link would let any site bind a key to a
+victim's account and have it delivered to the attacker's poller.
+
+#### The client that uses it: `integrations/dsh-plugin-enterprise-intranet`
+
+The reference consumer of the flow above is the **DSH enterprise-intranet
+plugin**, which lives in this repository under `integrations/`. It is a standard
+DSH bundle package (JavaScript, installed by DSH — never by this server, which
+is why `integrations/` is in `.dockerignore`). Once installed it:
+
+* treats an API key as a **required** option — with none, it refuses to enable
+  the mode and sends the user through `/device` instead;
+* redeems the minted key from the polling half automatically, with no
+  copy-and-paste;
+* reads `GET /api/v1/models/resolved` and registers one `llm-pi-ai` provider per
+  enabled route, pointing `agent-default-model` at the route whose aliases
+  contain `default`;
+* points pip / npm / apt / docker / nvm at this server's mirrors;
+* surfaces `/api/v1/tools` and `/api/v1/docs` in its panel.
+
+The folder's own `README.md` documents installation, configuration and the sync
+relationship with the Docker build copy used by the deployment.
+
 ### Browser-facing
 
 `/`, `/packages`, `/npm`, `/docker`, `/debian`, `/tools`, `/models`,
@@ -752,6 +813,11 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 `/admin` and `/access` all serve the SPA shell. A deep link such as `/api-keys`
 is handled by Flask's history-mode fallback, so links can be shared and
 bookmarked.
+
+`/device` is the one browser page that is **not** the SPA: it is rendered
+server-side so it keeps working through an OAuth round trip and does not depend
+on a rebuilt frontend bundle. It is described in
+[Device authorization](#device-authorization-the-dsh-key-hand-off) below.
 
 **The console is not anonymous.** Every one of those routes, the catch-all and
 the bundle are behind `app:read`, so a visitor with no session is refused and a
@@ -946,6 +1012,12 @@ docker-images/         artifact hub — image tarballs + compose/Dockerfile
 debian/                artifact hub — local .deb files + apt snippets
 docs/                  artifact hub — docs/<ecosystem>/<id>/document.md (+ assets/) documentation
 docker/                docker-compose.yml and its .env template
+integrations/          downstream *client* code, versioned here because it is
+                       tightly coupled to this server's contract. Currently:
+                       dsh-plugin-enterprise-intranet (the DSH plugin that
+                       redeems a device-authorization API key, adopts the model
+                       routing table's default model and switches package
+                       sources to this server). Excluded from the image.
 ```
 
 Adding a feature usually means one new module in `extensions/`, one blueprint in

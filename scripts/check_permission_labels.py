@@ -90,6 +90,11 @@ EXPECTED: dict[tuple[str, str], str] = {
     ("hub", "tools_catalog"): "TOOL_READ",
     # ── model routing ────────────────────────────────────────────────────
     ("hub", "model_routes_index"): "MODEL_READ",
+    # The resolved view is the *machine* half of the routing table: it carries
+    # each route's real upstream api_key, which the console view must never
+    # return. The dedicated point keeps "browse the table" and "hand a client
+    # the keys" separately revocable.
+    ("hub", "model_routes_resolved"): "MODEL_RESOLVE",
     ("hub", "create_model_route"): "MODEL_WRITE",
     ("hub", "update_model_route"): "MODEL_WRITE",
     ("hub", "delete_model_route"): "MODEL_WRITE",
@@ -146,6 +151,12 @@ EXPECTED: dict[tuple[str, str], str] = {
     ("admin", "refresh_stats"): "ADMIN_REFRESH",
     # ── SPA JSON ─────────────────────────────────────────────────────────
     ("session", "packages"): "PACKAGE_READ",
+    # ── Device authorization ─────────────────────────────────────────────
+    # Approving mints an API key, so it needs the same point as creating one
+    # from the console. `/device` itself carries no point: it bounces an
+    # unauthenticated visitor through the login flow, and the approval it
+    # renders lands on this guarded POST.
+    ("device", "approve_device"): "KEY_CREATE",
 }
 
 MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})

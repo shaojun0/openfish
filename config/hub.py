@@ -242,6 +242,25 @@ class HubConfig(BaseSettings):
             "inference request body."
         ),
     )
+    device_codes_file: str = Field(
+        default="data/device_codes.json",
+        description=(
+            "Where pending device-authorization requests (the flow the DSH "
+            "enterprise-intranet plugin uses to obtain an API key without a "
+            "copy-and-paste) are kept between the plugin's `code` request and "
+            "its first successful `token` poll. Device codes are stored "
+            "SHA-256-hashed; the file must be writable by the server process "
+            "and should not be backed up."
+        ),
+    )
+    device_code_ttl: int = Field(
+        default=900,
+        ge=60,
+        description=(
+            "Seconds a pending device-authorization request stays valid before "
+            "the plugin must start over."
+        ),
+    )
 
 
 __all__ = ["HubConfig"]
