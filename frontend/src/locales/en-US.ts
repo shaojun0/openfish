@@ -297,6 +297,11 @@ export default {
       held: 'Held by {count} role(s)',
       orphan: 'Held by no role — likely a mistyped guard',
       orphanShort: 'unused',
+      stale: 'No guard declares this code any more — granting it changes nothing',
+      staleShort: 'stale',
+      pending:
+        'Ordinary users do not have it yet — the `authenticated` role still needs this migration',
+      pendingShort: 'needs grant',
       empty: 'No permission points.',
     },
   },

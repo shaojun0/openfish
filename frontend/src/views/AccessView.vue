@@ -470,11 +470,24 @@ onMounted(load)
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column :label="t('access.permissions.status')" min-width="260">
+        <el-table-column :label="t('access.permissions.status')" min-width="300">
           <template #default="{ row }">
             <el-tag v-if="row.role_count === 0" type="warning" size="small" effect="light">
               <el-icon><WarningFilled /></el-icon>
               <span class="tag-label">{{ t('access.permissions.orphan') }}</span>
+            </el-tag>
+            <el-tag v-else-if="row.stale" type="danger" size="small" effect="light">
+              <el-icon><WarningFilled /></el-icon>
+              <span class="tag-label">{{ t('access.permissions.stale') }}</span>
+            </el-tag>
+            <el-tag
+              v-else-if="row.authenticated_pending"
+              type="warning"
+              size="small"
+              effect="light"
+            >
+              <el-icon><WarningFilled /></el-icon>
+              <span class="tag-label">{{ t('access.permissions.pending') }}</span>
             </el-tag>
             <span v-else class="muted">
               {{ t('access.permissions.held', { count: row.role_count }) }}
@@ -534,8 +547,14 @@ onMounted(load)
             >
               <span class="perm-item__name">{{ perm.name }}</span>
               <span class="perm-item__code mono">{{ perm.code }}</span>
-              <span v-if="perm.role_count === 0" class="perm-item__orphan">
+              <span v-if="perm.stale" class="perm-item__orphan">
+                {{ t('access.permissions.staleShort') }}
+              </span>
+              <span v-else-if="perm.role_count === 0" class="perm-item__orphan">
                 {{ t('access.permissions.orphanShort') }}
+              </span>
+              <span v-else-if="perm.authenticated_pending" class="perm-item__orphan">
+                {{ t('access.permissions.pendingShort') }}
               </span>
             </el-checkbox>
           </el-checkbox-group>

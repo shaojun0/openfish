@@ -25,6 +25,21 @@ export interface PermissionInfo {
   description: string | null
   /** Roles holding this point. 0 means no role holds it — usually a typo. */
   role_count: number
+  /**
+   * In the database but no guard declares it any more — a row a rename or a
+   * removed feature left behind. Granting it changes nothing.
+   */
+  stale: boolean
+  /** The code seeds this point to the `authenticated` role. */
+  expected_for_authenticated: boolean
+  /** The `authenticated` role actually holds it right now. */
+  held_by_authenticated: boolean
+  /**
+   * Seeded for ordinary users but not granted to them yet — what an upgraded
+   * deployment looks like after a new point ships. `admin` is topped up
+   * automatically, so this is invisible in `role_count`.
+   */
+  authenticated_pending: boolean
 }
 
 export interface RoleInfo {
