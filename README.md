@@ -372,10 +372,13 @@ The permission points shipped today, and the routes that enforce them:
 | `nodebuild:sha256` | `/node-builds/<tag>/<file>/sha256` |
 | `tool:read` | `/tools/` listing, `GET /api/v1/tools` |
 | `tool:download` | `/tools/<path>` |
+| `tool:upload` | `POST /api/v1/tools` — upload a script/binary into a tools category (admin only) |
 | `npm:read` | `/npm/` packuments, `/-/all`, `/-/ping`, `/-/v1/search`, `GET /api/v1/npm` |
 | `npm:download` | `/npm/<pkg>/-/<file>` and `/npm/files/<file>` (tarballs, local or upstream-cached) |
+| `npm:publish` | `PUT /npm/<pkg>` — the endpoint `npm publish` writes to; verifies the uploaded tarball and records its dist-tags |
 | `docker:read` | `/docker/` listing, `/docker/v2/_catalog`, `/docker/v2/<name>/tags/list`, `/docker/v2/<name>/manifests/<ref>`, `GET /api/v1/docker` |
 | `docker:download` | `/docker/v2/<name>/blobs/<digest>` (layer/config bytes) and `/docker/files/<file>` |
+| `docker:upload` | `POST /api/v1/docker` — upload a `docker save` image tar or a compose/Dockerfile snippet (admin only) |
 | `debian:read` | `/debian/` index, `/debian/Packages`, `/debian/dists/<path>`, `GET /api/v1/debian` |
 | `debian:download` | `/debian/pool/<path>` (package bytes) and `/debian/files/<file>` |
 | `key:list` / `key:create` / `key:delete` / `key:stats` | the matching `/api/v1/keys*` endpoints |
@@ -530,8 +533,10 @@ overrides display names, descriptions and tags:
 ```
 
 The catalog is re-scanned on every request, so dropping a file in is the whole
-publish step. Downloads go through `/tools/<category>/<filename>` and require
-the `tool:download` permission; the listing requires `tool:read`.
+publish step — and an administrator holding `tool:upload` can do the same drop
+from the Tools page (`POST /api/v1/tools`, with an optional category). Downloads
+go through `/tools/<category>/<filename>` and require the `tool:download`
+permission; the listing requires `tool:read`.
 
 **npm.** `npm config set registry <server>/npm/` is all a client needs. The
 server answers the registry protocol: a packument per package (abbreviated when
@@ -548,6 +553,28 @@ URL a client receives is rewritten to point back at this server, so a client
 never needs to reach the upstream registry itself. If `NPM_UPSTREAM` is empty,
 unknown or unreachable, a mirrored package is served from the local files alone.
 
+`PUT /npm/<package>` makes this a *writable* registry too, so a private package
+does not need a second server. It is what `npm publish` speaks: the document
+travels as one JSON body with the tarball base64-encoded in `_attachments`. The
+server re-derives everything it stores rather than trusting the body — the path
+name and the body's `name` must agree, the bytes must be a gzipped tar whose
+`package/package.json` matches the published name and version, and the
+`shasum`/`integrity` the client declared must equal what the bytes hash to. The
+tarball is then written atomically to `NPM_DIR` as `<name>-<version>.tgz` (npm's
+flat convention: `@scope/name` loses the scope, exactly as the public registry
+serves it) and the dist-tags are recorded in `NPM_DIR/publish.json`, which is
+what makes `npm publish --tag next` resolve. A version that already exists is
+refused with `409` — published versions are immutable — unless the deployment
+sets `overwrite=true`, the same switch twine uploads read. The permission is
+`npm:publish`, held by `authenticated` (like `package:write`) and revocable from
+`/access` without touching install permissions:
+
+```bash
+npm config set registry https://<server>/npm/
+npm config set //<server>/npm/:_auth "$(printf 'admin:%s' "$PASSWORD" | base64)"
+npm publish                  # or: npm publish --tag next
+```
+
 **Docker.** `GET /docker/v2/` is the API version probe every client makes
 first; from there the usual pull sequence works — `tags/list`, then a manifest
 by tag or digest, then the blobs that manifest references. When the upstream is
@@ -555,7 +582,9 @@ Docker Hub (or any registry that issues a `WWW-Authenticate: Bearer` challenge)
 the server performs the token exchange on the client's behalf, so `docker login`
 is only needed when *this* server asks for credentials. The offline path is
 unchanged: `docker save` tarballs in `DOCKER_DIR` are downloadable and import
-with `docker load -i`.
+with `docker load -i`, and an administrator holding `docker:upload` can add one
+from the Docker page (`POST /api/v1/docker`) along with a compose file or a
+Dockerfile snippet.
 
 **Debian.** Two shapes coexist. The **flat local repository** is
 `/debian/Packages`, rendered from the `.deb` files that actually exist on disk
@@ -675,10 +704,12 @@ document also has raw forms:
 The directory is the catalog, so a change is visible on the next request — no
 restart, no database.
 
-All the catalogs are file-backed and read-only over HTTP **except this one**:
-there is no upload API for tools, npm, Docker or Debian, by design — but a
-package installed through a proxy does leave a cached copy behind, and an
-administrator can publish documentation. The Docker image creates
+All the artifact catalogs work the same way. Publishing through the browser is
+deliberately narrow: documentation, tools and Docker artifacts each have an
+administrator-only upload (`doc:upload`, `tool:upload`, `docker:upload`), npm
+accepts a client's `npm publish`, and Debian stays copy-only — an operator drops
+a `.deb` into `DEBIAN_DIR`. A package fetched through a proxy also leaves a
+cached copy behind. The Docker image creates
 `/app/tools`, `/app/npm`, `/app/node-builds`, `/app/docker-images`,
 `/app/debian` and `/app/docs`, and
 `docker/docker-compose.yml` bind-mounts the repository copies so an operator can
@@ -800,6 +831,7 @@ on demand (and caches it), so opening the page never hashes gigabytes.
 | GET    | `/npm/-/ping`                                   | npm health convention — returns `{}` |
 | GET    | `/npm/-/v1/search`                              | npm search (`?text=&size=&from=`)    |
 | GET    | `/npm/<package>`                                | npm packument — abbreviated or full per `Accept` |
+| PUT    | `/npm/<package>`                                | Publish (`npm publish`) — verified, then stored; `npm:publish` |
 | GET    | `/npm/<package>/<version>`                      | One npm version manifest             |
 | GET    | `/npm/<package>/-/<filename>`                   | npm tarball (local, cached, or proxied) |
 | GET    | `/npm/@<scope>/<name>` + the two variants above | The same three npm endpoints for a scoped package |
@@ -843,10 +875,12 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 | DELETE | `/api/v1/admin/users/<id>/roles/<role>` | Revoke a role (admin:roles)        |
 | PUT    | `/api/v1/admin/users/<id>/superuser` | Toggle the superuser bypass (superuser only) |
 | GET    | `/api/v1/tools`                   | Tools catalog grouped by category (tool:read) |
+| POST   | `/api/v1/tools`                   | Upload a tool into an optional category (tool:upload) |
 | GET    | `/api/v1/python-builds`           | CPython build catalog for the SPA (build:read) |
 | GET    | `/api/v1/node-builds`             | Node.js build catalog for the SPA (nodebuild:read) |
 | GET    | `/api/v1/npm`                     | Local npm catalog scaffold (npm:read)    |
 | GET    | `/api/v1/docker`                  | Local docker catalog (docker:read)       |
+| POST   | `/api/v1/docker`                  | Upload an image tar / compose / Dockerfile snippet (docker:upload) |
 | GET    | `/api/v1/debian`                  | Local debian catalog (debian:read)       |
 | GET    | `/api/v1/models`                  | Model-routing table, keys masked (model:read) |
 | GET    | `/api/v1/models/resolved`         | Same table **with** upstream keys + `endpoint_url` (model:resolve) |
@@ -1250,6 +1284,21 @@ script.
   HTTP entry point to reason about. `client_max_body_size` in
   `docker/nginx/nginx.conf` must stay ≥ `MAX_CONTENT_LENGTH`, or uploads are
   rejected by nginx before Flask sees them.
+- **Forwarded headers decide every advertised URL.** The backend runs
+  `ProxyFix(x_for, x_proto, x_host, x_prefix)`, so the npm `dist.tarball`
+  (`services/npm_registry.py`), the device-flow `verification_uri` and the
+  PEP 691 file URLs are built from `Host` / `X-Forwarded-Host` /
+  `X-Forwarded-Proto`. `docker/nginx/nginx.conf` therefore forwards
+  `Host $http_host` (port included) and *preserves* an upstream proxy's
+  `X-Forwarded-*` values, falling back to its own only when none were sent.
+  Overwriting them with `$host`/`$scheme` — the pre-2026-09 behaviour — made a
+  deployment behind a TLS terminator advertise `http://host/…` and broke
+  `npm install` of every mirrored package.
+- **`docker/nginx/nginx.conf` is a single-file bind mount.** Editing it in place
+  works, but a tool that replaces the file (temp file + `rename`, as most
+  editors and `sed -i` do) leaves the *old inode* mounted in the container, so
+  `nginx -s reload` keeps serving the old config. Recreate the service
+  (`docker compose up -d --force-recreate nginx`) after such an edit.
 - Generate `SECRET_KEY` with:
   `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
 - **OAuth2 introspection verifies TLS.** Set `OAUTH2_CA_BUNDLE` when the

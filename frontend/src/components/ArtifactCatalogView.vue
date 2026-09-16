@@ -12,6 +12,7 @@ import { useI18n } from 'vue-i18n'
 import {
   fetchDebianCatalog,
   fetchDockerCatalog,
+  uploadDockerArtifact,
   type DebianCatalog,
   type DockerCatalog,
   type FlatArtifact,
@@ -20,11 +21,13 @@ import { apiError } from '@/api/client'
 import CodeBlock from '@/components/CodeBlock.vue'
 import TablePager from '@/components/TablePager.vue'
 import { usePagination } from '@/composables/usePagination'
+import { useSessionStore } from '@/stores/session'
 import { formatDate } from '@/utils/format'
 
 const props = defineProps<{ endpoint: 'docker' | 'debian' }>()
 
 const { t } = useI18n()
+const session = useSessionStore()
 
 type Catalog = DockerCatalog | DebianCatalog
 
@@ -32,6 +35,14 @@ const catalog = ref<Catalog | null>(null)
 const loading = ref(true)
 
 const isDocker = computed(() => props.endpoint === 'docker')
+
+/** Uploading exists only on the Docker page, and only for `docker:upload`. */
+const canUpload = computed(() => isDocker.value && session.can('docker:upload'))
+const uploadVisible = ref(false)
+const uploading = ref(false)
+const uploadPercent = ref(0)
+const uploadFile = ref<File | null>(null)
+const uploadInput = ref<HTMLInputElement | null>(null)
 const artifacts = computed<FlatArtifact[]>(() => catalog.value?.artifacts ?? [])
 const { page, pageSize, pageSizes, total, rows } = usePagination(artifacts)
 const upstream = computed(() =>
@@ -86,6 +97,43 @@ function openStaticIndex(): void {
   window.open(indexUrl.value, '_blank', 'noopener')
 }
 
+// ── Upload (docker:upload) ───────────────────────────────────────────
+
+function openUpload(): void {
+  uploadVisible.value = true
+  uploadFile.value = null
+  uploadPercent.value = 0
+  if (uploadInput.value) uploadInput.value.value = ''
+}
+
+function onUploadPick(event: Event): void {
+  const input = event.target as HTMLInputElement
+  uploadFile.value = input.files?.[0] ?? null
+}
+
+async function submitUpload(): Promise<void> {
+  const file = uploadFile.value
+  if (!file) {
+    ElMessage.warning(t('docker.needFile'))
+    return
+  }
+  uploading.value = true
+  uploadPercent.value = 0
+  try {
+    const entry = await uploadDockerArtifact(file, (percent) => {
+      uploadPercent.value = percent
+    })
+    ElMessage.success(t('docker.uploaded', { name: entry.filename ?? file.name }))
+    uploadVisible.value = false
+    await load()
+  } catch (e) {
+    // The server's 400/409/413 message names the exact problem; keep it.
+    ElMessage.error(apiError(e) || t('docker.uploadFailed'))
+  } finally {
+    uploading.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -97,6 +145,10 @@ onMounted(load)
         <p class="page__description">{{ t(`${endpoint}.description`) }}</p>
       </div>
       <div class="toolbar">
+        <el-button v-if="canUpload" type="primary" @click="openUpload">
+          <el-icon><Upload /></el-icon>
+          <span class="btn-label">{{ t('docker.upload') }}</span>
+        </el-button>
         <el-button @click="openStaticIndex">
           <el-icon><Link /></el-icon>
           <span class="btn-label">{{ t(`${endpoint}.staticIndex`) }}</span>
@@ -225,10 +277,62 @@ onMounted(load)
         :total="total"
       />
     </el-card>
+
+    <el-dialog
+      v-model="uploadVisible"
+      :title="t('docker.uploadTitle')"
+      width="520px"
+      :close-on-click-modal="!uploading"
+      :close-on-press-escape="!uploading"
+      :show-close="!uploading"
+    >
+      <el-form label-position="top" @submit.prevent>
+        <el-form-item :label="t('docker.fileLabel')">
+          <input
+            ref="uploadInput"
+            class="artifact-view__file-input"
+            type="file"
+            accept=".tar,.tar.gz,.tgz,.yml,.yaml,.dockerfile"
+            @change="onUploadPick"
+          />
+          <el-button :disabled="uploading" @click="uploadInput?.click()">
+            <el-icon><Upload /></el-icon>
+            <span class="btn-label">
+              {{ uploadFile ? uploadFile.name : t('docker.chooseFile') }}
+            </span>
+          </el-button>
+        </el-form-item>
+        <el-progress v-if="uploading" :percentage="uploadPercent" :stroke-width="10" />
+        <p class="artifact-view__hint">{{ t('docker.uploadHint') }}</p>
+      </el-form>
+      <template #footer>
+        <el-button :disabled="uploading" @click="uploadVisible = false">
+          {{ t('common.cancel') }}
+        </el-button>
+        <el-button
+          type="primary"
+          :loading="uploading"
+          :disabled="!uploadFile"
+          @click="submitUpload"
+        >
+          {{ t('common.upload') }}
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <style scoped>
+.artifact-view__file-input {
+  display: none;
+}
+
+.artifact-view__hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
 .item {
   display: flex;
   flex-direction: column;

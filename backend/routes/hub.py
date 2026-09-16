@@ -17,6 +17,7 @@ Endpoints
 ``GET /tools/``                  tools index — HTML, or JSON with `?format=json`
 ``GET /tools/<path:filepath>``   download one tool
 ``GET /api/v1/tools``            tool catalog for the SPA
+``POST /api/v1/tools``           upload a tool — ``tool:upload``
 ``GET /api/v1/models``           model-routing table
 ``POST /api/v1/models``          add a route — ``model:write``
 ``PUT /api/v1/models/<name>``    edit a route — ``model:write``
@@ -35,6 +36,8 @@ this.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from flask import (
     Blueprint, abort, jsonify, render_template, request,
     send_from_directory, url_for,
@@ -43,12 +46,13 @@ from flask import (
 from auth.decorators import require_permission
 from auth.permissions import (
     MODEL_READ, MODEL_RESOLVE, MODEL_WRITE, TOOL_DOWNLOAD, TOOL_READ,
+    TOOL_UPLOAD,
 )
 from config import settings
 from errors import BadRequestError, PypiError
 from openapi import api_operation, binary, errors, ok
 from routes.hub_common import spa_url, wants_json
-from services import hub, model_routes
+from services import hub, hub_upload, model_routes
 
 hub_bp = Blueprint("hub", __name__)
 
@@ -63,6 +67,27 @@ _TOOLS_SCHEMA = {
         "url_prefix": {"type": "string"},
         "tool_count": {"type": "integer"},
         "categories": {"type": "array", "items": {"type": "object"}},
+    },
+}
+
+#: One `services.hub.scan_tools` entry — the shape both the catalog and the
+#: upload response use, so the SPA can render an upload without a second fetch.
+_TOOL_ENTRY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "filename": {"type": "string"},
+        "relative_path": {
+            "type": "string",
+            "description": "Path relative to `TOOLS_DIR` — the download URL's tail",
+        },
+        "download_url": {"type": "string"},
+        "size": {"type": "integer"},
+        "size_human": {"type": "string"},
+        "sha256": {"type": ["string", "null"]},
+        "modified": {"type": ["string", "null"]},
+        "description": {"type": ["string", "null"]},
+        "tags": {"type": "array", "items": {"type": "string"}},
     },
 }
 
@@ -243,6 +268,15 @@ def _tools_payload() -> dict:
     return hub.scan_tools(settings.hub.tools_dir, url_prefix=prefix)
 
 
+def _tool_entry_by_path(relative_path: str) -> dict | None:
+    """The catalog entry for one on-disk tool, or ``None`` if it is hidden."""
+    for category in _tools_payload()["categories"]:
+        for tool in category["tools"]:
+            if tool["relative_path"] == relative_path:
+                return tool
+    return None
+
+
 # ── Tools: static index + download ───────────────────────────────────
 
 @hub_bp.route("/tools/")
@@ -324,6 +358,77 @@ def download_tool(filepath: str):
 )
 def tools_catalog():
     return jsonify(_tools_payload())
+
+
+@hub_bp.route("/api/v1/tools", methods=["POST"])
+@require_permission(TOOL_UPLOAD)
+@api_operation(
+    summary="Upload a tool",
+    description=(
+        "Stores one `multipart/form-data` `file` part under `TOOLS_DIR` — the "
+        "browser counterpart of copying a script into a category. The optional "
+        "`category` field names one immediate sub-directory; an omitted or empty "
+        "value places the file at the tools root, which the catalog shows as "
+        "“uncategorized”.\n\n"
+        "The filename must be a single path segment (no `/`, no backslash, no "
+        "`..`, no dotfile) with an allowed script, archive, binary or config "
+        "extension. The names the catalog scanner hides as metadata "
+        "(`catalog.json`, README/LICENSE/CHANGELOG) are refused too, because a "
+        "file it would not list could not be reported back. An existing file "
+        "answers `409` unless `STORAGE__OVERWRITE=true`; a body above "
+        "`MAX_CONTENT_LENGTH` answers `413`. The response is the stored entry in "
+        "exactly the shape `GET /api/v1/tools` reports.\n\n"
+        "Requires `tool:upload`, which by default only the built-in admin role "
+        "holds: every signed-in user may browse and download the catalog, but "
+        "publishing to it is an administrative act."
+    ),
+    tags=["Hub"],
+    request_body={
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "category": {
+                            "type": "string",
+                            "description": (
+                                "One immediate sub-directory of TOOLS_DIR; empty "
+                                "or omitted means the tools root"
+                            ),
+                        },
+                        "file": {"type": "string", "format": "binary"},
+                    },
+                    "required": ["file"],
+                }
+            }
+        },
+    },
+    responses={
+        "201": ok("The stored tool, in the catalog's entry shape", _TOOL_ENTRY_SCHEMA),
+        **errors("400", "401", "403", "409", "413", "500"),
+    },
+)
+def upload_tool():
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        raise BadRequestError("multipart/form-data 需要一个 file 字段")
+    category = (request.form.get("category") or "").strip()
+    target = hub_upload.tools_target(
+        settings.hub.tools_dir, upload.filename, category
+    )
+    hub_upload.save(target, upload)
+    relative = target.relative_to(Path(settings.hub.tools_dir)).as_posix()
+    entry = _tool_entry_by_path(relative)
+    if entry is None:
+        # `tools_target` already refuses every name the scanner hides, so this
+        # only fires if that visibility rule drifts; fail loudly rather than
+        # answer 201 for a tool nobody can see.
+        raise PypiError(
+            f"已写入 {relative}，但工具目录扫描未列出它；请检查 TOOLS_DIR 的可见性规则",
+            status_code=500,
+        )
+    return jsonify(entry), 201
 
 
 @hub_bp.route("/api/v1/models")

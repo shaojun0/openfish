@@ -485,6 +485,30 @@ export async function fetchToolCatalog(): Promise<ToolCatalog> {
   return data
 }
 
+/**
+ * Upload one tool into an optional category directory.  Admin-only
+ * (`tool:upload`).  The server validates the name and extension, streams the
+ * body to disk and answers with the stored entry in the catalog's own shape.
+ */
+export async function uploadTool(
+  category: string,
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<ToolEntry> {
+  const form = new FormData()
+  if (category) form.append('category', category)
+  form.append('file', file)
+  // Let the browser set the multipart boundary — do not set Content-Type.
+  const { data } = await http.post<ToolEntry>('/tools', form, {
+    onUploadProgress: (event) => {
+      if (onProgress && event.total) {
+        onProgress(Math.round((event.loaded / event.total) * 100))
+      }
+    },
+  })
+  return data
+}
+
 export async function fetchNpmCatalog(): Promise<NpmCatalog> {
   const { data } = await http.get<NpmCatalog>('/npm')
   return data
@@ -548,6 +572,28 @@ export async function checkModelRoute(name: string): Promise<ModelRouteHealth> {
 
 export async function fetchDockerCatalog(): Promise<DockerCatalog> {
   const { data } = await http.get<DockerCatalog>('/docker')
+  return data
+}
+
+/**
+ * Upload one offline Docker artifact — a `docker save` tarball, a compose file
+ * or a Dockerfile snippet.  Admin-only (`docker:upload`); answers with the
+ * stored entry in the catalog's own shape.
+ */
+export async function uploadDockerArtifact(
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<FlatArtifact> {
+  const form = new FormData()
+  form.append('file', file)
+  // Let the browser set the multipart boundary — do not set Content-Type.
+  const { data } = await http.post<FlatArtifact>('/docker', form, {
+    onUploadProgress: (event) => {
+      if (onProgress && event.total) {
+        onProgress(Math.round((event.loaded / event.total) * 100))
+      }
+    },
+  })
   return data
 }
 

@@ -63,7 +63,12 @@ class HubConfig(BaseSettings):
     )
     npm_dir: str = Field(
         default=catalog_path("npm"),
-        description="Directory holding the local npm catalog (tarballs and/or catalog.json)",
+        description=(
+            "Directory holding the local npm catalog — tarballs, an optional "
+            "catalog.json overlay, and the publish.json dist-tag sidecar that "
+            "`npm publish` (PUT /npm/<package>, npm:publish) maintains. Must be "
+            "writable for the publish endpoint to work."
+        ),
     )
     npm_upstream: str = Field(
         default="https://registry.npmmirror.com",

@@ -22,6 +22,7 @@ Catalog
 ``GET /docker/``                              browsable index (HTML or JSON)
 ``GET /docker/files/<filename>``              download an image tar / snippet
 ``GET /api/v1/docker``                        catalog document for the SPA
+``POST /api/v1/docker``                       upload an image tar / snippet — ``docker:upload``
 
 Scope limitation
 ----------------
@@ -48,12 +49,13 @@ from flask import (
 )
 
 from auth.decorators import require_permission
-from auth.permissions import DOCKER_DOWNLOAD, DOCKER_READ
+from auth.permissions import DOCKER_DOWNLOAD, DOCKER_READ, DOCKER_UPLOAD
 from config import settings
+from errors import BadRequestError, PypiError
 from openapi import api_operation, binary, errors, json_body, ok
 from routes.hub_common import spa_url, wants_json
 from services import docker_registry as registry
-from services import hub
+from services import hub, hub_upload
 
 docker_bp = Blueprint("docker", __name__)
 
@@ -65,6 +67,26 @@ _DOCKER_SCHEMA = {
         "registry": {"type": "string"},
         "artifact_count": {"type": "integer"},
         "artifacts": {"type": "array", "items": {"type": "object"}},
+    },
+}
+
+#: One `services.hub.scan_docker` entry — the shape the catalog and the upload
+#: response share. `kind` is `image`, `compose`, `dockerfile` or `file`.
+_DOCKER_ARTIFACT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "version": {"type": "string"},
+        "arch": {"type": "string"},
+        "kind": {"type": "string"},
+        "filename": {"type": "string"},
+        "size": {"type": "integer"},
+        "size_human": {"type": "string"},
+        "sha256": {"type": ["string", "null"]},
+        "modified": {"type": ["string", "null"]},
+        "download_url": {"type": "string"},
+        "description": {"type": ["string", "null"]},
+        "tags": {"type": "array", "items": {"type": "string"}},
     },
 }
 
@@ -89,6 +111,14 @@ def _docker_payload() -> dict:
         url_prefix=prefix,
         registry=settings.hub.docker_registry,
     )
+
+
+def _docker_entry_by_filename(filename: str) -> dict | None:
+    """The catalog entry for one on-disk artifact, or ``None`` if it is hidden."""
+    for artifact in _docker_payload()["artifacts"]:
+        if artifact["filename"] == filename:
+            return artifact
+    return None
 
 
 def _registry_error(exc: registry.DockerRegistryError) -> Response:
@@ -388,6 +418,66 @@ def download_docker_file(filename: str):
 )
 def docker_catalog_api():
     return jsonify(_docker_payload())
+
+
+@docker_bp.route("/api/v1/docker", methods=["POST"])
+@require_permission(DOCKER_UPLOAD)
+@api_operation(
+    summary="Upload a docker artifact",
+    description=(
+        "Stores one `multipart/form-data` `file` part in `DOCKER_DIR`, next to "
+        "the artifacts `GET /api/v1/docker` lists. This is the offline path an "
+        "air-gapped host consumes after `docker load -i`, and the page's own "
+        "upload control.\n\n"
+        "Accepted, matching what the catalog knows how to describe: a "
+        "`docker save` image tarball (`.tar`, `.tar.gz`, `.tgz`), a compose file "
+        "(`.yml`, `.yaml`), or a Dockerfile (`Dockerfile`, `Dockerfile.<stage>` "
+        "or `*.dockerfile`). The name must be a single path segment — no `/`, no "
+        "backslash, no `..`, no dotfile — and a name the scanner hides as "
+        "metadata (`catalog.json`, README/LICENSE/CHANGELOG) is refused. An "
+        "existing file answers `409` unless `STORAGE__OVERWRITE=true`; a body "
+        "above `MAX_CONTENT_LENGTH` answers `413`. The response is the stored "
+        "entry in exactly the shape `GET /api/v1/docker` reports.\n\n"
+        "Requires `docker:upload`, which by default only the built-in admin role "
+        "holds: pulling from the catalog and the pull-through registry is open to "
+        "every signed-in user, but publishing an artifact is administrative."
+    ),
+    tags=["Docker"],
+    request_body={
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "properties": {"file": {"type": "string", "format": "binary"}},
+                    "required": ["file"],
+                }
+            }
+        },
+    },
+    responses={
+        "201": ok(
+            "The stored artifact, in the catalog's entry shape",
+            _DOCKER_ARTIFACT_SCHEMA,
+        ),
+        **errors("400", "401", "403", "409", "413", "500"),
+    },
+)
+def upload_docker_artifact():
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        raise BadRequestError("multipart/form-data 需要一个 file 字段")
+    target = hub_upload.docker_target(settings.hub.docker_dir, upload.filename)
+    hub_upload.save(target, upload)
+    entry = _docker_entry_by_filename(target.name)
+    if entry is None:
+        # `docker_target` refuses every name the scanner hides; reaching here
+        # means the scanner's visibility rule changed under us.
+        raise PypiError(
+            f"已写入 {target.name}，但 Docker 目录扫描未列出它；请检查 DOCKER_DIR 的可见性规则",
+            status_code=500,
+        )
+    return jsonify(entry), 201
 
 
 __all__ = ["docker_bp"]

@@ -41,6 +41,7 @@ export default {
     cancel: '取消',
     confirm: '确定',
     save: '保存',
+    upload: '上传',
     edit: '编辑',
     delete: '删除',
     copy: '复制',
@@ -316,6 +317,17 @@ export default {
     missingTitle: '工具目录不存在',
     missingDesc: '服务端未找到目录 {root}。请确认 TOOLS_DIR 配置，或在该目录下建立分类子目录。',
     loadFailed: '加载工具目录失败',
+    upload: '上传工具',
+    uploadTitle: '上传工具到目录',
+    categoryLabel: '分类目录',
+    categoryPlaceholder: '留空则放在工具根目录（未分类）',
+    fileLabel: '工具文件',
+    chooseFile: '选择文件',
+    needFile: '请先选择要上传的文件',
+    uploadHint:
+      '支持脚本、二进制、压缩包与配置文件；文件名不能包含路径分隔符，也不能以点开头。已存在的文件会被拒绝，除非服务端开启 STORAGE__OVERWRITE。',
+    uploaded: '已上传「{name}」',
+    uploadFailed: '上传工具失败',
   },
 
   npm: {
@@ -369,6 +381,15 @@ export default {
     empty: 'Docker 目录还没有制品。把镜像 tar 或 compose 文件放进 DOCKER_DIR 即可。',
     missingDesc: '服务端未找到目录 {root}。请确认 DOCKER_DIR 配置。',
     loadFailed: '加载 Docker 目录失败',
+    upload: '上传制品',
+    uploadTitle: '上传 Docker 制品',
+    fileLabel: '制品文件',
+    chooseFile: '选择文件',
+    needFile: '请先选择要上传的文件',
+    uploadHint:
+      '支持 docker save 镜像 tar（.tar/.tar.gz/.tgz）、compose 文件（.yml/.yaml）以及 Dockerfile（Dockerfile、Dockerfile.*、*.dockerfile）。已存在的文件会被拒绝，除非服务端开启 STORAGE__OVERWRITE。',
+    uploaded: '已上传「{name}」',
+    uploadFailed: '上传 Docker 制品失败',
   },
 
   debian: {

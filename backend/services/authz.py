@@ -71,7 +71,8 @@ _AUTHENTICATED_SEED = (
     P.PACKAGE_READ, P.PACKAGE_WRITE,
     P.BUILD_READ, P.BUILD_DOWNLOAD, P.BUILD_SHA256,
     P.NODE_BUILD_READ, P.NODE_BUILD_DOWNLOAD, P.NODE_BUILD_SHA256,
-    P.TOOL_READ, P.TOOL_DOWNLOAD, P.NPM_READ, P.NPM_DOWNLOAD, P.MODEL_READ,
+    P.TOOL_READ, P.TOOL_DOWNLOAD, P.NPM_READ, P.NPM_DOWNLOAD, P.NPM_PUBLISH,
+    P.MODEL_READ,
     P.MODEL_RESOLVE,
     P.DOCKER_READ, P.DOCKER_DOWNLOAD, P.DEBIAN_READ, P.DEBIAN_DOWNLOAD,
     P.DOC_READ,
@@ -118,6 +119,15 @@ _SEED_TOPUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "2026-09-model-resolve",
         P.AUTHENTICATED_ROLE,
         (P.MODEL_RESOLVE,),
+    ),
+    # `npm publish` names a separate point from `npm:download` so an operator
+    # can revoke publishing without also cutting off installs.  Seed it to the
+    # same role that already holds `package:write` (twine), so publishing to the
+    # npm side of the hub needs no manual grant on an existing deployment.
+    (
+        "2026-09-npm-publish",
+        P.AUTHENTICATED_ROLE,
+        (P.NPM_PUBLISH,),
     ),
 )
 

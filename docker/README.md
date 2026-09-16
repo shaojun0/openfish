@@ -19,7 +19,7 @@ docker/
 ├── tools/    (real dir, in-repo)   → /app/tools         (downloadable tools catalog)
 ├── docs/     (real dir, in-repo)   → /app/docs          (per-ecosystem Markdown)
 ├── share     → symlink             → /app/share         (python + python-build-standalone)
-├── npm       → symlink             → /app/npm           (local npm tarballs)
+├── npm       → symlink             → /app/npm           (npm tarballs + publish.json)
 ├── node-builds → symlink           → /app/node-builds   (nodejs.org/dist mirror)
 ├── docker-images → symlink         → /app/docker-images (docker save tarballs)
 ├── debian    → symlink             → /app/debian        (.deb + apt metadata)
@@ -31,6 +31,13 @@ docker/
 the repository. The five artifact mirrors, the runtime `data/` and the model
 routing table are **operator data**: `prepare-mounts.sh` makes each one either a
 real directory (seeded from `examples/`) or a symlink to a data disk.
+
+> **`./npm` is written by the server, not just read.** `npm publish`
+> (`PUT /npm/<package>`, permission `npm:publish`) stores its tarball here under
+> npm's flat `<name>-<version>.tgz` name and records dist-tags in
+> `./npm/publish.json`, so the mount must stay `rw`. Making it read-only
+> disables publishing (`400`) without affecting installs or the read-through
+> proxy.
 
 ## Mount table
 
@@ -124,6 +131,19 @@ git-ignored, so the repository stays clean.
   checkout still starts with a working catalog. The live
   `node-builds/.sync/sync_all.sh` and `run.out` that existed only in the
   repository were copied into the live mirror so neither side lost content.
+- **`nginx/nginx.conf` preserves upstream `X-Forwarded-*`.** The backend runs
+  `ProxyFix`, so its absolute URLs (npm `dist.tarball`, `verification_uri`, PEP
+  691 file URLs) come from `Host` / `X-Forwarded-Host` / `X-Forwarded-Proto`.
+  The gateway forwards `Host $http_host` (port kept) and the client's forwarded
+  headers when present, falling back to its own only when they are absent — with
+  `$host`/`$scheme` it degraded every URL behind a TLS terminator to
+  `http://host/…`. See the `map`s at the top of the file.
+- **A single-file mount hides a rename.** `./nginx/nginx.conf` is mounted as a
+  file, so an edit that replaces the inode (most editors, `sed -i`, any
+  write-to-temp-then-rename) is invisible to the running container even after
+  `nginx -s reload`. Recreate the service
+  (`docker compose up -d --force-recreate nginx`) after such an edit — and after
+  rebuilding `backend`, so nginx re-resolves its DNS name.
 
 ## Operations
 

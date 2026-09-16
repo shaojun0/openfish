@@ -1,9 +1,12 @@
 """Artifact-hub catalogs — tools, npm and model routes.
 
 Every catalog in this module follows the same rule: **the filesystem (or a
-small JSON file) is the source of truth**.  There is no database, no upload
-endpoint and no admin UI to keep in sync, so adding an artifact is a file copy
-and the next request sees it.
+small JSON file) is the source of truth**.  There is no database and no index to
+keep in sync, so adding an artifact is a file copy and the next request sees it.
+An administrator may also make that copy through the browser — the tools and
+Docker catalogs have admin-only upload endpoints that write through
+:mod:`services.hub_upload` — but the endpoint is only a convenience in front of
+the same directory, never a second store.
 
 Layout
 ------

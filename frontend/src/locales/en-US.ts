@@ -41,6 +41,7 @@ export default {
     cancel: 'Cancel',
     confirm: 'Confirm',
     save: 'Save',
+    upload: 'Upload',
     edit: 'Edit',
     delete: 'Delete',
     copy: 'Copy',
@@ -326,6 +327,17 @@ export default {
     missingTitle: 'Tools directory not found',
     missingDesc: 'The server cannot see {root}. Check TOOLS_DIR, or create category sub-directories in it.',
     loadFailed: 'Failed to load the tools catalog',
+    upload: 'Upload tool',
+    uploadTitle: 'Upload a tool',
+    categoryLabel: 'Category',
+    categoryPlaceholder: 'Leave empty for the tools root (uncategorized)',
+    fileLabel: 'Tool file',
+    chooseFile: 'Choose file',
+    needFile: 'Choose a file to upload first',
+    uploadHint:
+      'Scripts, binaries, archives and config files are accepted. The filename must be a single path segment and cannot start with a dot. An existing file is refused unless the server has STORAGE__OVERWRITE enabled.',
+    uploaded: 'Uploaded “{name}”',
+    uploadFailed: 'Failed to upload the tool',
   },
 
   npm: {
@@ -381,6 +393,15 @@ export default {
     empty: 'No docker artifacts yet. Drop an image tarball or compose file into DOCKER_DIR.',
     missingDesc: 'The server cannot see {root}. Check DOCKER_DIR.',
     loadFailed: 'Failed to load the docker catalog',
+    upload: 'Upload artifact',
+    uploadTitle: 'Upload a Docker artifact',
+    fileLabel: 'Artifact file',
+    chooseFile: 'Choose file',
+    needFile: 'Choose a file to upload first',
+    uploadHint:
+      'A `docker save` image tarball (.tar/.tar.gz/.tgz), a compose file (.yml/.yaml), or a Dockerfile (Dockerfile, Dockerfile.*, *.dockerfile) is accepted. An existing file is refused unless the server has STORAGE__OVERWRITE enabled.',
+    uploaded: 'Uploaded “{name}”',
+    uploadFailed: 'Failed to upload the Docker artifact',
   },
 
   debian: {

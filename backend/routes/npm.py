@@ -12,6 +12,8 @@ Wire protocol
 ``GET /npm/-/v1/search``               search (the modern replacement for /-/all)
 ``GET /npm/-/ping``                    health probe every client calls first
 ``GET /npm/-/all``                     legacy full index
+``PUT /npm/<package>``                 publish (``npm publish``) — guarded by
+                                       ``npm:publish``
 
 Catalog
 -------
@@ -38,11 +40,13 @@ from flask import (
 from werkzeug.routing import BaseConverter
 
 from auth.decorators import require_permission
-from auth.permissions import NPM_DOWNLOAD, NPM_READ
+from auth.permissions import NPM_DOWNLOAD, NPM_PUBLISH, NPM_READ
 from config import settings
+from errors import BadRequestError
 from openapi import api_operation, binary, errors, json_body, ok
 from routes.hub_common import spa_url, wants_json
 from services import hub
+from services.npm_publish import publish as publish_package
 from services.npm_registry import (
     ABBREVIATED_ACCEPT, SEARCH_MAX_SIZE, NpmRegistry, clamp_search_size,
 )
@@ -129,6 +133,30 @@ _NPM_SEARCH_SCHEMA = {
         "objects": {"type": "array", "items": {"type": "object"}},
         "total": {"type": "integer"},
         "time": {"type": "string"},
+    },
+}
+
+_NPM_PUBLISH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ok": {"type": "boolean"},
+        "id": {"type": "string", "description": "The package name that was published"},
+        "revision": {"type": "string", "description": "Opaque revision marker"},
+        "published": {
+            "type": "array",
+            "description": "One entry per tarball written by this request",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "version": {"type": "string"},
+                    "filename": {"type": "string"},
+                    "size": {"type": "integer"},
+                    "shasum": {"type": "string"},
+                    "integrity": {"type": "string"},
+                },
+            },
+        },
     },
 }
 
@@ -411,6 +439,95 @@ def npm_version(package: str, version: str):
     if manifest is None:
         return _lookup_error(f"package '{package}' version '{version}'", "notfound")
     return jsonify(manifest)
+
+
+@npm_bp.route("/npm/<pkg:package>", methods=["PUT"])
+@require_permission(NPM_PUBLISH)
+@api_operation(
+    summary="Publish an npm package (npm publish)",
+    description=(
+        "The write half of the registry protocol — the endpoint `npm publish` "
+        "PUTs to. The body is npm's publish document: `name`, `dist-tags`, the "
+        "`versions` map, and one `_attachments` entry per tarball being uploaded "
+        "(base64).\n\n"
+        "Every attachment is verified before it is stored: it must decode, be a "
+        "gzipped tar carrying `package/package.json` whose `name`/`version` match "
+        "the version being published, and the `shasum`/`integrity` the document "
+        "declares must equal what the bytes hash to. It is then written to "
+        "`NPM_DIR` under npm's flat `<name>-<version>.tgz` convention (a scoped "
+        "`@scope/name` loses its scope, exactly as the public registry serves "
+        "it), and the dist-tags are recorded so `npm publish --tag next` keeps "
+        "resolving.\n\n"
+        "A version that already exists is refused with `409` — a published "
+        "version is immutable — unless the deployment sets `overwrite=true`, the "
+        "same switch the twine upload path reads."
+    ),
+    tags=["npm"],
+    parameters=[_PACKAGE_PARAM],
+    request_body={
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["name", "versions", "_attachments"],
+                    "properties": {
+                        "name": {"type": "string", "description": "`left-pad`, or `@scope/name`"},
+                        "_id": {"type": "string"},
+                        "description": {"type": "string"},
+                        "dist-tags": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string"},
+                            "description": 'Tags to set, e.g. `{"latest": "1.0.0"}`',
+                        },
+                        "versions": {
+                            "type": "object",
+                            "additionalProperties": {"type": "object"},
+                            "description": "Version manifests; each `dist` states shasum/integrity",
+                        },
+                        "_attachments": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "object",
+                                "properties": {
+                                    "content_type": {"type": "string"},
+                                    "length": {"type": "integer"},
+                                    "data": {
+                                        "type": "string",
+                                        "format": "byte",
+                                        "description": "The `.tgz`, base64-encoded",
+                                    },
+                                },
+                            },
+                        },
+                        "access": {"type": ["string", "null"]},
+                    },
+                },
+            }
+        },
+    },
+    responses={
+        "201": ok("The version(s) were stored", _NPM_PUBLISH_SCHEMA),
+        **errors("400", "401", "403", "409", "413"),
+    },
+)
+def npm_publish(package: str):
+    document = request.get_json(silent=True, force=True)
+    if document is None:
+        raise BadRequestError("Request body must be a JSON npm publish document")
+    published = publish_package(
+        settings.hub.npm_dir,
+        document,
+        path_name=package,
+        overwrite=settings.storage.overwrite,
+        publisher=settings.server.server_name,
+    )
+    return jsonify({
+        "ok": True,
+        "id": published[0].name,
+        "revision": published[0].shasum,
+        "published": [item.as_dict() for item in published],
+    }), 201
 
 
 @npm_bp.route("/npm/<pkg:package>/-/<path:filename>")

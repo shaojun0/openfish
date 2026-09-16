@@ -19,6 +19,10 @@ HTTP Basic credentials and checks the wire shapes npm depends on:
   ``<package>/<version>`` manifest — the route-ambiguity regression;
 * an unknown package as a JSON ``404``, never a ``500``;
 * an anonymous request as ``401``;
+* the write side: ``PUT /npm/<package>`` accepting a real ``npm publish``
+  document (scoped and unscoped), recomputing the hashes instead of trusting
+  them, resolving a persisted ``--tag next``, and refusing a re-publish, a
+  forged shasum, a non-tarball body and a name/version mismatch;
 * the read-through proxy: a package and a tarball fetched from a *fake* upstream
   running in a background thread, then served from cache with no second hit.
 
@@ -89,6 +93,64 @@ def get(client, path: str, *, auth: bool = True, headers: dict | None = None):
     if auth:
         merged.update(AUTH)
     return client.get(path, headers=merged)
+
+
+def put(client, path: str, payload: dict, *, auth: bool = True):
+    headers = dict(AUTH) if auth else {}
+    return client.put(path, json=payload, headers=headers)
+
+
+def publish_document(
+    name: str,
+    version: str,
+    data: bytes,
+    *,
+    tag: str | None = "latest",
+    shasum: str | None = None,
+    integrity: str | None = None,
+    attachment_key: str | None = None,
+) -> dict:
+    """The body ``npm publish`` PUTs, built the way the CLI builds it.
+
+    ``shasum``/``integrity`` default to the real hashes of *data*; pass overrides
+    to forge a document whose declared hashes disagree with its bytes.  The
+    attachment key defaults to the CLI's spelling, which for a scoped package
+    keeps the slash (``@scope/name-1.0.0.tgz``) even though the basename the
+    registry serves drops the scope.
+    """
+    sha1 = hashlib.sha1(data).hexdigest()
+    sri = "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode("ascii")
+    key = attachment_key or f"{name}-{version}.tgz"
+    return {
+        "_id": name,
+        "name": name,
+        "description": "published via PUT",
+        "dist-tags": {tag: version} if tag else {},
+        "versions": {
+            version: {
+                "name": name,
+                "version": version,
+                "description": "published via PUT",
+                "dependencies": {},
+                "optionalDependencies": {},
+                "peerDependencies": {},
+                "bin": {},
+                "dist": {
+                    "tarball": f"http://registry.example.invalid/{name}/-/{key}",
+                    "shasum": shasum if shasum is not None else sha1,
+                    "integrity": integrity if integrity is not None else sri,
+                },
+            },
+        },
+        "_attachments": {
+            key: {
+                "content_type": "application/octet-stream",
+                "data": base64.b64encode(data).decode("ascii"),
+                "length": len(data),
+            },
+        },
+        "access": None,
+    }
 
 
 def build_tarball_bytes(name: str, version: str, description: str) -> bytes:
@@ -299,6 +361,131 @@ def main() -> int:
     clamped = get(client, "/npm/-/v1/search?text=demo&size=9999&from=-5")
     check(clamped.status_code == 200, "out-of-range size/from clamp instead of erroring")
 
+    section("Publish (PUT /npm/<package>)")
+    # The index is already warm from the reads above, so this also proves a
+    # publish invalidates it through the cheap signature (the new tarball's
+    # directory mtime + publish.json) rather than only on a fresh process.
+    PUB_NAME, PUB_VERSION, PUB_NEXT = "openfish-published", "1.0.0", "2.0.0"
+    PUB_BYTES = build_tarball_bytes(PUB_NAME, PUB_VERSION, "published via PUT")
+    PUB_NEXT_BYTES = build_tarball_bytes(PUB_NAME, PUB_NEXT, "published via PUT")
+
+    check(get(client, f"/npm/{PUB_NAME}").status_code == 404,
+          "the package does not exist before the publish")
+
+    created = put(client, f"/npm/{PUB_NAME}",
+                  publish_document(PUB_NAME, PUB_VERSION, PUB_BYTES))
+    check(created.status_code == 201, f"PUT /npm/{PUB_NAME} -> 201")
+    created_body = created.get_json() or {}
+    check(created_body.get("ok") is True, "the publish response says ok")
+    check((created_body.get("published") or [{}])[0].get("filename")
+          == f"{PUB_NAME}-{PUB_VERSION}.tgz",
+          "the stored filename follows npm's flat <name>-<version>.tgz convention")
+    check((_NPM_DIR / f"{PUB_NAME}-{PUB_VERSION}.tgz").is_file(),
+          "the tarball landed in NPM_DIR")
+
+    published_doc = get(client, f"/npm/{PUB_NAME}")
+    check(published_doc.status_code == 200,
+          "the published packument resolves against the already-warm index")
+    published_json = published_doc.get_json() or {}
+    published_manifest = (published_json.get("versions") or {}).get(PUB_VERSION) or {}
+    check((published_json.get("dist-tags") or {}).get("latest") == PUB_VERSION,
+          "latest is the published version")
+    check((published_manifest.get("dist") or {}).get("shasum")
+          == hashlib.sha1(PUB_BYTES).hexdigest(),
+          "the packument carries the recomputed shasum, not just the client's word")
+    published_tar = get(client, f"/npm/{PUB_NAME}/-/{PUB_NAME}-{PUB_VERSION}.tgz")
+    check(published_tar.status_code == 200 and published_tar.data == PUB_BYTES,
+          "the published tarball streams back byte-for-byte")
+
+    tagged = put(client, f"/npm/{PUB_NAME}",
+                 publish_document(PUB_NAME, PUB_NEXT, PUB_NEXT_BYTES, tag="next"))
+    check(tagged.status_code == 201, "a second version publishes under --tag next")
+    tagged_json = get(client, f"/npm/{PUB_NAME}").get_json() or {}
+    tagged_tags = tagged_json.get("dist-tags") or {}
+    check(tagged_tags.get("next") == PUB_NEXT,
+          "the `next` dist-tag resolves to the new version")
+    check(tagged_tags.get("latest") == PUB_VERSION,
+          "a higher version does not steal `latest` from an explicit tag")
+    resolved = get(client, f"/npm/{PUB_NAME}/next")
+    check(resolved.status_code == 200 and
+          (resolved.get_json() or {}).get("version") == PUB_NEXT,
+          "GET /npm/<pkg>/next resolves through the persisted tag")
+
+    marker = json.loads((_NPM_DIR / "publish.json").read_text(encoding="utf-8"))
+    check(marker.get("packages", {}).get(PUB_NAME, {}).get("dist-tags", {}).get("next")
+          == PUB_NEXT, "the dist-tags are persisted to NPM_DIR/publish.json")
+
+    section("Publish: scoped package")
+    SCOPED_PUB, SCOPED_PUB_VERSION = "@openfish/published", "0.1.0"
+    SCOPED_PUB_BYTES = build_tarball_bytes(
+        SCOPED_PUB, SCOPED_PUB_VERSION, "scoped publish fixture")
+    scoped_created = put(client, f"/npm/{SCOPED_PUB}",
+                         publish_document(SCOPED_PUB, SCOPED_PUB_VERSION, SCOPED_PUB_BYTES))
+    check(scoped_created.status_code == 201, "a scoped package publishes")
+    check((_NPM_DIR / f"published-{SCOPED_PUB_VERSION}.tgz").is_file(),
+          "the scope is stripped from the stored filename (npm's flat convention)")
+    scoped_published = (get(client, f"/npm/{SCOPED_PUB}").get_json() or {})
+    scoped_pub_dist = ((scoped_published.get("versions") or {}).get(
+        SCOPED_PUB_VERSION) or {}).get("dist") or {}
+    check(scoped_pub_dist.get("tarball", "").endswith(
+        f"/npm/{SCOPED_PUB}/-/published-{SCOPED_PUB_VERSION}.tgz"),
+        "the scoped dist.tarball keeps the scope in the URL and drops it from the basename")
+    scoped_pub_tar = get(
+        client, f"/npm/{SCOPED_PUB}/-/published-{SCOPED_PUB_VERSION}.tgz")
+    check(scoped_pub_tar.status_code == 200 and scoped_pub_tar.data == SCOPED_PUB_BYTES,
+          "the scoped published tarball streams back")
+
+    section("Publish: what must be refused")
+    conflict = put(client, f"/npm/{PUB_NAME}",
+                   publish_document(PUB_NAME, PUB_VERSION, PUB_BYTES))
+    check(conflict.status_code == 409, "re-publishing an existing version -> 409")
+
+    forged = put(client, f"/npm/{PUB_NAME}",
+                 publish_document(PUB_NAME, "3.0.0", PUB_BYTES, shasum="0" * 40))
+    check(forged.status_code == 400, "a shasum that disagrees with the bytes -> 400")
+    check(not (_NPM_DIR / f"{PUB_NAME}-3.0.0.tgz").exists(),
+          "a refused publish stores nothing")
+
+    not_a_tar = put(client, "/npm/openfish-not-a-tar",
+                    publish_document("openfish-not-a-tar", "1.0.0", b"not a tarball at all"))
+    check(not_a_tar.status_code == 400, "a body that is not a .tgz -> 400")
+
+    wrong_name = put(
+        client, "/npm/openfish-mismatch",
+        publish_document("openfish-mismatch", "1.0.0",
+                         build_tarball_bytes("openfish-other", "1.0.0", "inner name differs")),
+    )
+    check(wrong_name.status_code == 400,
+          "the tarball's inner name must match the published name")
+
+    wrong_version = put(
+        client, "/npm/openfish-orphan",
+        publish_document("openfish-orphan", "1.0.0",
+                         build_tarball_bytes("openfish-orphan", "9.9.9", "inner version differs")),
+    )
+    check(wrong_version.status_code == 400,
+          "the tarball's inner version must match the published version")
+
+    unmatched = put(client, "/npm/openfish-unmatched", {
+        "name": "openfish-unmatched",
+        "versions": {"1.0.0": {"name": "openfish-unmatched", "version": "1.0.0"}},
+        "_attachments": {"some-other-9.9.9.tgz": {
+            "content_type": "application/octet-stream",
+            "data": base64.b64encode(PUB_BYTES).decode("ascii"),
+        }},
+    })
+    check(unmatched.status_code == 400,
+          "an attachment that matches no declared version -> 400")
+
+    empty = put(client, "/npm/openfish-noattachment",
+                {"name": "openfish-noattachment", "versions": {}, "_attachments": {}})
+    check(empty.status_code == 400, "a document with no attachments -> 400")
+
+    body_mismatch = put(client, "/npm/openfish-pathname",
+                        publish_document("openfish-other-name", "1.0.0", PUB_BYTES))
+    check(body_mismatch.status_code == 400,
+          "the body name must match the request path")
+
     section("Errors and auth")
     unknown = get(client, "/npm/definitely-not-a-real-package-xyz")
     check(unknown.status_code == 404, "unknown package -> 404")
@@ -312,6 +499,10 @@ def main() -> int:
                  f"/npm/{DEMO_NAME}/-/{DEMO_NAME}-{DEMO_VERSION}.tgz"):
         response = anonymous.get(path)
         check(response.status_code == 401, f"anonymous GET {path} -> 401")
+
+    anon_publish = anonymous.put(
+        f"/npm/{PUB_NAME}", json=publish_document(PUB_NAME, "4.0.0", PUB_BYTES))
+    check(anon_publish.status_code == 401, "anonymous PUT /npm/<pkg> (publish) -> 401")
 
     section("Existing catalog routes still work")
     check(get(client, "/npm/-/ping").status_code == 200, "/npm/-/ping -> 200")

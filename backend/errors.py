@@ -23,6 +23,21 @@ class UploadConflictError(PypiError):
         )
 
 
+class PublishConflictError(PypiError):
+    """409 for an npm re-publish of an immutable version.
+
+    Separate from :class:`UploadConflictError` because that message talks about
+    twine's ``overwrite=1`` form field, which no npm client sends.
+    """
+
+    def __init__(self, name: str, version: str) -> None:
+        super().__init__(
+            f"You cannot publish over the previously published versions: "
+            f"{name}@{version} already exists",
+            status_code=409,
+        )
+
+
 class BadRequestError(PypiError):
     def __init__(self, message: str = "Bad request") -> None:
         super().__init__(message=message, status_code=400)

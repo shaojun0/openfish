@@ -46,6 +46,11 @@ backend/data/*.sqlite3*
 # blobs, apt metadata). Derived data, potentially hundreds of megabytes —
 # never committed.
 backend/data/cache/
+# Runtime JSON state: the device-authorization code store (`DEVICE_CODES_FILE`,
+# which holds live user codes and the API keys they mint) and the model-health
+# probe results (`MODEL_HEALTH_FILE`). Both are written by the server, neither
+# is a fixture.
+backend/data/*.json
 # Safety net: the runtime database belongs in backend/data/. A stray root-level
 # data/ (stale env file, a command run from the wrong directory) must never be
 # committed — it is a live SQLite file, not a fixture.

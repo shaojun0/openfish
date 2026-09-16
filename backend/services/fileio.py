@@ -22,7 +22,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 logger = logging.getLogger("cpypiserver.fileio")
 
@@ -49,6 +49,44 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
             os.unlink(tmp_name)
         except OSError:
             pass
+
+
+def atomic_write_stream(path: Path, chunks: Iterable[bytes]) -> int:
+    """Stream *chunks* to *path* atomically.  Returns the number of bytes written.
+
+    Companion to :func:`atomic_write_bytes` for a body too large to hold in
+    memory: the chunks are consumed lazily and written straight to a sibling
+    temp file, so an HTTP upload streams through the process instead of landing
+    in it.  ``mkstemp`` creates that file 0600 and it is chmodded to 0644 just
+    before the rename, so the published file is world-readable while a
+    half-written one never is.
+
+    Unlike :func:`atomic_write_bytes` there is no in-place fallback for an
+    ``EBUSY``/``EXDEV`` rename failure.  That fallback exists for a *single-file
+    bind mount*; this function targets a directory of artifacts, where a sibling
+    rename always succeeds — and the chunks it has already consumed could not be
+    replayed to rewrite a mount point anyway.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    total = 0
+    fd, tmp_name = tempfile.mkstemp(prefix=".tmp-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            for chunk in chunks:
+                if not chunk:
+                    continue
+                fh.write(chunk)
+                total += len(chunk)
+        os.chmod(tmp_name, 0o644)
+        os.replace(tmp_name, path)
+    finally:
+        # A successful replace consumed the temp file; an aborted stream left it
+        # behind.  Either way, cleaning up is best-effort.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+    return total
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -79,4 +117,4 @@ def read_json(path: Path, default: Any = None) -> Any:
         return default
 
 
-__all__ = ["atomic_write_bytes", "read_json", "write_json"]
+__all__ = ["atomic_write_bytes", "atomic_write_stream", "read_json", "write_json"]

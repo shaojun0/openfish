@@ -22,6 +22,10 @@ curl -O http://<server>/docker/files/nginx-1.25.3.tar
 docker load -i nginx-1.25.3.tar
 ```
 
+持有 `docker:upload` 的管理员也可以在“Docker 目录”页面上传镜像 tar、
+compose 文件（`.yml`/`.yaml`）或 Dockerfile 片段（`POST /api/v1/docker`），
+无需登录服务器复制文件。
+
 ## 相关页面
 
 | 页面 | 路径 | 说明 |

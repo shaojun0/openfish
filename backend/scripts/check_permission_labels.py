@@ -88,6 +88,8 @@ EXPECTED: dict[tuple[str, str], str] = {
     ("hub", "tools_index"): "TOOL_READ",
     ("hub", "download_tool"): "TOOL_DOWNLOAD",
     ("hub", "tools_catalog"): "TOOL_READ",
+    # Publishing into the tools catalog is administrative, unlike reading it.
+    ("hub", "upload_tool"): "TOOL_UPLOAD",
     # ── model routing ────────────────────────────────────────────────────
     ("hub", "model_routes_index"): "MODEL_READ",
     # The resolved view is the *machine* half of the routing table: it carries
@@ -108,6 +110,7 @@ EXPECTED: dict[tuple[str, str], str] = {
     ("npm", "npm_packument"): "NPM_READ",
     ("npm", "npm_version"): "NPM_READ",
     ("npm", "npm_tarball"): "NPM_DOWNLOAD",
+    ("npm", "npm_publish"): "NPM_PUBLISH",
     ("npm", "download_npm_file"): "NPM_DOWNLOAD",
     ("npm", "npm_catalog"): "NPM_READ",
     # ── docker: manifests/catalog are read, blobs are download ───────────
@@ -119,6 +122,8 @@ EXPECTED: dict[tuple[str, str], str] = {
     ("docker", "docker_blob"): "DOCKER_DOWNLOAD",
     ("docker", "download_docker_file"): "DOCKER_DOWNLOAD",
     ("docker", "docker_catalog_api"): "DOCKER_READ",
+    # Publishing an offline artifact is administrative; pulling is not.
+    ("docker", "upload_docker_artifact"): "DOCKER_UPLOAD",
     # ── debian: dists/ metadata is read, pool/ packages are download ─────
     ("debian", "debian_index"): "DEBIAN_READ",
     ("debian", "debian_packages"): "DEBIAN_READ",

@@ -79,7 +79,7 @@ AUTHENTICATED_SEEDED: frozenset[str] = frozenset({
     P.BUILD_READ, P.BUILD_DOWNLOAD, P.BUILD_SHA256,
     P.NODE_BUILD_READ, P.NODE_BUILD_DOWNLOAD, P.NODE_BUILD_SHA256,
     P.TOOL_READ, P.TOOL_DOWNLOAD,
-    P.NPM_READ, P.NPM_DOWNLOAD,
+    P.NPM_READ, P.NPM_DOWNLOAD, P.NPM_PUBLISH,
     P.DOCKER_READ, P.DOCKER_DOWNLOAD,
     P.DEBIAN_READ, P.DEBIAN_DOWNLOAD,
     P.MODEL_READ,
@@ -92,6 +92,8 @@ AUTHENTICATED_SEEDED: frozenset[str] = frozenset({
 ADMIN_ONLY: frozenset[str] = frozenset({
     P.MODEL_WRITE,          # edits the shared routing table
     P.DOC_UPLOAD,           # edits the shared handbook
+    P.TOOL_UPLOAD,          # publishes into the shared tools catalog
+    P.DOCKER_UPLOAD,        # publishes into the shared docker catalog
     P.ADMIN_VIEW,
     P.ADMIN_REFRESH,
     P.ADMIN_ROLES,

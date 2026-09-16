@@ -58,6 +58,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import unquote, urlparse
 
 from services import hub
+from services.fileio import read_json
 from services.format import iso_from_timestamp, utc_now_iso
 from services.upstream import DiskCache, Upstream, UpstreamError
 
@@ -65,6 +66,16 @@ logger = logging.getLogger("cpypiserver.npm")
 
 #: How long a packument fetched from the upstream registry is trusted.
 PACKUMENT_TTL = 300.0
+
+#: Server-owned metadata for versions accepted by ``npm publish`` — dist-tags,
+#: publish times, description — written by :mod:`services.npm_publish`.
+#:
+#: The tarballs in the directory remain the authority on *what versions exist*
+#: (and are discoverable without this file); this one only records what cannot
+#: be derived from a filename, above all a dist-tag that is not ``latest``.
+#: ``npm publish --tag next`` therefore keeps resolving across a restart, and a
+#: missing or malformed copy degrades to ``latest = highest version on disk``.
+PUBLISH_INDEX_FILENAME = "publish.json"
 
 #: ``Accept`` value npm sends for the install (abbreviated) document.
 ABBREVIATED_ACCEPT = "application/vnd.npm.install-v1+json"
@@ -145,6 +156,17 @@ def _parse_filename(filename: str) -> tuple[str, str]:
     if not name:  # no dash — treat the whole stem as the name
         return stem, ""
     return name, version
+
+
+def _load_publish_index(root: Path) -> dict[str, Any]:
+    """``name -> metadata`` recorded by ``npm publish``; ``{}`` when absent.
+
+    A malformed file is an operator error, not a broken registry: it degrades to
+    the metadata that can be derived from the tarballs alone.
+    """
+    data = read_json(root / PUBLISH_INDEX_FILENAME, default={})
+    packages = data.get("packages") if isinstance(data, dict) else None
+    return packages if isinstance(packages, dict) else {}
 
 
 def _modified_of(doc: Mapping[str, Any]) -> str:
@@ -485,13 +507,13 @@ class NpmRegistry:
                             continue
             except OSError:
                 continue
-        overlay = self.root / hub._OVERLAY_FILENAME
-        try:
-            stat = overlay.stat()
-        except OSError:
-            pass
-        else:
-            items.append((str(overlay), stat.st_mtime, stat.st_size))
+        for bookmark in (hub._OVERLAY_FILENAME, PUBLISH_INDEX_FILENAME):
+            path = self.root / bookmark
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            items.append((str(path), stat.st_mtime, stat.st_size))
         return tuple(sorted(items))
 
     def local_index(self) -> dict[str, dict[str, Any]]:
@@ -583,6 +605,26 @@ class NpmRegistry:
             versions = list(record["versions"])
             record["latest"] = max(versions, key=_version_key) if versions else LATEST_TAG
 
+        # Overlay what `npm publish` recorded.  Only the fields a filename
+        # cannot express are taken: the dist-tags (a `--tag next` publish must
+        # keep resolving), the publish times, and a description for search.
+        for name, meta in _load_publish_index(self.root).items():
+            record = index.get(name)
+            if not isinstance(meta, dict) or record is None:
+                continue
+            tags = {
+                str(tag): str(version)
+                for tag, version in (meta.get("dist-tags") or {}).items()
+                if isinstance(tag, str) and isinstance(version, str)
+            }
+            if tags:
+                record["dist_tags"] = tags
+            if meta.get("description") and not record.get("description"):
+                record["description"] = meta["description"]
+            for version, stamp in (meta.get("time") or {}).items():
+                if version in record["versions"] and isinstance(stamp, (int, float)):
+                    record["times"].setdefault(version, float(stamp))
+
         self._index = index
         self._index_key = signature
         return index
@@ -631,9 +673,19 @@ class NpmRegistry:
             for version in record["versions"]
         }
         modified = record.get("modified") or time.time()
+        # A tag recorded by `npm publish` wins for its own version — that is the
+        # whole point of `npm publish --tag next`; `latest` falls back to the
+        # highest version on disk when nobody ever tagged the package.
+        dist_tags: dict[str, str] = {
+            str(tag): str(version)
+            for tag, version in (record.get("dist_tags") or {}).items()
+            if version in versions
+        }
+        if LATEST_TAG not in dist_tags:
+            dist_tags[LATEST_TAG] = record.get("latest") or LATEST_TAG
         document: dict[str, Any] = {
             "name": name,
-            "dist-tags": {LATEST_TAG: record.get("latest") or LATEST_TAG},
+            "dist-tags": dist_tags,
             "versions": versions,
             "modified": iso_from_timestamp(modified),
             "time": {version: iso_from_timestamp(ts) for version, ts in (record.get("times") or {}).items()},
@@ -887,6 +939,7 @@ __all__ = [
     "FULL_ACCEPT",
     "LATEST_TAG",
     "PACKUMENT_TTL",
+    "PUBLISH_INDEX_FILENAME",
     "SEARCH_DEFAULT_SIZE",
     "SEARCH_MAX_SIZE",
     "NpmRegistry",
