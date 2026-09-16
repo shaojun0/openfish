@@ -96,24 +96,6 @@ body {
   gap: 8px;
 }
 
-.setup {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.setup__item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.setup__label {
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
-  min-width: 110px;
-}
-
 .code-block {
   position: relative;
   margin: 0;

@@ -6,7 +6,6 @@ import { useI18n } from 'vue-i18n'
 import { fetchNpmCatalog, type NpmCatalog, type NpmPackage } from '@/api'
 import { apiError } from '@/api/client'
 import BuildCatalogView from '@/components/BuildCatalogView.vue'
-import CodeBlock from '@/components/CodeBlock.vue'
 import TablePager from '@/components/TablePager.vue'
 import { usePagination } from '@/composables/usePagination'
 import { formatDate } from '@/utils/format'
@@ -31,13 +30,6 @@ const heading = computed(() =>
     ? { title: t('npm.title'), description: t('npm.description') }
     : { title: t('build.nodeTitle'), description: t('build.nodeDescription') },
 )
-
-/** The URL clients would point at once the registry proxy lands. */
-const registryUrl = computed(() => `${window.location.origin}/npm/`)
-
-const registrySnippet = computed(() => `npm config set registry ${registryUrl.value}`)
-
-const npmrcSnippet = computed(() => `registry=${registryUrl.value}`)
 
 async function load(): Promise<void> {
   loading.value = true
@@ -101,33 +93,7 @@ onMounted(() => {
     <BuildCatalogView v-if="infoType === 'build'" kind="node" />
 
     <template v-else>
-      <el-alert
-        type="info"
-        show-icon
-        :closable="false"
-        :title="t('npm.proxyTitle')"
-        :description="t('npm.proxyDesc')"
-      />
-
-    <el-card shadow="never">
-      <template #header>
-        <span class="card-title">{{ t('npm.setupTitle') }}</span>
-      </template>
-      <div class="setup">
-        <div class="setup__item">
-          <div class="setup__label">{{ t('npm.registryLabel') }}</div>
-          <el-tag class="mono" type="primary" effect="plain">{{ registryUrl }}</el-tag>
-        </div>
-        <div v-if="catalog?.upstream" class="setup__item">
-          <div class="setup__label">{{ t('npm.upstreamLabel') }}</div>
-          <el-tag class="mono" type="info" effect="plain">{{ catalog.upstream }}</el-tag>
-        </div>
-        <CodeBlock :label="t('npm.setupCli')" :code="registrySnippet" />
-        <CodeBlock :label="t('npm.setupNpmrc')" :code="npmrcSnippet" />
-      </div>
-    </el-card>
-
-    <el-card shadow="never">
+      <el-card shadow="never">
       <template #header>
         <span class="card-title">{{ t('npm.listTitle') }}</span>
       </template>

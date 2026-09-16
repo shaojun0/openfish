@@ -602,6 +602,179 @@ export async function fetchDebianCatalog(): Promise<DebianCatalog> {
   return data
 }
 
+// ── Debian offline relay ─────────────────────────────────────────────
+//
+// The relay lives in the protocol namespace at `/debian/offline/*`, not under
+// `/api/v1`, because it is a machine surface the CLI and `curl` drive as well
+// as the console.  Every call below therefore overrides axios' `baseURL` with
+// `''` so the request goes to the protocol path.  A plan or bundle build can
+// legitimately take minutes (it may walk a whole apt archive), so those calls
+// disable the default 30 s timeout.
+
+export interface DebianOfflineBundleInfo {
+  filename: string
+  size: number
+  size_human: string
+  modified: string
+}
+
+export interface DebianOfflineStatus {
+  configured: boolean
+  upstream: string
+  root: string
+  offline_dir: string
+  suites: string[]
+  components: string[]
+  arches: string[]
+  recommends: boolean
+  max_mb: number
+  bundle_count: number
+  bundles: DebianOfflineBundleInfo[]
+}
+
+/** A downloaded text artifact plus its server-declared digest. */
+export interface DebianTextArtifact {
+  blob: Blob
+  filename: string
+  sha256: string
+}
+
+export interface DebianPlanOptions {
+  /** Space/comma list of package names to target directly; '' means full sync. */
+  only?: string
+  allowDowngrade?: boolean
+  verifyHashes?: boolean
+  /** null/undefined = server default; false forces Recommends out. */
+  recommends?: boolean | null
+}
+
+export interface DebianOfflineBundle {
+  filename: string
+  download_url: string
+  sha256: string
+  size: number
+  size_human: string
+  packages: number
+  skipped: number
+  total_bytes: number
+  total_size_human: string
+  plan_sha256: string
+  skipped_packages: Array<Record<string, string>>
+}
+
+export interface DebianOfflineImport {
+  imported: number
+  skipped: number
+  failed: number
+  total_bytes: number
+  total_size_human: string
+  manifest_sha256: string
+  generated: string
+  imported_packages: Array<Record<string, string>>
+  failed_packages: Array<Record<string, string>>
+}
+
+function contentDispositionName(header: unknown, fallback: string): string {
+  const value = typeof header === 'string' ? header : ''
+  const match = /filename="?([^";]+)"?/.exec(value)
+  return match?.[1] || fallback
+}
+
+function headerText(header: unknown): string {
+  return typeof header === 'string' ? header : ''
+}
+
+export async function fetchDebianOfflineStatus(): Promise<DebianOfflineStatus> {
+  const { data } = await http.get<DebianOfflineStatus>('/debian/offline', { baseURL: '' })
+  return data
+}
+
+export async function exportDebianSnapshot(params: {
+  suites?: string
+  components?: string
+  arches?: string
+  fresh?: boolean
+} = {}): Promise<DebianTextArtifact> {
+  const response = await http.get('/debian/offline/snapshot', {
+    baseURL: '',
+    responseType: 'blob',
+    timeout: 0,
+    params: {
+      ...(params.suites ? { suites: params.suites } : {}),
+      ...(params.components ? { components: params.components } : {}),
+      ...(params.arches ? { arches: params.arches } : {}),
+      ...(params.fresh ? { fresh: '1' } : {}),
+    },
+  })
+  return {
+    blob: response.data as Blob,
+    filename: contentDispositionName(
+      response.headers['content-disposition'],
+      'openfish-debian-snapshot.txt',
+    ),
+    sha256: headerText(response.headers['x-openfish-sha256']),
+  }
+}
+
+export async function computeDebianPlan(
+  snapshot: File,
+  options: DebianPlanOptions = {},
+): Promise<DebianTextArtifact> {
+  const form = new FormData()
+  form.append('snapshot', snapshot)
+  if (options.only) form.append('only', options.only)
+  if (options.allowDowngrade) form.append('allow_downgrade', '1')
+  if (options.verifyHashes) form.append('verify_hashes', '1')
+  if (options.recommends !== null && options.recommends !== undefined) {
+    form.append('recommends', options.recommends ? '1' : '0')
+  }
+  const response = await http.post('/debian/offline/plan', form, {
+    baseURL: '',
+    responseType: 'blob',
+    timeout: 0,
+  })
+  return {
+    blob: response.data as Blob,
+    filename: contentDispositionName(
+      response.headers['content-disposition'],
+      'openfish-debian-plan.txt',
+    ),
+    sha256: headerText(response.headers['x-openfish-sha256']),
+  }
+}
+
+export async function buildDebianBundle(plan: File): Promise<DebianOfflineBundle> {
+  const form = new FormData()
+  form.append('plan', plan)
+  const { data } = await http.post<DebianOfflineBundle>('/debian/offline/bundle', form, {
+    baseURL: '',
+    timeout: 0,
+  })
+  return data
+}
+
+export async function importDebianBundle(bundle: File): Promise<DebianOfflineImport> {
+  const form = new FormData()
+  form.append('bundle', bundle)
+  const { data } = await http.post<DebianOfflineImport>('/debian/offline/import', form, {
+    baseURL: '',
+    timeout: 0,
+  })
+  return data
+}
+
+/** Trigger a browser download for a Blob produced by the relay. */
+export function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
 // ── Per-ecosystem documentation ──────────────────────────────────────
 
 export async function fetchDocsOverview(): Promise<DocsOverview> {

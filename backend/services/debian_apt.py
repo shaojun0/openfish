@@ -163,17 +163,15 @@ def safe_mirror_path(path: str) -> str:
     return "/".join(segments)
 
 
-def _local_mirror_file(kind: str, safe: str) -> Response | None:
-    """Serve ``<DEBIAN_DIR>/<kind>/<safe>`` from the local mirror tree.
+def local_mirror_file(kind: str, safe: str) -> Path | None:
+    """Return ``<DEBIAN_DIR>/<kind>/<safe>`` when it is a local regular file.
 
-    ``kind`` is ``"dists"`` or ``"pool"``.  Returns ``None`` when the local tree
-    has no such regular file, so the caller can fall back to the upstream
-    mirror.  ``send_from_directory(..., conditional=True)`` supplies the
-    ``Range`` / ``HEAD`` / ``Content-Length`` / ``Last-Modified`` handling.
-
-    ``safe`` is already normalised by :func:`safe_mirror_path`; the resolved
-    path is checked against the resolved root once more so a symlink inside the
-    tree cannot point outside it.
+    ``kind`` is ``"dists"`` or ``"pool"``; ``safe`` must already be normalised by
+    :func:`safe_mirror_path`.  Returns ``None`` when the local tree has no such
+    file, so a caller can fall back to the upstream mirror — which is exactly
+    what the offline relay needs when it walks a synced ``dists/`` tree before
+    reaching for the network.  The resolved path is checked against the resolved
+    root so a symlink inside the tree cannot point outside it.
     """
     root = Path(settings.hub.debian_dir) / kind
     try:
@@ -181,10 +179,22 @@ def _local_mirror_file(kind: str, safe: str) -> Response | None:
         resolved.relative_to(root.resolve())
     except (OSError, RuntimeError, ValueError) as exc:
         raise PathError(f"refusing local mirror path outside {kind}/: {safe!r}") from exc
-    if not resolved.is_file():
+    return resolved if resolved.is_file() else None
+
+
+def _local_mirror_file(kind: str, safe: str) -> Response | None:
+    """Serve ``<DEBIAN_DIR>/<kind>/<safe>`` from the local mirror tree.
+
+    Returns ``None`` when the local tree has no such regular file, so the caller
+    can fall back to the upstream mirror.  ``send_from_directory(...,
+    conditional=True)`` supplies the ``Range`` / ``HEAD`` / ``Content-Length`` /
+    ``Last-Modified`` handling.
+    """
+    resolved = local_mirror_file(kind, safe)
+    if resolved is None:
         return None
     logger.debug("apt local mirror hit for %s/%s", kind, safe)
-    return send_from_directory(root, safe, conditional=True)
+    return send_from_directory(Path(settings.hub.debian_dir) / kind, safe, conditional=True)
 
 
 # ── Cache envelope ───────────────────────────────────────────────────
@@ -435,6 +445,7 @@ __all__ = [
     "configured",
     "dists_response",
     "effective_upstream",
+    "local_mirror_file",
     "pool_response",
     "safe_mirror_path",
     "upstream",

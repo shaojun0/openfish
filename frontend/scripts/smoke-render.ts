@@ -101,11 +101,11 @@ const { useSessionStore } = await import('../src/stores/session')
 
 /** Marker substrings that must appear in the rendered markup for each route. */
 const EXPECTED = {
-  '/': ['stat-grid', 'shortcut__title', 'code-block'],
+  '/': ['stat-grid', 'shortcut__title'],
   '/packages': ['page__title', 'toolbar__search'],
-  '/npm': ['page__title', 'card-title', 'setup'],
-  '/docker': ['page__title', 'card-title', 'setup'],
-  '/debian': ['page__title', 'card-title', 'setup'],
+  '/npm': ['page__title', 'card-title'],
+  '/docker': ['page__title', 'card-title'],
+  '/debian': ['page__title', 'card-title'],
   '/tools': ['page__title', 'toolbar__search'],
   '/models': ['page__title', 'stat-row'],
   '/documentation/npm': ['page__title', 'docs-view'],
@@ -207,7 +207,9 @@ for (const kind of ['python', 'node'] as const) {
     if (name !== 'default') subApp.component(name, component)
   }
   const html = await renderToString(subApp)
-  const missing = [`${kind}-builds`, 'setup'].filter((m) => !html.includes(m))
+  // The setup card is gone (the docs page owns the how-to), so assert on the
+  // list card both mirrors still render.
+  const missing = ['card-title'].filter((m) => !html.includes(m))
   results.push({
     path: `build:${kind}`,
     route: kind,

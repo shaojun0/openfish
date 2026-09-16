@@ -63,6 +63,13 @@ DOCKER_UPLOAD = "docker:upload"
 # Artifact hub — debian package catalog
 DEBIAN_READ = "debian:read"
 DEBIAN_DOWNLOAD = "debian:download"
+# The offline relay: export a snapshot of everything the internet side can
+# offer, diff it against this host's local repository, and build a bundle of the
+# resulting package set.  The producing half of the air-gap protocol.
+DEBIAN_OFFLINE = "debian:offline"
+# Importing a bundle writes .deb files into the shared repository, so it is
+# administrative (the consuming half).
+DEBIAN_UPLOAD = "debian:upload"
 
 # Artifact hub — model routing table for downstream DSH
 MODEL_READ = "model:read"
@@ -127,6 +134,14 @@ BUILTIN: dict[str, tuple[str, str]] = {
     ),
     DEBIAN_READ: ("浏览 Debian 目录", "查看本地 .deb 包与 apt 配置清单"),
     DEBIAN_DOWNLOAD: ("下载 Debian 包", "下载本地 .deb 与 apt 配置片段"),
+    DEBIAN_OFFLINE: (
+        "Debian 离线更新",
+        "导出软件包快照、计算内网待更新清单、构建离线更新压缩包",
+    ),
+    DEBIAN_UPLOAD: (
+        "导入 Debian 离线包",
+        "把离线更新包内的 .deb 校验后写入本地仓库（仅管理员）",
+    ),
     MODEL_READ: ("浏览模型路由", "查看供内网 DSH 使用的模型路由表"),
     MODEL_WRITE: ("管理模型路由", "新增、修改、删除模型路由并检测其连通性"),
     MODEL_RESOLVE: (
@@ -242,6 +257,7 @@ __all__ = [
     "MODEL_RESOLVE",
     "DOCKER_READ", "DOCKER_DOWNLOAD", "DOCKER_UPLOAD",
     "DEBIAN_READ", "DEBIAN_DOWNLOAD",
+    "DEBIAN_OFFLINE", "DEBIAN_UPLOAD",
     "DOC_READ", "DOC_UPLOAD",
     "APP_READ",
     "KEY_LIST", "KEY_CREATE", "KEY_DELETE", "KEY_STATS",

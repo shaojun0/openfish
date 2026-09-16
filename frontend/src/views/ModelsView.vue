@@ -462,14 +462,6 @@ onMounted(() => load())
       </div>
     </div>
 
-    <el-alert
-      type="info"
-      show-icon
-      :closable="false"
-      :title="t('models.scaffoldTitle')"
-      :description="t('models.scaffoldDesc')"
-    />
-
     <div class="stat-row">
       <el-tag type="success" effect="plain">
         {{ t('models.enabled', { count: enabledCount }) }}

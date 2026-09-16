@@ -131,6 +131,17 @@ EXPECTED: dict[tuple[str, str], str] = {
     ("debian", "debian_dists"): "DEBIAN_READ",
     ("debian", "debian_pool"): "DEBIAN_DOWNLOAD",
     ("debian", "debian_catalog_api"): "DEBIAN_READ",
+    # ── debian offline relay ─────────────────────────────────────────────
+    # Producing/consuming the relay artifacts is one capability
+    # (`debian:offline`); only writing the bundle *into* the repository is
+    # administrative (`debian:upload`).  Fetching a built bundle is package
+    # bytes, so it uses `debian:download`.
+    ("debian", "debian_offline_status"): "DEBIAN_OFFLINE",
+    ("debian", "debian_offline_snapshot"): "DEBIAN_OFFLINE",
+    ("debian", "debian_offline_plan"): "DEBIAN_OFFLINE",
+    ("debian", "debian_offline_bundle"): "DEBIAN_OFFLINE",
+    ("debian", "debian_offline_download_bundle"): "DEBIAN_DOWNLOAD",
+    ("debian", "debian_offline_import"): "DEBIAN_UPLOAD",
     # ── per-ecosystem Markdown docs ──────────────────────────────────────
     ("docs", "docs_overview"): "DOC_READ",
     ("docs", "docs_catalog"): "DOC_READ",

@@ -27,5 +27,6 @@ echo "deb http://<server>/debian bookworm main" \
 
 | 页面 | 路径 | 说明 |
 | ---- | ---- | ---- |
-| Debian 目录 | `/debian` | 本地 `.deb` 与 apt 配置片段 |
+| Debian 目录 | `/debian` | 本地 `.deb`、apt 配置片段与离线更新中继 |
 | Debian 静态索引 | `/debian/` | 扁平 `Packages` 与镜像代理入口 |
+| 离线更新中继 | Debian 页面「离线更新中继」 | 互联网 ↔ 内网之间的快照 / 清单 / 离线包流程 |

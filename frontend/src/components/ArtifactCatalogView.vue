@@ -18,7 +18,6 @@ import {
   type FlatArtifact,
 } from '@/api'
 import { apiError } from '@/api/client'
-import CodeBlock from '@/components/CodeBlock.vue'
 import TablePager from '@/components/TablePager.vue'
 import { usePagination } from '@/composables/usePagination'
 import { useSessionStore } from '@/stores/session'
@@ -45,37 +44,9 @@ const uploadFile = ref<File | null>(null)
 const uploadInput = ref<HTMLInputElement | null>(null)
 const artifacts = computed<FlatArtifact[]>(() => catalog.value?.artifacts ?? [])
 const { page, pageSize, pageSizes, total, rows } = usePagination(artifacts)
-const upstream = computed(() =>
-  isDocker.value
-    ? ((catalog.value as DockerCatalog | null)?.registry ?? '')
-    : ((catalog.value as DebianCatalog | null)?.mirror ?? ''),
-)
 
 /** The server-rendered index page — uncacheable and script-friendly. */
 const indexUrl = computed(() => `/${props.endpoint}/`)
-const baseUrl = computed(() => `${window.location.origin}${indexUrl.value}`)
-
-const usage = computed(() =>
-  isDocker.value
-    ? [
-        '# 导入离线镜像',
-        'docker load -i <镜像文件>.tar',
-        '',
-        '# 仓库清单（Registry v2 形状）',
-        `curl ${baseUrl.value}v2/_catalog`,
-      ].join('\n')
-    : [
-        '# 安装单个包',
-        'sudo apt install ./<包名>.deb',
-        '',
-        '# 或作为扁平源： /etc/apt/sources.list.d/openfish.list',
-        `deb [trusted=yes] ${baseUrl.value} ./`,
-      ].join('\n'),
-)
-
-const indexEndpoint = computed(() =>
-  isDocker.value ? `${baseUrl.value}v2/_catalog` : `${baseUrl.value}Packages`,
-)
 
 async function load(): Promise<void> {
   loading.value = true
@@ -159,31 +130,6 @@ onMounted(load)
         </el-button>
       </div>
     </div>
-
-    <el-alert
-      type="info"
-      show-icon
-      :closable="false"
-      :title="t(`${endpoint}.proxyTitle`)"
-      :description="t(`${endpoint}.proxyDesc`)"
-    />
-
-    <el-card shadow="never">
-      <template #header>
-        <span class="card-title">{{ t(`${endpoint}.setupTitle`) }}</span>
-      </template>
-      <div class="setup">
-        <div v-if="upstream" class="setup__item">
-          <div class="setup__label">{{ t(`${endpoint}.upstreamLabel`) }}</div>
-          <el-tag class="mono" type="info" effect="plain">{{ upstream }}</el-tag>
-        </div>
-        <div class="setup__item">
-          <div class="setup__label">{{ t(`${endpoint}.indexLabel`) }}</div>
-          <el-tag class="mono" type="primary" effect="plain">{{ indexEndpoint }}</el-tag>
-        </div>
-        <CodeBlock :label="t(`${endpoint}.usageLabel`)" :code="usage" />
-      </div>
-    </el-card>
 
     <el-card shadow="never">
       <template #header>

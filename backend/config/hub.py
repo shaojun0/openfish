@@ -225,6 +225,55 @@ class HubConfig(BaseSettings):
             "schedule, so a few minutes of staleness is normal."
         ),
     )
+    debian_suites: str = Field(
+        default="bookworm bookworm-updates bookworm-security",
+        description=(
+            "Space- or comma-separated apt suites the offline snapshot enumerates. "
+            "This is the `dists/<suite>/<component>/binary-<arch>/Packages` set the "
+            "internet deployment walks to describe every package it can offer an "
+            "air-gapped intranet. A suite/component/arch combination the mirror "
+            "does not carry is skipped with a note, not an error."
+        ),
+    )
+    debian_components: str = Field(
+        default="main",
+        description="Space- or comma-separated apt components the offline snapshot enumerates.",
+    )
+    debian_arches: str = Field(
+        default="amd64",
+        description=(
+            "Space- or comma-separated dpkg architectures the offline snapshot "
+            "enumerates. `Architecture: all` packages are recorded once and match "
+            "every architecture."
+        ),
+    )
+    debian_offline_dir: str = Field(
+        default=backend_path("data", "offline", "debian"),
+        description=(
+            "Where the offline relay keeps the bundles it builds. A `bundle` build "
+            "streams the requested .deb files into this directory and returns a "
+            "download URL; import never reads from here. Must be writable by the "
+            "server process."
+        ),
+    )
+    debian_offline_max_mb: int = Field(
+        default=4096,
+        ge=0,
+        description=(
+            "Ceiling, in MiB, on one offline bundle (and on the package universe a "
+            "single build will download). A plan that would exceed it is refused "
+            "before anything is fetched. 0 disables the ceiling."
+        ),
+    )
+    debian_offline_recommends: bool = Field(
+        default=False,
+        description=(
+            "Include `Recommends` in the dependency closure of an offline update "
+            "plan. Off by default: a mirror's job is to satisfy `Depends`/"
+            "`Pre-Depends`, and following recommends turns a small update into a "
+            "large fraction of the archive."
+        ),
+    )
     models_file: str = Field(
         default=backend_path("config", "model_routes.json"),
         description=(

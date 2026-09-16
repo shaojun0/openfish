@@ -17,7 +17,6 @@ import { useI18n } from 'vue-i18n'
 
 import { fetchBuildCatalog, type BuildCatalog, type BuildFile } from '@/api'
 import { apiError } from '@/api/client'
-import CodeBlock from '@/components/CodeBlock.vue'
 import TablePager from '@/components/TablePager.vue'
 import { usePagination } from '@/composables/usePagination'
 
@@ -56,33 +55,6 @@ const { page, pageSize, pageSizes, total, rows, reset } = usePagination(filtered
 // A new search or release is a new result set: start it from the first page.
 watch([query, release], reset)
 
-/** Where a client points its mirror environment variable. */
-const mirrorUrl = computed(() => {
-  const url = catalog.value?.mirror_url
-  if (!url) return `${window.location.origin}/${props.kind}-builds/`
-  // uv expects the trailing slash; nvm concatenates `/index.tab` itself.
-  return props.kind === 'python' ? url : url.replace(/\/+$/, '')
-})
-
-const usage = computed(() => {
-  if (props.kind === 'python') {
-    return [
-      `# ${t('build.usageCommentPython')}`,
-      `export UV_PYTHON_INSTALL_MIRROR=${mirrorUrl.value}`,
-      'uv python install 3.12',
-    ].join('\n')
-  }
-  return [
-    `# ${t('build.usageCommentNode')}`,
-    `export NVM_NODEJS_ORG_MIRROR=${mirrorUrl.value}`,
-    'nvm install 20',
-    '',
-    `# ${t('build.usageCommentFnm')}`,
-    `export FNM_NODE_DIST_MIRROR=${mirrorUrl.value}`,
-    'fnm install 20',
-  ].join('\n')
-})
-
 const configEnv = computed(() =>
   props.kind === 'python' ? 'PYTHON_BUILDS_DIR' : 'NODE_BUILDS_DIR',
 )
@@ -92,9 +64,6 @@ const configEnv = computed(() =>
 const variantLabelKey = computed(() =>
   props.kind === 'python' ? 'build.variant' : 'build.format',
 )
-
-const alertTitleKey = computed(() => `build.${props.kind}ProxyTitle`)
-const alertDescKey = computed(() => `build.${props.kind}ProxyDesc`)
 
 async function load(): Promise<void> {
   loading.value = true
@@ -118,36 +87,6 @@ watch(() => props.kind, load)
 
 <template>
   <div class="build">
-    <el-alert
-      v-if="catalog"
-      type="info"
-      show-icon
-      :closable="false"
-      :title="t(alertTitleKey)"
-      :description="t(alertDescKey)"
-    />
-
-    <el-card shadow="never">
-      <template #header>
-        <span class="card-title">{{ t('build.setupTitle') }}</span>
-      </template>
-      <div class="setup">
-        <div class="setup__item">
-          <div class="setup__label">{{ t('build.mirrorLabel') }}</div>
-          <el-tag class="mono" type="primary" effect="plain">{{ mirrorUrl }}</el-tag>
-        </div>
-        <div v-if="catalog?.index_url" class="setup__item">
-          <div class="setup__label">{{ t('build.indexLabel') }}</div>
-          <el-tag class="mono" type="info" effect="plain">{{ catalog.index_url }}</el-tag>
-        </div>
-        <div class="setup__item">
-          <div class="setup__label">{{ t('build.envLabel') }}</div>
-          <el-tag class="mono" type="info" effect="plain">{{ catalog?.env_var || '—' }}</el-tag>
-        </div>
-        <CodeBlock :label="t('build.usageLabel')" :code="usage" />
-      </div>
-    </el-card>
-
     <el-card shadow="never">
       <template #header>
         <div class="card-header">

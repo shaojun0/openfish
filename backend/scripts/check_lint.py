@@ -36,7 +36,7 @@ sys.path.insert(0, str(REPO_ROOT))
 #: Directories that hold the application.  ``scripts/`` is included so a gate
 #: cannot rot either.
 TARGETS = (
-    "app.py", "cli.py", "errors.py", "schemas.py",
+    "app.py", "cli.py", "debian_offline_cli.py", "errors.py", "schemas.py",
     "auth", "config", "extensions", "index", "models",
     "openapi", "routes", "services", "scripts",
 )

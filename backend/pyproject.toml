@@ -34,13 +34,15 @@ dev = ["openapi-spec-validator>=0.7", "pyflakes>=3.2"]
 cpypiserver = "app:main"
 # Administrative CLI — roles, grants, and the superuser bootstrap.
 cpypiserver-admin = "cli:main"
+# Debian offline relay client — the four air-gap steps against a running server.
+cpypiserver-debian-offline = "debian_offline_cli:main"
 
 # Top-level single-file modules.  `packages.find` only discovers *packages*
 # (directories), so without this a non-editable `pip install .` would place the
-# packages but not these modules — and both `[project.scripts]` entries above
+# packages but not these modules — and the `[project.scripts]` entries above
 # would then point at importable-nothing.
 [tool.setuptools]
-py-modules = ["app", "cli", "errors", "schemas"]
+py-modules = ["app", "cli", "debian_offline_cli", "errors", "schemas"]
 
 [tool.setuptools.packages.find]
 include = [

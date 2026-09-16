@@ -19,7 +19,10 @@ and drives the whole model end to end:
 * the two escalation guards hold — a non-superuser cannot set the superuser
   flag, and the last superuser cannot be demoted;
 * built-in roles cannot be deleted, and a mistyped permission code shows up as
-  an orphan rather than silently denying everybody.
+  an orphan rather than silently denying everybody;
+* an upgraded deployment is repaired automatically: rolling `doc:read` out of
+  both `authenticated` and `anonymous` and re-running the boot grants it back to
+  both, so the docs stay readable by ordinary users and below.
 """
 
 from __future__ import annotations
@@ -44,9 +47,15 @@ os.environ["OAUTH2_AUTHORIZE_URL"] = ""
 os.environ["ADMIN_USERS"] = '["root"]'
 
 from app import app  # noqa: E402
-from auth.permissions import PACKAGE_READ, PACKAGE_WRITE  # noqa: E402
-from models.rbac import Permission  # noqa: E402
-from services.authz import bootstrap  # noqa: E402
+from auth.permissions import (  # noqa: E402
+    ANONYMOUS_ROLE,
+    AUTHENTICATED_ROLE,
+    DOC_READ,
+    PACKAGE_READ,
+    PACKAGE_WRITE,
+)
+from models.rbac import Permission, Role, RolePermission, SeedMigration  # noqa: E402
+from services.authz import _SEED_TOPUPS, bootstrap  # noqa: E402
 
 ROOT_AUTH = ("root", "rbac-gate-secret")
 
@@ -69,6 +78,52 @@ def _remove_ghost_permission(authz) -> None:
     session = authz._s
     try:
         session.query(Permission).filter(Permission.code == "legacy:ghost").delete()
+        session.commit()
+    finally:
+        session.close()
+
+
+def _role_codes(authz, role_code: str) -> set[str]:
+    """Permission codes a built-in role actually holds."""
+    session = authz._s
+    try:
+        role = session.query(Role).filter(Role.code == role_code).first()
+        if role is None:
+            return set()
+        return {
+            code for (code,) in
+            session.query(Permission.code)
+            .join(RolePermission, RolePermission.permission_id == Permission.id)
+            .filter(RolePermission.role_id == role.id)
+            .all()
+        }
+    finally:
+        session.close()
+
+
+def _roll_back_doc_read(authz) -> None:
+    """Put the two roles back into their pre-docs state.
+
+    ``doc:read`` entered the seeds after these roles already existed on a real
+    deployment, and the seed only applies at role *creation* — so an upgraded
+    database is exactly this: `authenticated` and `anonymous` without
+    ``doc:read`` and with the granting migrations not yet recorded.
+    """
+    session = authz._s
+    try:
+        doc = session.query(Permission).filter(Permission.code == DOC_READ).first()
+        for role_code in (AUTHENTICATED_ROLE, ANONYMOUS_ROLE):
+            role = session.query(Role).filter(Role.code == role_code).first()
+            if role is None or doc is None:
+                continue
+            session.query(RolePermission).filter(
+                RolePermission.role_id == role.id,
+                RolePermission.permission_id == doc.id,
+            ).delete()
+        ids = [mid for mid, _role, codes in _SEED_TOPUPS if DOC_READ in codes]
+        session.query(SeedMigration).filter(
+            SeedMigration.code.in_(ids)
+        ).delete(synchronize_session=False)
         session.commit()
     finally:
         session.close()
@@ -232,6 +287,30 @@ def main() -> int:
         _remove_ghost_permission(authz)
     check(authz.stale_permissions() == [],
           "removing the row clears the report (the detector is not sticky)")
+
+    # ── 6. Seed migration repairs an upgraded deployment ─────────────
+    # Seeding applies only when a role row is created, so `doc:read` (added to
+    # the `authenticated` seed and, at the same time, made `anonymous`'s only
+    # point) never reached a deployment whose roles already existed — the docs
+    # were unreadable by ordinary users *and* by anonymous callers.  Simulate
+    # exactly that database and prove one boot restores both.
+    print()
+    print("── Seed migration: docs readable by ordinary users and below ──")
+    _roll_back_doc_read(authz)
+    check(
+        DOC_READ not in _role_codes(authz, AUTHENTICATED_ROLE)
+        and DOC_READ not in _role_codes(authz, ANONYMOUS_ROLE),
+        "simulated pre-docs deployment: neither built-in role can read the docs",
+    )
+
+    authz.sync_builtin_roles()
+
+    check(DOC_READ in _role_codes(authz, AUTHENTICATED_ROLE),
+          "one boot re-grants doc:read to `authenticated` (ordinary users)")
+    check(DOC_READ in _role_codes(authz, ANONYMOUS_ROLE),
+          "one boot re-grants doc:read to `anonymous` (and below)")
+    check(DOC_READ in authz.anonymous_grants(),
+          "anonymous_grants() exposes doc:read after the migration")
 
     print()
     if failures:

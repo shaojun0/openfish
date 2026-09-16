@@ -75,6 +75,7 @@ _AUTHENTICATED_SEED = (
     P.MODEL_READ,
     P.MODEL_RESOLVE,
     P.DOCKER_READ, P.DOCKER_DOWNLOAD, P.DEBIAN_READ, P.DEBIAN_DOWNLOAD,
+    P.DEBIAN_OFFLINE,
     P.DOC_READ,
     P.APP_READ,
     P.KEY_LIST, P.KEY_CREATE, P.KEY_DELETE, P.KEY_STATS,
@@ -88,6 +89,10 @@ _AUTHENTICATED_SEED = (
 #: exactly once (recorded in ``seed_migrations``), and it only ever *adds* the
 #: points it names, so it can never resurrect an unrelated grant an
 #: administrator removed.  Keep the ids stable — they are the primary key.
+#:
+#: An entry names the one role that release changed — usually ``authenticated``,
+#: but a change to ``_ANONYMOUS_SEED`` needs the same treatment, or existing
+#: deployments keep serving the old anonymous policy.
 _SEED_TOPUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     # (id, built-in role code, points that release added to the seed)
     (
@@ -128,6 +133,33 @@ _SEED_TOPUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "2026-09-npm-publish",
         P.AUTHENTICATED_ROLE,
         (P.NPM_PUBLISH,),
+    ),
+    # The Debian offline relay's producing half (snapshot / plan / bundle).  A
+    # signed-in user of an intranet hub is exactly who runs it, so an upgraded
+    # deployment receives it instead of the feature being admin-only by accident.
+    # Importing a bundle (`debian:upload`) stays admin-only and is deliberately
+    # not in this list.
+    (
+        "2026-09-debian-offline",
+        P.AUTHENTICATED_ROLE,
+        (P.DEBIAN_OFFLINE,),
+    ),
+    # The ecosystem handbook (0cf6ac0) added `doc:read` to the authenticated
+    # seed and (cd9017a) narrowed `anonymous` to `doc:read` alone — both without
+    # a top-up.  Seeding only runs when a role row is *created*, so an upgraded
+    # deployment could not read the documentation as an ordinary user, and its
+    # anonymous role (still holding the pre-docs package/build reads) could not
+    # read it either — the exact opposite of "普通用户及以下可读".  Grant the
+    # point to both roles, once; newly created roles already have it.
+    (
+        "2026-09-doc-read",
+        P.AUTHENTICATED_ROLE,
+        (P.DOC_READ,),
+    ),
+    (
+        "2026-09-anonymous-doc-read",
+        P.ANONYMOUS_ROLE,
+        (P.DOC_READ,),
     ),
 )
 

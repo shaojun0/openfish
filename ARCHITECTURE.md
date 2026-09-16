@@ -191,7 +191,7 @@ compose 文件里。随仓库提交的样例目录移到了 `docker/examples/`�
 | `npm/` | 本地 npm tarball / `catalog.json` | `NPM_DIR` |
 | `node-builds/` | `nodejs.org/dist` 布局的 Node 镜像 | `NODE_BUILDS_DIR` |
 | `docker-images/` | `docker save` tar + compose/Dockerfile 片段 | `DOCKER_DIR` |
-| `debian/` | 本地 `.deb` + apt 片段 | `DEBIAN_DIR` |
+| `debian/` | 本地 `.deb` + apt 片段；离线中继导入的包也落在这里 | `DEBIAN_DIR` |
 | `docs/<生态>/<文档>/document.md` | 各生态 Markdown 文档 | `DOCS_DIR` |
 
 ---
@@ -243,12 +243,12 @@ npm run dev                         # http://127.0.0.1:5173，代理到后端
 npm run build                       # → frontend/dist
 npm run smoke                       # jsdom 全路由冒烟
 
-# ── 门禁（13 个，均可从任意目录运行）───────────────────────────
+# ── 门禁（14 个，均可从任意目录运行）───────────────────────────
 backend/.venv/bin/python backend/scripts/check_openapi.py
 #   check_openapi / check_auth_guards / check_auth_disabled / check_rbac /
 #   check_database / check_markdown / check_permission_catalog /
 #   check_permission_labels / check_device_flow / check_npm_proxy /
-#   check_docker_proxy / check_debian_proxy / check_lint
+#   check_docker_proxy / check_debian_proxy / check_debian_offline / check_lint
 #   （pyflakes：未定义名 / 死导入）
 #   另有 check_contract.py，需要对着活服务跑（--base-url + --api-key）
 #   check_database.py 还支持 --url <PostgreSQL URL> --yes，对任一后端回归

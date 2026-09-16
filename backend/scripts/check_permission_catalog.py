@@ -82,6 +82,7 @@ AUTHENTICATED_SEEDED: frozenset[str] = frozenset({
     P.NPM_READ, P.NPM_DOWNLOAD, P.NPM_PUBLISH,
     P.DOCKER_READ, P.DOCKER_DOWNLOAD,
     P.DEBIAN_READ, P.DEBIAN_DOWNLOAD,
+    P.DEBIAN_OFFLINE,
     P.MODEL_READ,
     P.MODEL_RESOLVE,
     P.DOC_READ,
@@ -94,6 +95,7 @@ ADMIN_ONLY: frozenset[str] = frozenset({
     P.DOC_UPLOAD,           # edits the shared handbook
     P.TOOL_UPLOAD,          # publishes into the shared tools catalog
     P.DOCKER_UPLOAD,        # publishes into the shared docker catalog
+    P.DEBIAN_UPLOAD,        # writes .deb files into the shared debian repository
     P.ADMIN_VIEW,
     P.ADMIN_REFRESH,
     P.ADMIN_ROLES,

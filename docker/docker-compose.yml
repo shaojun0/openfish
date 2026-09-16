@@ -65,6 +65,13 @@ x-backend-env: &backend-env
   DEBIAN_CACHE_DIR: /app/data/cache/debian
   DEBIAN_CACHE_MAX_MB: ${DEBIAN_CACHE_MAX_MB:-256}
   DEBIAN_METADATA_TTL: ${DEBIAN_METADATA_TTL:-300}
+  # ── 离线更新中继（互联网 ↔ 内网）────────────────────────
+  DEBIAN_SUITES: ${DEBIAN_SUITES:-bookworm bookworm-updates bookworm-security}
+  DEBIAN_COMPONENTS: ${DEBIAN_COMPONENTS:-main}
+  DEBIAN_ARCHES: ${DEBIAN_ARCHES:-amd64}
+  DEBIAN_OFFLINE_DIR: /app/data/offline/debian
+  DEBIAN_OFFLINE_MAX_MB: ${DEBIAN_OFFLINE_MAX_MB:-4096}
+  DEBIAN_OFFLINE_RECOMMENDS: ${DEBIAN_OFFLINE_RECOMMENDS:-false}
   DEBUG: "false"
   # ── 安全（值来自 docker/.env，未设置则启动报错）─────────
   SECRET_KEY: ${SECRET_KEY:?请在 docker/.env 中设置 SECRET_KEY}

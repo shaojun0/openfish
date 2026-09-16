@@ -6,7 +6,6 @@ import { useRouter } from 'vue-router'
 
 import { fetchAdminStats, fetchPackages, type AdminStats, type PackageSummary } from '@/api'
 import { apiError } from '@/api/client'
-import CodeBlock from '@/components/CodeBlock.vue'
 import StatCard from '@/components/StatCard.vue'
 import { useSessionStore } from '@/stores/session'
 import { formatBytes } from '@/utils/format'
@@ -19,9 +18,6 @@ const packages = ref<PackageSummary[]>([])
 const admin = ref<AdminStats | null>(null)
 const loading = ref(true)
 
-const baseUrl = computed(() => window.location.origin)
-const host = computed(() => window.location.host)
-
 const localTotals = computed(() => ({
   packages: packages.value.length,
   files: packages.value.reduce((sum, p) => sum + p.file_count, 0),
@@ -29,39 +25,6 @@ const localTotals = computed(() => ({
 }))
 
 const overview = computed(() => admin.value?.overview ?? null)
-
-const pipSnippet = computed(
-  () => `pip install -i ${baseUrl.value}/simple/ <package-name>`,
-)
-
-const netrcSnippet = computed(
-  () => `machine ${host.value}\n  login __token__\n  password <API-KEY>`,
-)
-
-const twineSnippet = computed(
-  () =>
-    `twine upload --repository-url ${baseUrl.value}/ \\\n` +
-    `  --username __token__ --password <API-KEY> dist/*`,
-)
-
-const uvSnippet = computed(
-  () =>
-    `# Unix\n` +
-    `export UV_PYTHON_INSTALL_MIRROR="${baseUrl.value}/python-builds/"\n` +
-    `uv python install 3.12\n\n` +
-    `# PowerShell\n` +
-    `$env:UV_PYTHON_INSTALL_MIRROR = "${baseUrl.value}/python-builds/"`,
-)
-
-const nodeSnippet = computed(
-  () =>
-    `# nvm\n` +
-    `export NVM_NODEJS_ORG_MIRROR="${baseUrl.value}/node-builds"\n` +
-    `nvm install 20\n\n` +
-    `# fnm\n` +
-    `export FNM_NODE_DIST_MIRROR="${baseUrl.value}/node-builds"\n` +
-    `fnm install 20`,
-)
 
 const shortcuts = computed(() => [
   {
@@ -208,34 +171,6 @@ onMounted(load)
         </el-card>
       </div>
     </el-card>
-
-    <el-card shadow="never">
-      <template #header>
-        <span class="card-title">{{ t('home.usageTitle') }}</span>
-      </template>
-      <el-tabs>
-        <el-tab-pane :label="t('home.pipTitle')">
-          <p class="hint">{{ t('home.pipDesc') }}</p>
-          <CodeBlock :code="pipSnippet" />
-        </el-tab-pane>
-        <el-tab-pane :label="t('home.netrcTitle')">
-          <p class="hint">{{ t('home.netrcDesc') }}</p>
-          <CodeBlock :code="netrcSnippet" />
-        </el-tab-pane>
-        <el-tab-pane :label="t('home.twineTitle')">
-          <p class="hint">{{ t('home.twineDesc') }}</p>
-          <CodeBlock :code="twineSnippet" />
-        </el-tab-pane>
-        <el-tab-pane :label="t('home.uvTitle')">
-          <p class="hint">{{ t('home.uvDesc') }}</p>
-          <CodeBlock :code="uvSnippet" />
-        </el-tab-pane>
-        <el-tab-pane :label="t('home.nodeTitle')">
-          <p class="hint">{{ t('home.nodeDesc') }}</p>
-          <CodeBlock :code="nodeSnippet" />
-        </el-tab-pane>
-      </el-tabs>
-    </el-card>
   </div>
 </template>
 
@@ -281,11 +216,5 @@ onMounted(load)
 .shortcut__arrow {
   color: var(--el-text-color-placeholder);
   flex-shrink: 0;
-}
-
-.hint {
-  margin: 0 0 10px;
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
 }
 </style>
