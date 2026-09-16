@@ -258,6 +258,61 @@ export function apply(ctx, config) {
   const settings = () => ctx.settings
   const credentials = () => ctx.credentials
 
+  /** 本插件注册进 `llm-pi-ai` 的 provider id 前缀（见 registerProviders）。 */
+  const PROVIDER_PREFIX = 'intranet-'
+
+  /** 一个可用的设置分节：非 null、非数组、且有键。 */
+  function isSection(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0
+  }
+
+  function isIntranetProvider(provider) {
+    return String(provider || '').startsWith(PROVIDER_PREFIX)
+  }
+
+  /** 读 `agent-default-model` 当前解析值（provider/model/…），读不到返回 null。 */
+  function readResolvedDefault() {
+    try {
+      const value = settings().get?.(DEFAULT_MODEL_NS)
+      return value && typeof value === 'object' ? value : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 采集「用户层」的 `agent-default-model`，作为停用时还原的基线。
+   *
+   * 优先用 `describe()` 的 user 层而不是 `get()` 的解析值：user 层为空恰好表示
+   * 「用户没设过、默认模型来自组合 base」，还原时清空用户层就能继承回 base，
+   * 而不是把解析后的值固化成一条本不存在的用户覆盖。`describe()` 在旧版 DSH 上
+   * 没有时退回解析值。
+   */
+  function captureDefaultModelLayer() {
+    try {
+      const descriptors = typeof settings().describe === 'function' ? settings().describe() : null
+      const descriptor = Array.isArray(descriptors)
+        ? descriptors.find((d) => d && d.ns === DEFAULT_MODEL_NS)
+        : null
+      if (descriptor) return isSection(descriptor.user) ? descriptor.user : null
+    } catch {
+      // describe() 不可用 —— 下面的 get() 兜底。
+    }
+    const resolved = readResolvedDefault()
+    return isSection(resolved) ? resolved : null
+  }
+
+  /**
+   * 把状态文件里的基线归一成可直接交给 `settings().replace()` 的分节。
+   * 兼容两种形状：本版写入的 `{section, capturedAt}`，以及旧版直接存下来的解析值。
+   * 没有可还原的内容时返回 null。
+   */
+  function normalizeBaseline(stored) {
+    if (!stored || typeof stored !== 'object') return null
+    const section = Object.prototype.hasOwnProperty.call(stored, 'section') ? stored.section : stored
+    return isSection(section) ? { ...section } : null
+  }
+
   function configNow() {
     return { ...merged, ...(readState().config || {}) }
   }
@@ -615,9 +670,24 @@ export function apply(ctx, config) {
     }
 
     const current = readState()
-    const previous = current.previousDefaultModel || null
-    const providerId = `intranet-${slugify(defaultRoute.name)}`
+    const providerId = `${PROVIDER_PREFIX}${slugify(defaultRoute.name)}`
     const modelId = defaultRoute.model || defaultRoute.name
+
+    // 采集停用时要还原的基线 —— 必须在覆盖之前读，且只读一次。
+    //
+    // 不能用「是否已启用企业内网模式」判断该不该采集：设备授权登录的
+    // pollLogin() 会先把 enterpriseMode 置为 true 再调用本函数，那样会漏掉
+    // 唯一一次采集机会（这正是以前 previousDefaultModel 恒为 null 的原因）。
+    // 改用「当前默认模型是否已经指向本插件的 provider」判断：既不会漏采，
+    // 也不会把上一次应用写进去的 intranet provider 当成用户的原始默认模型。
+    let baseline = current.baselineDefaultModel ?? current.previousDefaultModel ?? null
+    if (!normalizeBaseline(baseline)) {
+      const active = readResolvedDefault()
+      baseline = isIntranetProvider(active && active.provider)
+        ? null                            // 已经是我们的 → 没有可还原的基线
+        : { section: captureDefaultModelLayer(), capturedAt: nowIso() }
+    }
+
     await settings().replace(DEFAULT_MODEL_NS, { provider: providerId, model: modelId })
 
     let mirrorResults = null
@@ -626,8 +696,8 @@ export function apply(ctx, config) {
     const next = {
       ...current,
       config: { ...(current.config || {}), enterpriseMode: true },
-      previousDefaultModel: previous || current.baselineDefaultModel || null,
-      baselineDefaultModel: current.baselineDefaultModel || null,
+      previousDefaultModel: baseline,
+      baselineDefaultModel: baseline,
       lastApplyAt: nowIso(),
       lastError: null,
       providers,
@@ -664,13 +734,27 @@ export function apply(ctx, config) {
   async function disableEnterpriseMode() {
     const current = readState()
     await unregisterProviders(current.providers || [])
-    if (current.previousDefaultModel && current.previousDefaultModel.provider) {
-      await settings().replace(DEFAULT_MODEL_NS, current.previousDefaultModel)
+
+    // 只在默认模型确实还指着本插件的 provider 时才动它：用户在企业内网模式下
+    // 自己把默认模型改成别的，停用不该把那次修改一起抹掉。
+    const active = readResolvedDefault()
+    const pointsAtUs = isIntranetProvider(active && active.provider)
+    const baseline = normalizeBaseline(current.baselineDefaultModel)
+      || normalizeBaseline(current.previousDefaultModel)
+
+    let restored = null
+    if (pointsAtUs) {
+      // 基线为 null = 用户本来就没有用户层的默认模型，或者状态文件来自修复前的
+      // 版本（那时从没采集过）。两种情况都不该让默认模型悬空指向一个已经注销的
+      // provider —— 写入空分节即继承回组合 base，这是 replace() 的 reset 语义。
+      await settings().replace(DEFAULT_MODEL_NS, baseline || {})
+      restored = baseline
     }
+
     const next = { ...current, config: { ...(current.config || {}), enterpriseMode: false } }
     writeState(next)
     Object.assign(merged, { enterpriseMode: false })
-    return { enterprise_mode: false, restored_default: current.previousDefaultModel || null }
+    return { enterprise_mode: false, restored_default: restored }
   }
 
   // ── 状态快照 ────────────────────────────────────────────────────────
