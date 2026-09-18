@@ -5,6 +5,8 @@ finding 之后我该做什么」。设计与契约的权威是 [`DEVELOPMENT.md`
 本文只做指路，不复制它的内容。
 
 - 想改实现 / 加规则 → 读 DEVELOPMENT.md 的 §4（数据模型）、§6（finding 状态机）、§9（运行时）。
+- 想理解 **AI 自己写 / 维护校验套件**的边界与治理（两套 check、信任阶梯 L0–L3、
+  「永不自动合并」红线与责任矩阵）→ 读 [`DESIGN-ai-checks.md`](./DESIGN-ai-checks.md)。
 - 想知道页面上每个字段从哪来 → 读 DEVELOPMENT.md 的 §4.2 + §5.3。
 - 只是想把一个仓库导入进来用 → 从下面第二节开始。
 
@@ -112,17 +114,26 @@ blocking **不会**因为「不修」而静默。这是为了防止「静音名�
 ```bash
 # 只读
 git clone http://<openfish-host>/git/<owner>/<name>.git
-
-# 需要写权限时：用户名任意，密码填 API Key
-git clone http://<any-user>:<API-KEY>@<openfish-host>/git/<owner>/<name>.git
 ```
 
-- **凭据只有一套**：API Key。它在 **API 密钥** 页面创建，git 与 REST API 共用
-  （HTTP Basic；用户名任意，密码为 API Key）。不要新建第二套密码。
-- **不要把带 key 的地址写进脚本、文档或提交进仓库**。key 泄露等同于账号泄露。
-- `push` 需要 `repo:push` 权限，并且**受分支保护约束**：agent 只会推 `agent/*`
-  分支，永远不会直接推默认分支或保护分支（I4）。
-- 仓库详情页的 git 区块会按当前部署地址自动生成这两条命令，可以直接复制。
+- **git 不复用 API Key。** `git-receive-pack` 由 Forgejo 校验它自己的凭据，
+  所以写操作要先兑换一张**短期 Forgejo 票**：
+
+  ```bash
+  curl -fsS -H "Authorization: Bearer $OPENFISH_API_KEY" \
+    http://<openfish-host>/api/v1/repos/<owner>/<name>/git-credential
+  # → {"clone_url":…, "username":"of-…", "password":"<Forgejo token>", "read_only":false}
+  ```
+
+  git 询问时用返回的 `username`/`password` 做 HTTP Basic。token 按
+  `GIT_IDENTITY_KEY` 加密存储，过期自动轮换；只读镜像只会拿到
+  `read:repository` 的票。
+- **不要把带 token 的地址写进脚本、文档或提交进仓库**。token 泄露等同于该账号
+  在 Forgejo 上的写权限泄露。
+- `push` 需要 `repo:push` 权限。agent 只会推 `agent/*` 分支（I4 由运行时强制）；
+  Forgejo 侧的默认分支是否保护取决于部署配置。
+- 仓库详情页的 git 区块会按当前部署地址自动生成对应命令；DSH 企业内网插件会安装
+  `credential.helper`，自动完成换票，无需手工输入 token。
 
 ---
 

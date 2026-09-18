@@ -42,6 +42,7 @@ from sqlalchemy import (
     Column,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -66,18 +67,42 @@ FINDING_LEVEL = ("blocking", "debt")
 FINDING_SEVERITY = ("critical", "high", "medium", "low")
 
 TASK_STATUS = ("queued", "leased", "running", "done", "failed", "dead")
-TASK_KIND = ("review", "fix", "import", "backfill")
+#: ``checks`` is the curator role: it proposes/evolves the AI-maintained suite
+#: under ``.agent/checks/**`` and opens a labelled proposal PR.  Adding it to
+#: this tuple changes the ``ck_agent_tasks_kind`` CHECK constraint, which
+#: ``models/agent_hub_migrate.py`` evolves in place on an existing database.
+TASK_KIND = ("review", "fix", "checks", "import", "backfill")
 
 REPO_SYNC_STATE = ("pending", "cloning", "issues", "indexing", "ready", "error")
 REPO_KIND = ("upstream", "workspace")
 REPO_SOURCE = ("import", "local")
 
 IMPORT_MODE = ("code", "code+issues", "issues")
-IMPORT_PHASE = ("migrate", "poll", "mirror_issues", "index_commits", "done")
+#: Every phase the pipeline can *persist*.  ``validate`` is the first phase a
+#: fresh job is created in (``services.repo_import.create_job``), so it must be
+#: admitted by the generated CHECK constraint or the primary import entry point
+#: answers 500 on the first request.  ``services.repo_import.JOB_PHASES`` must
+#: remain a subset of this tuple; ``scripts/check_agent_repos.py`` asserts that,
+#: which is what keeps the two vocabularies from drifting apart again.
+IMPORT_PHASE = ("validate", "migrate", "poll", "mirror_issues", "index_commits", "done")
 
 ISSUE_STATE = ("open", "closed")
 REVIEW_RUN_STATUS = ("running", "ok", "error")
 EVIDENCE_RELATION = ("mentions", "duplicate_of", "fixed_by")
+
+# ── AI-maintained check suite vocabularies (DESIGN-ai-checks.md) ─────
+# The repo tree is the source of truth; these tables are an index/cache of what
+# the tree declared, so a wiped database can always be rebuilt from a clone.
+
+#: Which of the two decoupled suites a snapshot describes.
+CHECK_SUITE_KIND = ("user", "ai")
+#: A suite is ``proposed`` (open proposal PR), ``active`` (the base snapshot a
+#: fix resolves from) or ``retired`` (superseded; kept for provenance).
+CHECK_SUITE_STATUS = ("proposed", "active", "retired")
+#: Who authored a snapshot/proposal.
+CHECK_AUTHOR = ("human", "ai")
+#: One check run's verdict, mirroring ``services.gates.STATUS_*``.
+CHECK_RUN_STATE = ("passed", "failed", "unverified", "error")
 
 
 def _in_check(column: str, values: tuple[str, ...]) -> str:
@@ -155,6 +180,11 @@ class Repo(Base):
     # COUNT(*) queries — the import pipeline is the only writer.
     issue_count: Mapped[int] = Column(Integer, nullable=False, default=0)
     commit_count: Mapped[int] = Column(Integer, nullable=False, default=0)
+    #: Cached ``.agent/review-policy.yml`` → ``defaults.auto_review``, refreshed
+    #: by the import/sync pipeline.  ``None`` means "not read yet", which the
+    #: webhook treats as the documented default (review on).  The API host has no
+    #: checkout, so caching it here is what lets a repository actually opt out.
+    auto_review: Mapped[bool | None] = Column(Boolean, nullable=True)
     created_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = Column(
         DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
@@ -583,6 +613,11 @@ class AgentTask(Base):
     scheduled_at: Mapped[datetime | None] = Column(DateTime(timezone=True), nullable=True)
     attempts: Mapped[int] = Column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = Column(Integer, nullable=False, default=3)
+    #: Idempotency key for the *producer*: a webhook (or a retry-happy client)
+    #: uses ``(repo_id, kind, dedup_key)`` among the active statuses to suppress a
+    #: duplicate enqueue.  NULL/"" means "no dedup", which is why the migration
+    #: can add it as a nullable column without backfilling.
+    dedup_key: Mapped[str | None] = Column(String(200), nullable=True)
     # Higher wins: the lease query is ORDER BY priority DESC, created_at ASC.
     priority: Mapped[int] = Column(Integer, nullable=False, default=0)
     result_ref: Mapped[str | None] = Column(String(512), nullable=True)
@@ -625,6 +660,169 @@ class AgentTask(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<AgentTask {self.id} {self.kind} {self.status}>"
+
+
+# ── AI-maintained check suite: snapshots, validations, run history ───
+# DESIGN-ai-checks.md §3.1 / §6.1 / §9.  These tables are an **index/cache** of
+# what the repository tree declares (``.agent/checks/**`` and the repository's
+# own manifests); the tree stays the source of truth, so wiping this database
+# and re-cloning a repo reconstructs every row that matters.  They exist to make
+# provenance, validation and flake detection queryable, and to stop several
+# replicas from racing on one shared file.
+
+class CheckSuiteSnapshot(Base):
+    """A frozen check suite: what it was, where it came from, who proposed it."""
+
+    __tablename__ = "check_suite_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "repo_id", "kind", "suite_hash", name="uq_check_suite_snapshots_identity"
+        ),
+        Index("ix_check_suite_snapshots_repo_kind", "repo_id", "kind"),
+        CheckConstraint(
+            _in_check("kind", CHECK_SUITE_KIND), name="ck_check_suite_snapshots_kind"
+        ),
+        CheckConstraint(
+            _in_check("status", CHECK_SUITE_STATUS), name="ck_check_suite_snapshots_status"
+        ),
+        CheckConstraint(
+            _in_check("author", CHECK_AUTHOR), name="ck_check_suite_snapshots_author"
+        ),
+    )
+
+    id: Mapped[int] = Column(Integer, primary_key=True, autoincrement=True)
+    repo_id: Mapped[int] = Column(
+        Integer, ForeignKey("repos.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = Column(String(8), nullable=False, default="ai")
+    #: Resolution provider label (``repo`` / ``policy`` / ``discovery`` /
+    #: ``agent-checks`` / ``scripts`` / ``unverified``); free-form on purpose so
+    #: a new provider does not need a schema migration.
+    source: Mapped[str] = Column(String(32), nullable=False, default="")
+    suite_hash: Mapped[str] = Column(String(64), nullable=False, default="")
+    #: JSON array of ``{id, argv, cwd, timeout, validation}`` — the descriptor.
+    checks: Mapped[str] = Column(Text, nullable=False, default="[]")
+    base_sha: Mapped[str] = Column(String(64), nullable=False, default="")
+    author: Mapped[str] = Column(String(8), nullable=False, default="human")
+    model: Mapped[str] = Column(String(128), nullable=False, default="")
+    task_id: Mapped[int | None] = Column(Integer, nullable=True)
+    status: Mapped[str] = Column(String(16), nullable=False, default="active", index=True)
+    created_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = Column(
+        DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    def checks_payload(self) -> list[Any]:
+        """The descriptor as a list; a corrupt value degrades to ``[]``."""
+        try:
+            parsed = json.loads(self.checks or "[]")
+        except ValueError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "repo_id": self.repo_id,
+            "kind": self.kind,
+            "source": self.source,
+            "suite_hash": self.suite_hash,
+            "checks": self.checks_payload(),
+            "base_sha": self.base_sha,
+            "author": self.author,
+            "model": self.model,
+            "task_id": self.task_id,
+            "status": self.status,
+            "created_at": iso(self.created_at),
+            "updated_at": iso(self.updated_at),
+        }
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<CheckSuiteSnapshot {self.id} {self.kind} {self.suite_hash[:8]}>"
+
+
+class CheckValidation(Base):
+    """One falsifiability verdict for one check (DESIGN-ai-checks.md §6)."""
+
+    __tablename__ = "check_validations"
+    __table_args__ = (
+        Index("ix_check_validations_repo_check", "repo_id", "check_id"),
+    )
+
+    id: Mapped[int] = Column(Integer, primary_key=True, autoincrement=True)
+    repo_id: Mapped[int] = Column(
+        Integer, ForeignKey("repos.id", ondelete="CASCADE"), nullable=False
+    )
+    check_id: Mapped[str] = Column(String(128), nullable=False)
+    base_sha: Mapped[str] = Column(String(64), nullable=False, default="")
+    detection_rate: Mapped[float] = Column(Float, nullable=False, default=0.0)
+    faults_seeded: Mapped[int] = Column(Integer, nullable=False, default=0)
+    validated: Mapped[bool] = Column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = Column(String(16), nullable=False, default="unvalidated")
+    reason: Mapped[str] = Column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "repo_id": self.repo_id,
+            "check_id": self.check_id,
+            "base_sha": self.base_sha,
+            "detection_rate": self.detection_rate,
+            "faults_seeded": self.faults_seeded,
+            "validated": bool(self.validated),
+            "status": self.status,
+            "reason": self.reason,
+            "created_at": iso(self.created_at),
+        }
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<CheckValidation {self.check_id} validated={bool(self.validated)}>"
+
+
+class CheckRun(Base):
+    """One execution of one check — flake and never-failed detection (§6.1)."""
+
+    __tablename__ = "check_runs"
+    __table_args__ = (
+        Index("ix_check_runs_repo_check", "repo_id", "check_id"),
+        Index("ix_check_runs_suite_hash", "suite_hash"),
+        CheckConstraint(
+            _in_check("state", CHECK_RUN_STATE), name="ck_check_runs_state"
+        ),
+    )
+
+    id: Mapped[int] = Column(Integer, primary_key=True, autoincrement=True)
+    repo_id: Mapped[int] = Column(
+        Integer, ForeignKey("repos.id", ondelete="CASCADE"), nullable=False
+    )
+    check_id: Mapped[str] = Column(String(128), nullable=False)
+    suite_hash: Mapped[str] = Column(String(64), nullable=False, default="")
+    #: The revision the check ran against.
+    revision: Mapped[str] = Column(String(64), nullable=False, default="")
+    state: Mapped[str] = Column(String(16), nullable=False, default="unverified")
+    exit_code: Mapped[int | None] = Column(Integer, nullable=True)
+    duration_ms: Mapped[int] = Column(Integer, nullable=False, default=0)
+    #: True when this run belongs to a change that loosened the check.
+    weakened: Mapped[bool] = Column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "repo_id": self.repo_id,
+            "check_id": self.check_id,
+            "suite_hash": self.suite_hash,
+            "revision": self.revision,
+            "state": self.state,
+            "exit_code": self.exit_code,
+            "duration_ms": self.duration_ms,
+            "weakened": bool(self.weakened),
+            "created_at": iso(self.created_at),
+        }
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<CheckRun {self.check_id} {self.state}>"
 
 
 # ── git_identities ───────────────────────────────────────────────────
@@ -754,6 +952,10 @@ class FindingEvidence(Base):
 
 __all__ = [
     # enums
+    "CHECK_AUTHOR",
+    "CHECK_RUN_STATE",
+    "CHECK_SUITE_KIND",
+    "CHECK_SUITE_STATUS",
     "EVIDENCE_RELATION",
     "FINDING_LEVEL",
     "FINDING_SEVERITY",
@@ -772,6 +974,9 @@ __all__ = [
     "fingerprint",
     # tables
     "AgentTask",
+    "CheckRun",
+    "CheckSuiteSnapshot",
+    "CheckValidation",
     "Finding",
     "FindingEvent",
     "FindingEvidence",

@@ -553,10 +553,19 @@ docker compose --profile runner up -d runner
 
 - 镜像 `openfish-runner`：基于 `python:3.12-slim` + `git` + 仓库所需基础工具；
   **不含模型权重、不含宿主 docker socket**。
-- 每个任务一个工作目录（`/work/<task_id>`），任务结束**保留 24h 便于排障再回收**。
-- 资源限制：`--cpus 2 --memory 2g --pids-limit 512`；无外网（`network: internal`）。
-- 凭据注入：模型 key 从平台 `models/resolved` 取（已有能力），**通过环境变量传入，
-  任务结束即失效**；不写进工作目录。
+- 每个任务一个工作目录（`/work/<task_id>`；重试为 `/work/<task_id>-attempt<n>`，
+  避免回收后的第二次尝试删掉第一次仍在用的 checkout），任务结束**保留 24h
+  便于排障再回收**。
+- 资源限制：`--cpus 2 --memory 2g --pids-limit 512`。
+- **凭据边界（已落地）**：runner 容器**不继承** backend 的
+  `SECRET_KEY` / `FORGEJO_ADMIN_TOKEN` / `GIT_IDENTITY_KEY`（见
+  `docker/docker-compose.yml` 的 `x-runner-env`）；仓库自带的 `check_*.py`
+  与 headless review 命令再经 `services/sandbox_env.py` 的白名单过滤，拿不到
+  任何平台密钥。runner 只用一枚可单独吊销的
+  `FORGEJO_RUNNER_TOKEN`（git credential helper + 开 PR），未设置时 fix 任务
+  在 push/PR 处**明确失败**，不回落去用 admin 权限。
+- **待补的网络隔离**：runner 目前仍在 `openfish` bridge 上，`network: internal`
+  + 出口白名单是后续切片；在那之前，隔离只覆盖凭据与文件系统，不覆盖出网。
 
 ### 9.3 agent 的任务协议（`AGENTS.md` 契约）
 

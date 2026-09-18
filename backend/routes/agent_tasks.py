@@ -236,7 +236,7 @@ def list_agent_tasks():
     ),
     tags=["Agent runtime"],
     request_body={"required": True, "content": json_body(_TASK_REQUEST_SCHEMA)},
-    responses={"201": ok("Task enqueued", _TASK_SCHEMA), **_errors("400")},
+    responses={"201": ok("Task enqueued", _TASK_SCHEMA), **_errors("400", "409")},
 )
 def create_agent_task():
     payload = _body()
@@ -263,6 +263,15 @@ def create_agent_task():
     task_id = queue.enqueue(
         int(repo.id), kind=kind, payload=task_payload, priority=priority, max_attempts=max_attempts
     )
+    if not task_id:
+        # AgentQueue.enqueue returns 0 when the producer-side admission control
+        # suppressed the row (repo at AGENT_MAX_IN_FLIGHT_PER_REPO).  A 201 with a
+        # task id of 0 would be a lie.
+        raise PypiError(
+            f"仓库 {repo_slug} 的在途任务已达上限（AGENT_MAX_IN_FLIGHT_PER_REPO），"
+            "本次未入队；等当前任务结束后重试",
+            status_code=409,
+        )
     logger.info("agent task %s enqueued: repo=%s kind=%s actor=%s", task_id, repo_slug, kind, _actor())
     return jsonify(_task_view(queue, task_id, slug=repo_slug)), 201
 

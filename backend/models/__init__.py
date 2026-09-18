@@ -14,6 +14,10 @@ from __future__ import annotations
 from .base import Base
 from .api_key import ApiKey, ApiKeyStats
 from .agent_hub import (
+    CHECK_AUTHOR,
+    CHECK_RUN_STATE,
+    CHECK_SUITE_KIND,
+    CHECK_SUITE_STATUS,
     EVIDENCE_RELATION,
     FINDING_LEVEL,
     FINDING_SEVERITY,
@@ -28,6 +32,9 @@ from .agent_hub import (
     TASK_KIND,
     TASK_STATUS,
     AgentTask,
+    CheckRun,
+    CheckSuiteSnapshot,
+    CheckValidation,
     Finding,
     FindingEvent,
     FindingEvidence,
@@ -54,6 +61,9 @@ __all__ = [
     "RolePermission",
     # ── Agent Hub tables ─────────────────────────────────────────────
     "AgentTask",
+    "CheckRun",
+    "CheckSuiteSnapshot",
+    "CheckValidation",
     "Finding",
     "FindingEvent",
     "FindingEvidence",
@@ -64,6 +74,10 @@ __all__ = [
     "RepoIssue",
     "ReviewRun",
     # Agent Hub vocabularies and the fingerprint helper (§4.3 / §4.4)
+    "CHECK_AUTHOR",
+    "CHECK_RUN_STATE",
+    "CHECK_SUITE_KIND",
+    "CHECK_SUITE_STATUS",
     "EVIDENCE_RELATION",
     "FINDING_LEVEL",
     "FINDING_SEVERITY",

@@ -46,9 +46,10 @@ CLI::
     python -m services.agent_queue worker --loop --poll-interval 2
     python -m services.agent_queue status
 
-The worker's *work* is injected (``handler``): the platform ships a placeholder
-that retires the task, and S4 replaces it with the sandbox runner.  The queue
-itself never imports the runner, which is what keeps this module importable
+The worker's *work* is injected (``handler``): :func:`default_handler` builds the
+real sandbox runner (``services.agent_worker``), which the CLI uses, while the
+gates pass a recording fake through :func:`build_worker`.  The queue itself never
+imports the runner at module scope, which is what keeps this module importable
 without Flask or a Docker daemon.
 """
 
@@ -93,6 +94,24 @@ MAX_BACKOFF_SECONDS = 900.0
 #: the same file ``config`` defaults to, so `python -m services.agent_queue`
 #: outside Docker hits the deployment's own database.
 DEFAULT_SQLITE_PATH = "data/cpypiserver.db"
+
+#: Statuses that count as "this work is still pending".  Producer-side dedup and
+#: the per-repo in-flight ceiling both look at exactly this set.
+ACTIVE_TASK_STATUSES: tuple[str, ...] = ("queued", "leased", "running")
+
+#: Environment knob for :meth:`AgentQueue.enqueue`'s per-repo ceiling.  ``0``
+#: (the library default) means unlimited; a deployment sets a small number so one
+#: noisy repository cannot fill the single global queue and starve the rest.
+ENV_MAX_IN_FLIGHT_PER_REPO = "AGENT_MAX_IN_FLIGHT_PER_REPO"
+
+
+def configured_max_in_flight_per_repo() -> int:
+    """``AGENT_MAX_IN_FLIGHT_PER_REPO`` as a non-negative integer (0 = no cap)."""
+    try:
+        value = int(os.environ.get(ENV_MAX_IN_FLIGHT_PER_REPO, "") or 0)
+    except ValueError:
+        return 0
+    return max(0, value)
 
 
 # ── Values exchanged with callers ────────────────────────────────────
@@ -352,13 +371,60 @@ class AgentQueue:
         priority: int = 0,
         max_attempts: int = 3,
         scheduled_at: datetime | None = None,
+        dedup_key: str | None = None,
+        max_in_flight_per_repo: int | None = None,
     ) -> int:
-        """Append a task and return its id (the API hands this back to the SPA)."""
+        """Append a task and return its id (the API hands this back to the SPA).
+
+        Returns **0** when the task was suppressed rather than written — a
+        duplicate of an active ``(repo_id, kind, dedup_key)``, or the repository
+        already at its in-flight ceiling.  Callers distinguish "queued (id > 0)"
+        from "suppressed (0)" instead of mistaking a storm for success.
+
+        *dedup_key* is the producer's idempotency token (a push sha, an issue
+        number).  The check is not a unique constraint: two workers racing can
+        still both insert, which is the same at-least-once posture as the rest of
+        the queue — but a retry storm from one producer collapses to one row.
+        """
         if kind not in TASK_KIND:
             raise ValueError(f"unknown task kind {kind!r}; expected one of {TASK_KIND}")
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
+        key = str(dedup_key or "").strip()
+        ceiling = (
+            int(max_in_flight_per_repo)
+            if max_in_flight_per_repo is not None
+            else configured_max_in_flight_per_repo()
+        )
         with self.session() as session:
+            if key:
+                duplicate = session.execute(
+                    select(AgentTask.id).where(
+                        AgentTask.repo_id == int(repo_id),
+                        AgentTask.kind == kind,
+                        AgentTask.dedup_key == key,
+                        AgentTask.status.in_(ACTIVE_TASK_STATUSES),
+                    ).limit(1)
+                ).first()
+                if duplicate is not None:
+                    logger.info(
+                        "Suppressed duplicate %s task for repo %d (dedup_key=%s, "
+                        "active task %s)", kind, repo_id, key, duplicate[0],
+                    )
+                    return 0
+            if ceiling > 0:
+                active = session.execute(
+                    select(func.count()).select_from(AgentTask).where(
+                        AgentTask.repo_id == int(repo_id),
+                        AgentTask.status.in_(ACTIVE_TASK_STATUSES),
+                    )
+                ).scalar() or 0
+                if int(active) >= ceiling:
+                    logger.warning(
+                        "Repo %d is at its in-flight ceiling (%d); suppressed %s "
+                        "task (dedup_key=%s)", repo_id, ceiling, kind, key,
+                    )
+                    return 0
             task = AgentTask(
                 repo_id=repo_id,
                 kind=kind,
@@ -368,6 +434,7 @@ class AgentQueue:
                 max_attempts=int(max_attempts),
                 attempts=0,
                 leased_by="",
+                dedup_key=key or None,
                 scheduled_at=_as_utc(scheduled_at) if scheduled_at else _now(),
             )
             session.add(task)
@@ -753,17 +820,32 @@ TaskHandler = Callable[[ClaimedTask], str | None]
 
 
 def placeholder_handler(task: ClaimedTask) -> str | None:
-    """Default handler: retire the task without doing any work.
+    """Retire the task without doing any work — an explicit opt-in only.
 
-    Exists so ``--once``/``--loop`` are useful before S4 lands the sandbox
-    runner, and so the queue gate can exercise the *worker* loop rather than
-    only the queue methods.  It logs loudly: a deployment that is retiring tasks
-    instantly is a deployment whose runner was never wired up.
+    Kept for a dry run or a queue-only gate, **not** as a default: a deployment
+    that retires tasks instantly is a deployment whose runner was never wired
+    up, which is exactly the A1 defect :func:`default_handler` fixes.  It logs
+    loudly for that reason.
     """
     logger.warning(
         "Retiring %s task %d with the placeholder handler — no sandbox runner is "
         "configured (payload=%s)", task.kind, task.id, task.payload)
     return f"placeholder:{task.id}"
+
+
+def default_handler(queue: "AgentQueue") -> TaskHandler:
+    """The production handler: the real sandbox runner (``agent_worker``).
+
+    Imported lazily so ``agent_queue`` stays importable without the runner's
+    dependency graph (and so ``check_agent_hub`` can exercise the queue alone).
+    """
+    from services.agent_worker import build_handler
+
+    return build_handler(engine=queue.engine)
+
+
+#: Factory seam: a gate swaps this out to substitute a fake handler for the CLI.
+HandlerFactory = Callable[["AgentQueue"], TaskHandler]
 
 
 class Worker:
@@ -784,7 +866,7 @@ class Worker:
         poll_interval: float = 2.0,
     ) -> None:
         self.queue = queue
-        self.handler = handler or placeholder_handler
+        self.handler = handler if handler is not None else default_handler(queue)
         self.name = name or worker_id()
         self.poll_interval = float(poll_interval)
 
@@ -817,16 +899,59 @@ class Worker:
         logger.info("Worker %s started (poll=%ss, lease=%ss, heartbeat=%ss)",
                     self.name, self.poll_interval,
                     self.queue.lease_seconds, self.queue.heartbeat_seconds)
+        # Dead-letter alerting: a task that exhausts its attempts becomes `dead`
+        # and stops being retried.  Nothing else in the loop would tell an
+        # operator, so re-read the count on a slow cadence and log at ERROR
+        # whenever it grows (the API surface is
+        # ``GET /api/v1/agent/tasks?status=dead``).
+        idle_cycles = 0
+        last_dead = -1
+        dead_every = max(1, int(60.0 / max(0.1, self.poll_interval)))
         try:
             while stop_after is None or settled < stop_after:
                 if self.run_once():
                     settled += 1
                     continue  # there may be more work — do not sleep on it
+                idle_cycles += 1
+                if idle_cycles % dead_every == 0:
+                    try:
+                        dead = int(self.queue.stats().by_status.get("dead", 0))
+                    except Exception as exc:  # noqa: BLE001 - a stats blip is not fatal
+                        logger.debug("cannot read queue stats: %s", exc)
+                        dead = last_dead
+                    if dead > last_dead:
+                        logger.error(
+                            "死信队列：%d 个任务已 dead（不会再重试）。"
+                            "查看与重试：GET /api/v1/agent/tasks?status=dead "
+                            "与 POST /api/v1/agent/tasks/<id>/retry",
+                            dead,
+                        )
+                    last_dead = dead
                 time.sleep(self.poll_interval)
         except KeyboardInterrupt:  # pragma: no cover - interactive only
             logger.info("Worker %s interrupted after %d task(s)", self.name, settled)
         logger.info("Worker %s stopped after %d task(s)", self.name, settled)
         return settled
+
+
+def build_worker(
+    queue: AgentQueue,
+    *,
+    handler: TaskHandler | None = None,
+    handler_factory: HandlerFactory | None = None,
+    name: str | None = None,
+    poll_interval: float = 2.0,
+) -> Worker:
+    """Build the consumer, defaulting to the **real** sandbox runner handler.
+
+    ``handler`` / ``handler_factory`` are the injectable seam: a gate substitutes
+    a recording fake (or a factory) instead of a sandbox, which is how the
+    production default is proven without a model, git or docker.
+    """
+    resolved = handler
+    if resolved is None:
+        resolved = (handler_factory or default_handler)(queue)
+    return Worker(queue, handler=resolved, name=name, poll_interval=poll_interval)
 
 
 # ── CLI (same shape as cli.py, a different binary) ───────────────────
@@ -842,14 +967,14 @@ def cmd_worker(args: argparse.Namespace) -> int:
     queue.ensure_schema()
 
     if args.once:
-        worker = Worker(queue, name=args.worker, poll_interval=args.poll_interval)
+        worker = build_worker(queue, name=args.worker, poll_interval=args.poll_interval)
         did_work = worker.run_once()
         if not did_work:
             print("no task available")
         engine.dispose()
         return 0
 
-    worker = Worker(queue, name=args.worker, poll_interval=args.poll_interval)
+    worker = build_worker(queue, name=args.worker, poll_interval=args.poll_interval)
     try:
         settled = worker.run_loop(stop_after=args.max_tasks or None)
     except KeyboardInterrupt:  # pragma: no cover - interactive only

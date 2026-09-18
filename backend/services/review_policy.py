@@ -63,6 +63,31 @@ LEVELS: tuple[str, ...] = (LEVEL_BLOCKING, LEVEL_DEBT)
 #: "never, for these paths".
 EXCEPTION_STATUSES: tuple[str, ...] = ("wontfix", "acknowledged")
 
+#: §9.3 step 6 / result-gated PR creation.  ``on_green`` (the default) only
+#: pushes and opens a PR when no gate failed; ``always`` pushes regardless
+#: (documented escape hatch); ``never`` is report-only.
+PR_POLICY_ON_GREEN = "on_green"
+PR_POLICY_ALWAYS = "always"
+PR_POLICY_NEVER = "never"
+PR_POLICIES: tuple[str, ...] = (PR_POLICY_ON_GREEN, PR_POLICY_ALWAYS, PR_POLICY_NEVER)
+DEFAULT_PR_POLICY = PR_POLICY_ON_GREEN
+
+#: Curator (the ``checks`` task) trigger modes (DESIGN-ai-checks.md §B).
+#: ``off`` never proposes; ``bootstrap`` proposes once for a repo whose suite is
+#: ``unverified``; ``auto`` additionally proposes when a push adds source files
+#: with no corresponding check.  Default ``bootstrap``: a repository with no
+#: verification gets exactly one proposal instead of PR spam, and one that
+#: already has a suite is left alone.
+CURATOR_OFF = "off"
+CURATOR_BOOTSTRAP = "bootstrap"
+CURATOR_AUTO = "auto"
+CURATOR_MODES: tuple[str, ...] = (CURATOR_OFF, CURATOR_BOOTSTRAP, CURATOR_AUTO)
+DEFAULT_CURATOR = CURATOR_BOOTSTRAP
+
+#: Cooling-off window between two curator proposals for one repository, so a
+#: burst of pushes cannot open a stack of proposal PRs.
+DEFAULT_CURATOR_MIN_INTERVAL_SECONDS = 3600
+
 #: §7.3 fallback when a rule with no ``default_due_days`` needs a deadline.
 DEFAULT_DUE_DAYS = 30
 
@@ -125,6 +150,21 @@ class PolicyDefaults(BaseModel):
     auto_review: bool = True
     #: §12.1 noise spiral: hard ceiling on how many findings one run may open.
     max_findings_per_run: int = Field(default=50, ge=1)
+    #: §9.3 step 6 / result-gated PR creation.  ``on_green`` pushes + opens a PR
+    #: only when no gate failed; ``always`` pushes regardless; ``never`` is
+    #: report-only.  A wrong value is a §7.3 validation failure, not a default.
+    pr_policy: str = DEFAULT_PR_POLICY
+    #: §6.4: a *review* task may escalate into a fix+PR only when a human opted
+    #: this repository in.  Default false, exactly like per-rule ``autofix``.
+    auto_fix: bool = False
+    #: DESIGN-ai-checks.md §B: may the AI curator propose/evolve the AI check
+    #: suite?  ``off | bootstrap | auto``, default ``bootstrap``.  Opt-in, and
+    #: deliberately not a human-approval flow: the proposal is a normal PR.
+    curator: str = DEFAULT_CURATOR
+    #: Cooling-off between two curator proposals for this repository.
+    curator_min_interval_seconds: int = Field(
+        default=DEFAULT_CURATOR_MIN_INTERVAL_SECONDS, ge=0
+    )
 
 
 class RulePolicy(BaseModel):
@@ -172,6 +212,23 @@ class PolicyEscalation(BaseModel):
     rule_count_threshold: int = Field(default=DEFAULT_RULE_COUNT_THRESHOLD, ge=1)
 
 
+class PolicyCheck(BaseModel):
+    """One entry of ``checks``: a verification command, no Python required.
+
+    ``.agent/checks/`` is the versioned suite an AI curator maintains; this
+    field is the escape hatch for a human who wants a command in the same file
+    as the rest of the policy.  Only ``command`` is required, and it is split
+    into an argv by the suite resolver — never handed to a shell.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    command: str
+    cwd: str = "."
+    timeout: float | None = Field(default=None, gt=0)
+
+
 class PolicyDocument(BaseModel):
     """The whole file.  ``policy_source`` / ``warnings`` / ``policy_hash`` are
     platform-side annotations, not file content."""
@@ -183,6 +240,9 @@ class PolicyDocument(BaseModel):
     rules: list[RulePolicy] = Field(default_factory=list)
     exceptions: list[PolicyException] = Field(default_factory=list)
     escalation: PolicyEscalation = Field(default_factory=PolicyEscalation)
+    #: §7.2 extension: inline verification commands.  Resolution order (see
+    #: ``services.check_suite``) puts ``.agent/checks/`` first and this second.
+    checks: list[PolicyCheck] = Field(default_factory=list)
 
     # ── Platform annotations ────────────────────────────────────────
     policy_source: str = SOURCE_FILE
@@ -260,6 +320,7 @@ class PolicyDocument(BaseModel):
             "rules": [entry.model_dump() for entry in self.rules],
             "exceptions": [entry.model_dump(mode="json") for entry in self.exceptions],
             "escalation": self.escalation.model_dump(),
+            "checks": [entry.model_dump() for entry in self.checks],
             "policy_source": self.policy_source,
             "policy_hash": self.policy_hash,
             "warnings": list(self.warnings),
@@ -284,7 +345,9 @@ def canonical_json(document: PolicyDocument) -> str:
 
     Only the three policy-bearing sections are included: annotations such as
     ``warnings`` or ``path`` describe *this read*, not the policy, and comments
-    and indentation never enter at all.
+    and indentation never enter at all.  ``checks`` is appended only when it is
+    non-empty, so adding the field did not invalidate every existing
+    ``policy_hash`` in ``review_runs``.
     """
     payload = {
         "version": document.version,
@@ -293,6 +356,8 @@ def canonical_json(document: PolicyDocument) -> str:
         "exceptions": [entry.model_dump(mode="json") for entry in document.exceptions],
         "escalation": document.escalation.model_dump(mode="json"),
     }
+    if document.checks:
+        payload["checks"] = [entry.model_dump(mode="json") for entry in document.checks]
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
@@ -382,7 +447,6 @@ def parse_yaml(text: str) -> Mapping[str, Any]:
 
 def dump(document: PolicyDocument) -> str:
     """Serialize a document back to YAML for ``PUT /api/v1/policies/<slug>``."""
-    yaml = _yaml()
     payload = {
         "version": document.version,
         "defaults": document.defaults.model_dump(mode="json"),
@@ -390,7 +454,22 @@ def dump(document: PolicyDocument) -> str:
         "exceptions": [entry.model_dump(mode="json") for entry in document.exceptions],
         "escalation": document.escalation.model_dump(mode="json"),
     }
-    return yaml.safe_dump(payload, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    if document.checks:
+        payload["checks"] = [entry.model_dump(mode="json") for entry in document.checks]
+    return dump_yaml(payload)
+
+
+def dump_yaml(payload: Mapping[str, Any]) -> str:
+    """Serialize a plain mapping to YAML through the project's single loader.
+
+    The suite manifest (``.agent/checks/checks.yml``) is written with this, so
+    there is one YAML implementation rather than a second ``import yaml`` in
+    :mod:`services.check_curator`.
+    """
+    yaml = _yaml()
+    return yaml.safe_dump(
+        dict(payload), allow_unicode=True, sort_keys=False, default_flow_style=False
+    )
 
 
 # ── Validation (§7.3) ────────────────────────────────────────────────
@@ -418,6 +497,16 @@ def validate_document(
       may be about a rule another slice ships, so it is reported, not rejected.
     """
     moment = _today(today)
+    if document.defaults.pr_policy not in PR_POLICIES:
+        raise PolicyValidationError(
+            f"defaults.pr_policy={document.defaults.pr_policy!r}; "
+            f"expected one of {', '.join(PR_POLICIES)}"
+        )
+    if document.defaults.curator not in CURATOR_MODES:
+        raise PolicyValidationError(
+            f"defaults.curator={document.defaults.curator!r}; "
+            f"expected one of {', '.join(CURATOR_MODES)}"
+        )
     known = {entry.id for entry in document.rules}
     warnings: list[str] = []
     for index, exception in enumerate(document.exceptions):
@@ -446,6 +535,15 @@ def validate_document(
             raise PolicyValidationError(
                 f"rules[{entry.id}].level={entry.level!r}; expected one of {', '.join(LEVELS)}"
             )
+    check_ids: set[str] = set()
+    for index, check in enumerate(document.checks):
+        if not check.id.strip():
+            raise PolicyValidationError(f"checks[{index}] has an empty id")
+        if check.id in check_ids:
+            raise PolicyValidationError(f"checks declares {check.id!r} more than once")
+        check_ids.add(check.id)
+        if not check.command.strip():
+            raise PolicyValidationError(f"checks[{check.id}].command is empty")
     return warnings
 
 
@@ -539,8 +637,15 @@ def source_of(document: PolicyDocument) -> str:
 
 __all__ = [
     "BUILTIN_RULES",
+    "CURATOR_AUTO",
+    "CURATOR_BOOTSTRAP",
+    "CURATOR_MODES",
+    "CURATOR_OFF",
+    "DEFAULT_CURATOR",
+    "DEFAULT_CURATOR_MIN_INTERVAL_SECONDS",
     "DEFAULT_DUE_DAYS",
     "DEFAULT_POLICY_PATH",
+    "DEFAULT_PR_POLICY",
     "DEFAULT_RULE_COUNT_THRESHOLD",
     "DEFAULT_RULE_NOISE_THRESHOLD",
     "EXCEPTION_STATUSES",
@@ -548,8 +653,13 @@ __all__ = [
     "LEVEL_BLOCKING",
     "LEVEL_DEBT",
     "POLICY_RELATIVE_PATH",
+    "PR_POLICIES",
+    "PR_POLICY_ALWAYS",
+    "PR_POLICY_NEVER",
+    "PR_POLICY_ON_GREEN",
     "SOURCE_BUILTIN",
     "SOURCE_FILE",
+    "PolicyCheck",
     "PolicyDefaults",
     "PolicyDependencyError",
     "PolicyDocument",
@@ -563,6 +673,7 @@ __all__ = [
     "canonical_json",
     "check_warnings",
     "dump",
+    "dump_yaml",
     "hash_changed",
     "load",
     "load_file",

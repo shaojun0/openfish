@@ -52,17 +52,41 @@ from typing import Any, Callable, Iterable, Literal, Mapping, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from services.check_curator import CuratorReport, proposal_body, proposal_title
+from services.check_suite import (
+    CHECK_DIR_RELPATH,
+    FrozenSuite,
+    curator_guard_violations,
+    fix_guard_violations,
+    freeze_suite,
+    resolve_ai_suite,
+    resolve_suite,
+    resolve_suites,
+    suite_protected_paths,
+)
+from services.check_trust import (
+    Assurance,
+    assess_assurance,
+    render_two_suites,
+)
 from services.fileio import write_json
 from services.format import utc_now_iso
 from services.gates import (
     DEFAULT_GATE_TIMEOUT,
+    SOURCE_AGENT_CHECKS,
+    STATUS_UNVERIFIED,
+    CheckSuite,
     GateResult,
     GateSummary,
-    SubprocessGateExecutor,
     render_summary,
-    run_gates as run_gate_suite,
+    run_suite as run_check_suite,
+    suite_fingerprint,
+    suite_from_scripts,
+    unverified_summary,
 )
+from services.git_auth import credential_args, git_env
 from services.model_routes import mask_api_key, resolve
+from services.sandbox_env import sandbox_env
 
 logger = logging.getLogger("cpypiserver.agent_runner")
 
@@ -100,6 +124,20 @@ ENV_WORK_ROOT = "AGENT_WORK_ROOT"
 ENV_WORK_RETENTION = "AGENT_WORK_RETENTION_SECONDS"
 ENV_GATE_TIMEOUT = "AGENT_GATE_TIMEOUT"
 ENV_MAX_FINDINGS = "AGENT_MAX_FINDINGS"
+#: §9.3 step 6 / result-gated PR creation knobs.  ``pr_policy`` may also come
+#: from ``.agent/review-policy.yml`` (``defaults.pr_policy``); the environment
+#: is the deployment-wide override.
+ENV_PR_POLICY = "AGENT_PR_POLICY"
+ENV_AUTO_FIX = "AGENT_AUTO_FIX"
+
+#: Values ``pr_policy`` accepts.  Deliberately duplicated (not imported) from
+#: ``services.review_policy``: the runner must stay importable in the offline
+#: gate without a policy file, and these are the runner's own contract.
+PR_POLICY_ON_GREEN = "on_green"
+PR_POLICY_ALWAYS = "always"
+PR_POLICY_NEVER = "never"
+PR_POLICIES: tuple[str, ...] = (PR_POLICY_ON_GREEN, PR_POLICY_ALWAYS, PR_POLICY_NEVER)
+DEFAULT_PR_POLICY = PR_POLICY_ON_GREEN
 
 #: Defaults mirroring §9.2 (``/work/<task_id>``, 24h) and §9.4 (120s).
 DEFAULT_WORK_ROOT = "/work"
@@ -188,6 +226,21 @@ class RunMeta(BaseModel):
     repo: str | None = None
     policy_source: str = "repo"
     mode: str = "review"
+    #: Provenance of the *frozen* verification suite (P1.1/P1.3).  Recorded so a
+    #: reader can tell which suite judged the change and whether it was resolved
+    #: at all — an unverified run must never look like a passed one.  These
+    #: describe the **repository (user)** suite; the AI suite is reported
+    #: separately in ``ai_suite_*`` and ``ai_gates`` so the two are never merged
+    #: into one anonymous green list.
+    suite_hash: str = ""
+    suite_source: str = ""
+    suite_state: str = ""
+    ai_suite_hash: str = ""
+    ai_suite_source: str = ""
+    ai_suite_state: str = ""
+    #: The trust-ladder rung and its PR label (L0–L3).  L3 is off by default.
+    assurance_level: str = ""
+    assurance_label: str = ""
 
 
 class Evidence(BaseModel):
@@ -227,6 +280,9 @@ class GateEntry(BaseModel):
 
     gate: str
     passed: bool
+    #: ``passed`` / ``failed`` / ``unverified``.  The result document is the PR
+    #: description's source, so the third state has to survive serialization.
+    status: str = "passed"
     exit_code: int | None = None
     stdout_tail: str = ""
     duration_ms: int = 0
@@ -240,6 +296,12 @@ class Result(BaseModel):
     run: RunMeta
     findings: list[Finding] = Field(default_factory=list)
     gates: list[GateEntry]
+    #: The AI-maintained suite's results, kept separate from ``gates`` (the
+    #: repository/user authority) on purpose — see ``services.check_trust``.
+    ai_gates: list[GateEntry] = Field(default_factory=list)
+    #: Present only for a ``checks`` task: what the curator proposed and what the
+    #: falsifiability validator proved (``services.check_curator``).
+    curator: dict[str, Any] | None = None
 
 
 def validate_result(payload: Any) -> Result:
@@ -270,6 +332,7 @@ def gate_entry(result: GateResult) -> GateEntry:
     return GateEntry(
         gate=result.gate,
         passed=result.passed,
+        status=result.status,
         exit_code=int(result.exit_code),
         stdout_tail=result.stdout_tail,
         duration_ms=int(result.duration_ms),
@@ -278,8 +341,13 @@ def gate_entry(result: GateResult) -> GateEntry:
 
 # ── Work-directory isolation and 24h retention (§9.2) ────────────────
 
-def workdir_for(root: str | Path, task_id: str) -> Path:
-    """``<root>/<task_id>``, refusing anything that could escape the root."""
+def workdir_for(root: str | Path, task_id: str, attempt: int = 0) -> Path:
+    """``<root>/<task_id>``, refusing anything that could escape the root.
+
+    *attempt* > 0 appends ``-attempt<n>`` so a reclaimed-and-retried task cannot
+    delete the checkout a still-running first attempt is using (the lease is
+    advisory once it expires; see ``AgentRunner.run``'s publish guard).
+    """
     component = str(task_id).strip()
     if (
         not component
@@ -289,7 +357,22 @@ def workdir_for(root: str | Path, task_id: str) -> Path:
         or any(ord(ch) < 0x20 for ch in component)
     ):
         raise AgentRunnerError(f"非法任务 id：{task_id!r}")
+    if int(attempt) > 0:
+        component = f"{component}-attempt{int(attempt)}"
     return Path(root) / component
+
+
+def checkout_root(workdir: str | Path) -> Path:
+    """Where the repository actually is inside a work directory.
+
+    The adapter clones into ``<workdir>/repo``; a fake adapter (and some
+    deployments) put the tree directly in ``<workdir>``.  One implementation so
+    the runner and the adapter cannot disagree about which directory is the
+    checkout — that disagreement is exactly how the old gate resolution ended up
+    running the runner image's own ``backend/scripts`` against a foreign repo.
+    """
+    nested = Path(workdir) / "repo"
+    return nested if nested.is_dir() else Path(workdir)
 
 
 def mark_finished(workdir: str | Path) -> Path:
@@ -383,6 +466,49 @@ def configured_gate_timeout() -> float:
 
 def configured_max_findings() -> int:
     return _env_int(ENV_MAX_FINDINGS, DEFAULT_MAX_FINDINGS)
+
+
+# ── Result-gated PR policy (§9.3 step 6) ─────────────────────────────
+
+def normalize_pr_policy(value: Any) -> str | None:
+    """Map *value* onto a known policy name; ``None`` when unset or unknown."""
+    name = str(value or "").strip().lower()
+    if not name:
+        return None
+    if name not in PR_POLICIES:
+        logger.warning(
+            "pr_policy %r 不是 %s 之一，忽略并使用默认值 %s",
+            value, "/".join(PR_POLICIES), DEFAULT_PR_POLICY,
+        )
+        return None
+    return name
+
+
+def configured_pr_policy() -> str | None:
+    """``AGENT_PR_POLICY`` when it names a known policy, else ``None``."""
+    return normalize_pr_policy(os.environ.get(ENV_PR_POLICY))
+
+
+def configured_auto_fix() -> bool | None:
+    """``AGENT_AUTO_FIX`` as an optional boolean; ``None`` when unset."""
+    raw = os.environ.get(ENV_AUTO_FIX)
+    if raw is None or not str(raw).strip():
+        return None
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _failed_gate_names(gates: Sequence[GateEntry]) -> list[str]:
+    """The gates that did not pass — the concrete reason a PR is withheld.
+
+    ``unverified`` entries are deliberately excluded: "nothing checked this" is
+    not a red check and is handled by its own branch, because the two need
+    different messages in the PR/log.
+    """
+    return [
+        entry.gate for entry in gates
+        if not entry.passed and str(getattr(entry, "status", "") or "") != STATUS_UNVERIFIED
+    ]
+
 
 
 # ── Model credentials: resolve -> env -> subprocess, then gone ───────
@@ -539,6 +665,19 @@ class PolicyView:
     max_findings_per_run: int = DEFAULT_MAX_FINDINGS
     raw: str | None = None
     warnings: tuple[str, ...] = ()
+    #: Result-gated PR policy from the repository's policy file.  The runner
+    #: treats an unknown value as the default rather than trusting it.
+    pr_policy: str = DEFAULT_PR_POLICY
+    #: §6.4: may a *review* task escalate into a fix+PR?  Default false.
+    auto_fix: bool = False
+    #: §7.2 extension: inline verification commands from ``checks:``.  Passed to
+    #: ``services.check_suite.resolve_suite`` as the second resolution provider.
+    checks: tuple[Mapping[str, Any], ...] = ()
+    #: DESIGN-ai-checks.md §B: curator trigger mode (``off|bootstrap|auto``) and
+    #: its cooling-off window.  Carried on the view so the runner can gate a
+    #: ``checks`` task on the repository's own policy.
+    curator: str = "bootstrap"
+    curator_min_interval_seconds: int = 3600
 
 
 def _sha256_text(text: str) -> str:
@@ -621,6 +760,10 @@ class TaskRequest:
     repo: str | None = None
     issue_number: int | None = None
     finding_ids: tuple[str, ...] = ()
+    #: Retry counter from the queue row (0 on the first attempt).  It only
+    #: isolates the work directory and the published branch, so a retry never
+    #: collides with a previous attempt's checkout or ref.
+    attempt: int = 0
 
 
 @dataclass(frozen=True)
@@ -633,6 +776,10 @@ class RunOutcome:
     run: dict[str, Any] | None = None
     findings: tuple[dict[str, Any], ...] = ()
     gates: tuple[dict[str, Any], ...] = ()
+    #: The AI-maintained suite's results, separate from ``gates`` (authority).
+    ai_gates: tuple[dict[str, Any], ...] = ()
+    #: A ``checks`` task's curator report (proposal + falsifiability evidence).
+    curator: dict[str, Any] | None = None
     result_ref: str | None = None
     pr_url: str | None = None
     error: str | None = None
@@ -702,6 +849,12 @@ class DbTaskSink(TaskSink):
     offline gate.  *ingest* is the S3 hand-off (``services.findings.ingest``);
     when it is not wired, the validated document is only logged — the platform
     still owns that call, and the runner must not reimplement dedup.
+
+    ``manage_status=False`` is the mode the queue worker uses: the runner still
+    validates and hands over findings, but ``services.agent_queue.Worker`` owns
+    the ``running → done|failed`` transitions.  That keeps retry/back-off and
+    dead-lettering authoritative — a runner that wrote ``failed`` itself would
+    bypass them.
     """
 
     def __init__(
@@ -709,9 +862,11 @@ class DbTaskSink(TaskSink):
         *,
         ingest: Callable[[str, Result], Any] | None = None,
         session: Any | None = None,
+        manage_status: bool = True,
     ) -> None:
         self._ingest = ingest
         self._session = session
+        self._manage_status = bool(manage_status)
 
     def _db(self) -> Any:
         if self._session is not None:
@@ -732,6 +887,8 @@ class DbTaskSink(TaskSink):
     def mark_running(self, task_id: str) -> None:
         from models.base import utcnow
 
+        if not self._manage_status:
+            return
         session = self._db()
         task = self._task(task_id)
         if task is None:
@@ -743,6 +900,9 @@ class DbTaskSink(TaskSink):
     def mark_failed(self, task_id: str, reason: str) -> None:
         from models.base import utcnow
 
+        logger.warning("agent task %s failed: %s", task_id, reason)
+        if not self._manage_status:
+            return
         session = self._db()
         task = self._task(task_id)
         if task is None:
@@ -750,7 +910,6 @@ class DbTaskSink(TaskSink):
         task.status = "failed"
         task.finished_at = utcnow()
         session.commit()
-        logger.warning("agent task %s failed: %s", task_id, reason)
 
     def record_findings(self, task_id: str, result: Result) -> None:
         if self._ingest is not None:
@@ -771,6 +930,8 @@ class DbTaskSink(TaskSink):
     ) -> None:
         from models.base import utcnow
 
+        if not self._manage_status:
+            return
         session = self._db()
         task = self._task(task_id)
         if task is None:
@@ -803,8 +964,50 @@ class RunnerAdapter(Protocol):
     def read_context(self, workdir: Path) -> ReadContext:
         """Load ``AGENTS.md`` and ``.agent/review-policy.yml`` when present."""
 
-    def run_gates(self, workdir: Path, *, timeout: float) -> GateSummary:
-        """Run the gate suite inside the checkout."""
+    def run_gates(
+        self,
+        workdir: Path,
+        *,
+        timeout: float,
+        suite: CheckSuite | None = None,
+    ) -> GateSummary:
+        """Run the **repository (user)** suite inside the checkout.
+
+        *suite* is the **frozen** descriptor the runner resolved from the base
+        snapshot.  An adapter must run exactly that descriptor — re-resolving
+        from the (possibly already modified) working tree is how a fix would get
+        to grade its own homework.
+        """
+
+    def run_ai_gates(
+        self,
+        workdir: Path,
+        *,
+        timeout: float,
+        suite: CheckSuite | None = None,
+    ) -> GateSummary:
+        """Run the **AI-maintained** suite, reported separately from ``gates``.
+
+        Optional for compatibility: an adapter without it contributes an
+        explicit ``unverified`` AI block rather than silently pretending the AI
+        suite passed.
+        """
+
+    def curate(self, workdir: Path, *, timeout: float) -> Mapping[str, Any]:
+        """Validate a ``checks`` proposal and return the curator report.
+
+        Optional as well: a ``checks`` run without it still commits/pushes the
+        proposal, but nothing has been proven, so every proposed check stays
+        ``unvalidated`` (the safe direction).
+        """
+
+    def changed_paths(self, workdir: Path) -> Sequence[str]:
+        """Repository-relative paths this run has modified so far.
+
+        The path guard needs the fix's edit set *before* it is committed; an
+        adapter that cannot enumerate it fails the run closed rather than
+        guessing that nothing protected was touched.
+        """
 
     def review(
         self,
@@ -813,8 +1016,15 @@ class RunnerAdapter(Protocol):
         policy: PolicyView,
         commit_sha: str,
         context: ReadContext,
+        kind: str = "review",
     ) -> Sequence[Mapping[str, Any]]:
-        """Produce raw finding mappings for the policy."""
+        """Produce raw finding mappings for the policy.
+
+        *kind* is the task's role (``review`` / ``fix`` / ``checks``) and is how
+        the headless command learns whether it is expected to edit files (a
+        fixer) or must leave the tree alone (a reviewer) — see
+        ``OPENFISH_TASK_KIND`` in :mod:`services.agent_worker`.
+        """
 
     def search(
         self,
@@ -831,6 +1041,16 @@ class RunnerAdapter(Protocol):
 
     def push(self, workdir: Path, *, branch: str, commit_sha: str) -> None:
         """Push ``HEAD`` to *branch*.  The runner has already checked I4."""
+
+    def commit(
+        self,
+        workdir: Path,
+        *,
+        branch: str,
+        commit_sha: str,
+        message: str,
+    ) -> bool:
+        """Stage and commit the review's edits; false when there is nothing to push."""
 
     def open_pr(
         self,
@@ -870,6 +1090,7 @@ class SubprocessRunnerAdapter:
         search_fn: Callable[..., Mapping[str, Any]] | None = None,
         open_pr_fn: Callable[..., str] | None = None,
         git_binary: str = "git",
+        git_token: str | None = None,
     ) -> None:
         self._scripts_dir = Path(scripts_dir) if scripts_dir is not None else None
         self._gate_executor = gate_executor
@@ -878,6 +1099,10 @@ class SubprocessRunnerAdapter:
         self._open_pr_fn = open_pr_fn
         self._git_binary = git_binary
         self._model_env: dict[str, str] = {}
+        #: The narrow, revocable credential git uses for clone/push.  Passed in
+        #: explicitly (``FORGEJO_RUNNER_TOKEN``) rather than read from the
+        #: ambient environment, so it can never silently be the admin token.
+        self._git_token = (git_token or "").strip()
 
     # -- credentials ---------------------------------------------------
 
@@ -885,16 +1110,30 @@ class SubprocessRunnerAdapter:
         self._model_env = {str(k): str(v) for k, v in (env or {}).items()}
 
     def _child_env(self) -> dict[str, str]:
-        env = dict(os.environ)
-        env.update(self._model_env)
-        env.setdefault("GIT_TERMINAL_PROMPT", "0")
-        return env
+        """The environment a ``git`` subprocess runs under.
+
+        Git needs an allowlist of plumbing (PATH/HOME/locale), not the worker's
+        environment: the platform's signing key, Forgejo admin token and
+        git-identity key must never reach a child process that runs inside a
+        checkout.  The model credential is deliberately absent too — it belongs
+        to the review command (see ``agent_worker.build_review_fn``), and git has
+        no use for it.  The one authority git does receive is its own scoped
+        token, under ``OPENFISH_GIT_TOKEN``.
+        """
+        extra = {"GIT_TERMINAL_PROMPT": "0"}
+        extra.update(git_env(self._git_token))
+        return sandbox_env(extra=extra)
 
     def _run(self, argv: Sequence[str], *, cwd: Path | None = None) -> str:
         import subprocess  # local: keeps the module import graph small
 
+        parts = list(argv)
+        if self._git_token and parts and parts[0] == self._git_binary:
+            # ``-c credential.helper=…`` carries no secret; the token is in the
+            # environment (``_child_env``), never in argv.
+            parts[1:1] = credential_args()
         proc = subprocess.run(
-            list(argv),
+            parts,
             cwd=str(cwd) if cwd is not None else None,
             capture_output=True,
             text=True,
@@ -914,18 +1153,63 @@ class SubprocessRunnerAdapter:
     # -- the six steps -------------------------------------------------
 
     def prepare(self, workdir: Path) -> None:
-        Path(workdir).mkdir(parents=True, exist_ok=True)
+        root = Path(workdir)
+        root.mkdir(parents=True, exist_ok=True)
+        # A reclaimed task (or an operator retry) reuses ``/work/<task_id>``: the
+        # task id is stable per row, so the same directory comes back.  The
+        # partial checkout a dead attempt left behind would make ``git clone``
+        # refuse the target ("destination path already exists"), so clear it.
+        # Safe because the queue lease guarantees no other replica is inside this
+        # task directory; only ``repo/`` is removed, so the previous attempt's
+        # ``result.json`` and logs survive for triage.
+        checkout = root / "repo"
+        if checkout.exists():
+            shutil.rmtree(checkout, ignore_errors=True)
 
     def clone(self, workdir: Path, *, repo_url: str, commit_sha: str) -> None:
         target = Path(workdir) / "repo"
-        self._run([self._git_binary, "clone", "--quiet", "--no-checkout", repo_url, str(target)])
-        self._run([self._git_binary, "-C", str(target), "fetch", "--quiet", "--depth", "1", "origin", commit_sha])
-        self._run([self._git_binary, "-C", str(target), "checkout", "--quiet", "--detach", "FETCH_HEAD"])
+        # Blobless and tagless: the review needs the tree at one commit, not the
+        # whole history, and a targeted SHA fetch is the shallow part.
+        self._run([
+            self._git_binary, "clone", "--quiet", "--no-checkout",
+            "--filter=blob:none", "--no-tags", repo_url, str(target),
+        ])
+        if not str(commit_sha or "").strip():
+            # No target sha (a fix task whose payload names no commit): the tip
+            # of the default branch is what a human would review.  FETCH_HEAD is
+            # that tip after a shallow fetch, so no extra API round-trip.
+            self._run([
+                self._git_binary, "-C", str(target), "fetch", "--quiet", "--depth", "1", "origin",
+            ])
+            self._run([
+                self._git_binary, "-C", str(target),
+                "checkout", "--quiet", "--detach", "FETCH_HEAD",
+            ])
+            return
+        try:
+            self._run([
+                self._git_binary, "-C", str(target), "fetch", "--quiet",
+                "--depth", "1", "origin", commit_sha,
+            ])
+            self._run([
+                self._git_binary, "-C", str(target),
+                "checkout", "--quiet", "--detach", "FETCH_HEAD",
+            ])
+        except AgentRunnerError:
+            # A forge that refuses to serve an arbitrary SHA (no
+            # ``uploadpack.allowReachableSHA1InWant``) still serves the default
+            # branch tip, which is the commit a push webhook reviews.
+            self._run([
+                self._git_binary, "-C", str(target),
+                "fetch", "--quiet", "--depth", "1", "origin",
+            ])
+            self._run([
+                self._git_binary, "-C", str(target),
+                "checkout", "--quiet", "--detach", commit_sha,
+            ])
 
     def read_context(self, workdir: Path) -> ReadContext:
-        root = Path(workdir) / "repo"
-        if not root.is_dir():
-            root = Path(workdir)
+        root = checkout_root(workdir)
         policy_file = root / POLICY_RELPATH
         policy_text = _read_optional(policy_file)
         return ReadContext(
@@ -934,16 +1218,149 @@ class SubprocessRunnerAdapter:
             policy_path=str(policy_file) if policy_text is not None else None,
         )
 
-    def _checkout_scripts(self, workdir: Path) -> Path | None:
-        candidate = Path(workdir) / "repo" / "backend" / "scripts"
-        return candidate if candidate.is_dir() else None
+    def run_gates(
+        self,
+        workdir: Path,
+        *,
+        timeout: float,
+        suite: CheckSuite | None = None,
+    ) -> GateSummary:
+        """Run the frozen *suite*, or resolve one **from the checkout**.
 
-    def run_gates(self, workdir: Path, *, timeout: float) -> GateSummary:
-        scripts = self._scripts_dir or self._checkout_scripts(workdir)
-        executor = self._gate_executor
-        if executor is None and scripts is not None:
-            executor = SubprocessGateExecutor(cwd=scripts.parent.parent)
-        return run_gate_suite(scripts_dir=scripts, executor=executor, timeout=timeout)
+        The fallback is the whole point of P1.0: when no suite is handed in, the
+        resolution starts at the cloned repository (``.agent/checks/`` → policy
+        ``checks:`` → manifests → ``unverified``) and can only ever return
+        ``unverified``.  It must never reach for this module's own
+        ``REPO_ROOT/scripts`` — that is the runner *image's* openfish gates, and
+        running them against a foreign repo with ``cwd=<checkout>`` is a false
+        green that ``pr_policy=on_green`` would happily push.
+        """
+        root = checkout_root(workdir)
+        if suite is None:
+            suite = self._resolved_default_suite(root)
+        logger.info(
+            "运行校验套件：source=%s checks=%d sha=%s",
+            suite.source, len(suite.checks), suite_fingerprint(suite)[:12],
+        )
+        return run_check_suite(
+            suite,
+            root=root,
+            executor=self._gate_executor,
+            timeout=timeout,
+        )
+
+    def _resolved_default_suite(self, root: Path) -> CheckSuite:
+        """The suite for *root*, without the runner's own scripts unless asked.
+
+        An explicit ``scripts_dir`` constructor argument is an operator override
+        (openfish checking itself) and is honoured; nothing else may point the
+        resolution at :data:`services.gates.REPO_ROOT`.
+        """
+        if self._scripts_dir is not None:
+            return suite_from_scripts(self._scripts_dir, root=root)
+        return resolve_suite(root)
+
+    def run_ai_gates(
+        self,
+        workdir: Path,
+        *,
+        timeout: float,
+        suite: CheckSuite | None = None,
+    ) -> GateSummary:
+        """Run the AI-maintained suite (``.agent/checks/**``), separately.
+
+        Never falls back to the repository's own scripts: the AI suite is its
+        own namespace, and an empty one is an explicit ``unverified`` block
+        rather than a green one.
+        """
+        root = checkout_root(workdir)
+        if suite is None:
+            suite = resolve_ai_suite(root)
+        return run_check_suite(
+            suite,
+            root=root,
+            executor=self._gate_executor,
+            timeout=timeout,
+        )
+
+    def curate(self, workdir: Path, *, timeout: float) -> Mapping[str, Any]:
+        """Validate the suite a ``checks`` proposal just wrote (see check_curator).
+
+        Optional protocol method: the runner calls it only for a ``checks`` task
+        and degrades to "no report" when an adapter does not implement it.
+        """
+        from services.check_curator import curate_workspace
+
+        report = curate_workspace(
+            checkout_root(workdir),
+            executor=self._gate_executor,
+            timeout=timeout,
+        )
+        return report.as_payload()
+
+    def changed_paths(self, workdir: Path) -> Sequence[str]:
+        """``git status --porcelain`` names, relative to the checkout.
+
+        Transient build artifacts (bytecode and tool caches) are filtered out:
+        running a check leaves a ``__pycache__`` behind, and reporting that as
+        "the agent edited this" would make the path guard fire on a check that
+        simply executed.  Real source and suite edits are never transient.
+        """
+        root = checkout_root(workdir)
+        output = self._run([
+            self._git_binary, "-C", str(root), "status", "--porcelain", "--untracked-files=all",
+        ])
+        return [
+            name for name in (line[3:].strip() for line in output.splitlines())
+            if name and not _is_transient_path(name)
+        ]
+
+    def protect_suite(self, workdir: Path, *, readonly: bool) -> None:
+        """Best-effort ``chmod`` of ``.agent/checks/**`` (defence in depth).
+
+        The authoritative guard is :func:`services.check_suite.fix_guard_violations`
+        applied to :meth:`changed_paths`, which works even when the sandbox runs
+        as root; this just makes an opportunistic write fail early.
+        """
+        directory = checkout_root(workdir) / CHECK_DIR_RELPATH
+        if not directory.is_dir():
+            return
+        mode = 0o555 if readonly else 0o755
+        file_mode = 0o444 if readonly else 0o644
+        for path in sorted(directory.rglob("*"), reverse=True):
+            try:
+                path.chmod(mode if path.is_dir() else file_mode)
+            except OSError as exc:
+                logger.debug("cannot chmod %s: %s", path, exc)
+        try:
+            directory.chmod(mode)
+        except OSError as exc:
+            logger.debug("cannot chmod %s: %s", directory, exc)
+
+    def protect_paths(
+        self,
+        workdir: Path,
+        paths: Sequence[str],
+        *,
+        readonly: bool,
+    ) -> None:
+        """Best-effort ``chmod`` of specific repo-relative files.
+
+        The authoritative guard is :func:`services.check_suite.fix_guard_violations`
+        with the resolved suite; this locks the suite's *base-revision* entry
+        scripts and declaration files for the duration of a fix, so an
+        opportunistic write fails early instead of relying on the post-hoc guard.
+        """
+        root = checkout_root(workdir)
+        file_mode = 0o444 if readonly else 0o644
+        for relative in paths:
+            path = root / relative
+            if not path.is_file():
+                continue
+            try:
+                path.chmod(file_mode)
+            except OSError as exc:
+                logger.debug("cannot chmod %s: %s", path, exc)
 
     def review(
         self,
@@ -952,11 +1369,12 @@ class SubprocessRunnerAdapter:
         policy: PolicyView,
         commit_sha: str,
         context: ReadContext,
+        kind: str = "review",
     ) -> Sequence[Mapping[str, Any]]:
         if self._review_fn is None:
             raise AgentRunnerError("未配置 review 执行器（review_fn）")
         return self._review_fn(
-            workdir, policy=policy, commit_sha=commit_sha, context=context
+            workdir, policy=policy, commit_sha=commit_sha, context=context, kind=kind
         )
 
     def search(
@@ -978,12 +1396,82 @@ class SubprocessRunnerAdapter:
         write_json(path, dict(payload))
         return str(path)
 
+    def commit(
+        self,
+        workdir: Path,
+        *,
+        branch: str,
+        commit_sha: str,
+        message: str,
+    ) -> bool:
+        """Stage the review's edits, commit them, and refuse an empty branch.
+
+        Without this step ``push`` would push the detached base checkout and open
+        a zero-diff pull request.  A reviewer that commits on its own is still
+        accepted: what matters is that ``HEAD`` moved away from the commit the
+        task started on.  Comparing ``HEAD`` before and after also covers a task
+        with **no** target sha (clone followed the default branch tip), where
+        comparing against ``commit_sha`` would never detect an empty diff.
+        """
+        root = checkout_root(workdir)
+        before = self._run([self._git_binary, "-C", str(root), "rev-parse", "HEAD"]).strip()
+        status = self._run([self._git_binary, "-C", str(root), "status", "--porcelain"])
+        if status.strip():
+            self._run([self._git_binary, "-C", str(root), "add", "-A"])
+            # ``--no-verify`` plus an empty ``core.hooksPath``: the checkout was
+            # produced by a command that could leave a ``.git/hooks/pre-commit``
+            # behind (``git status`` never reports ``.git/**``), and a hook would
+            # run *after* the path guard and could rewrite what gets committed.
+            hooks_dir = root / ".git" / "openfish-no-hooks"
+            hooks_dir.mkdir(parents=True, exist_ok=True)
+            self._run([
+                self._git_binary, "-C", str(root),
+                "-c", f"core.hooksPath={hooks_dir}",
+                "-c", "user.name=openfish-agent",
+                "-c", "user.email=agent@openfish.invalid",
+                "commit", "--quiet", "--no-verify", "-m", message,
+            ])
+        head = self._run([self._git_binary, "-C", str(root), "rev-parse", "HEAD"]).strip()
+        if not head or head == before:
+            raise AgentRunnerError(
+                f"fix 模式没有产生可推送的提交（HEAD 仍是 {before[:12] or '起始提交'}，"
+                f"分支 {branch}）"
+            )
+        return True
+
+    def _remote_head(self, root: Path, branch: str) -> str:
+        """The remote SHA at ``refs/heads/<branch>``, or ``""`` when absent."""
+        output = self._run([
+            self._git_binary, "-C", str(root),
+            "ls-remote", "--heads", "origin", f"refs/heads/{branch}",
+        ])
+        parts = output.split()
+        return parts[0] if parts else ""
+
     def push(self, workdir: Path, *, branch: str, commit_sha: str) -> None:
         assert_pushable(branch)
-        root = Path(workdir) / "repo"
-        if not root.is_dir():
-            root = Path(workdir)
-        self._run([self._git_binary, "-C", str(root), "push", "--quiet", "origin", f"HEAD:{branch}"])
+        root = checkout_root(workdir)
+        head = self._run([self._git_binary, "-C", str(root), "rev-parse", "HEAD"]).strip()
+        remote = self._remote_head(root, branch)
+        if remote and head and remote == head:
+            # The branch is already exactly what this run produced: a retry (or a
+            # second replica) reached the publish step twice.  Pushing again would
+            # be a no-op and a different SHA would be rejected as non-fast-forward,
+            # so reuse it instead of turning a repeat into a hard failure.
+            logger.info("分支 %s 已存在且指向本次提交 %s，跳过重复 push", branch, head[:12])
+            return
+        if remote:
+            raise AgentRunnerError(
+                f"远端分支 {branch} 已存在（{remote[:12]}）且不是本次提交 {head[:12]}；"
+                "拒绝覆盖，请人工确认上一次尝试留下的分支/PR"
+            )
+        # Fully-qualified destination: the checkout is detached, and from a
+        # detached HEAD git refuses to DWIM ``HEAD:agent/<name>`` into
+        # ``refs/heads/agent/<name>`` ("您提供的目标不是一个完整的引用名称").
+        self._run([
+            self._git_binary, "-C", str(root),
+            "push", "--quiet", "origin", f"HEAD:refs/heads/{branch}",
+        ])
 
     def open_pr(
         self,
@@ -1025,9 +1513,16 @@ class AgentRunner:
         retention_seconds: int | None = None,
         max_findings: int | None = None,
         policy_parser: Callable[[str | None], PolicyView] | None = None,
+        pr_policy: str | None = None,
+        auto_fix: bool | None = None,
+        publish_guard: Callable[[], None] | None = None,
     ) -> None:
         self._adapter: RunnerAdapter = adapter or SubprocessRunnerAdapter()
         self._sink: TaskSink = sink or NullSink()
+        #: Called immediately before a push and again before opening a PR.  The
+        #: worker injects a lease-liveness check here; without it a task whose
+        #: lease was reclaimed while it ran would still publish.
+        self._publish_guard = publish_guard
         self._work_root = Path(work_root) if work_root is not None else configured_work_root()
         self._gate_timeout = (
             float(gate_timeout) if gate_timeout is not None else configured_gate_timeout()
@@ -1041,6 +1536,18 @@ class AgentRunner:
             int(max_findings) if max_findings is not None else configured_max_findings()
         )
         self._policy_parser = policy_parser
+        # Precedence for both knobs: explicit argument > ``AGENT_*`` env >
+        # ``.agent/review-policy.yml`` > built-in default.  The policy file is
+        # per repository and therefore only known at ``run`` time, so the first
+        # two levels are resolved here and the rest in ``run``.
+        self._pr_policy_override = (
+            normalize_pr_policy(pr_policy)
+            if pr_policy is not None
+            else configured_pr_policy()
+        )
+        self._auto_fix_override = (
+            bool(auto_fix) if auto_fix is not None else configured_auto_fix()
+        )
         self._model_env: dict[str, str] = self._resolve_model_env(
             models_file, model_route=model_route, health_path=health_path, fallback=model_env
         )
@@ -1081,7 +1588,10 @@ class AgentRunner:
     def run(self, task: TaskRequest) -> RunOutcome:
         """Execute one task.  Never raises for a task-level failure."""
         steps: list[str] = []
-        workdir = workdir_for(self._work_root, task.task_id)
+        # A retry gets its own directory: if a reclaimed lease let a second
+        # replica start the same task, ``prepare()`` must not delete the first
+        # attempt's checkout from under it.
+        workdir = workdir_for(self._work_root, task.task_id, task.attempt)
         redaction = SecretRedactingFilter(self._secrets)
         logger.addFilter(redaction)
         adapter = self._adapter
@@ -1089,6 +1599,9 @@ class AgentRunner:
         self._log_model_env()
         started_at = utc_now_iso()
         pr_url: str | None = None
+        result_ref: str | None = None
+        frozen: FrozenSuite | None = None
+        suite_state = STATUS_UNVERIFIED
         try:
             self._sink.mark_running(task.task_id)
             adapter.prepare(workdir)
@@ -1100,16 +1613,65 @@ class AgentRunner:
             context = adapter.read_context(workdir)
             policy = load_policy(context.policy_text, parser=self._policy_parser)
 
+            # ── Freeze BOTH suites from the BASE snapshot (P1.3) ────────
+            # Resolution happens here, before the review step gets a chance to
+            # edit anything, and each descriptor is reused for the post-fix
+            # re-run.  The repo tree is the source of truth; ``FrozenSuite``
+            # pins which revision it was read from.  The two suites are resolved
+            # independently and never merged: ``pairs.user`` is authority,
+            # ``pairs.ai`` is advisory (see services.check_trust).
+            checkout = checkout_root(workdir)
+            pairs = resolve_suites(checkout, policy_checks_field=policy.checks)
+            frozen_user = freeze_suite(pairs.user, base_sha=task.commit_sha)
+            frozen_ai = freeze_suite(pairs.ai, base_sha=task.commit_sha)
+            frozen = frozen_user
+            logger.info(
+                "agent 任务 %s 校验套件：user=%s/%d checks hash=%s；ai=%s/%d checks hash=%s",
+                task.task_id, frozen_user.source, len(frozen_user.suite.checks),
+                frozen_user.fingerprint[:12], frozen_ai.source,
+                len(frozen_ai.suite.checks), frozen_ai.fingerprint[:12],
+            )
+            if task.kind == "fix":
+                # `readonly chmod` is defence in depth; the authoritative guard
+                # is the changed-path check before commit.  Besides the AI suite
+                # directory, lock the *base-revision* entry scripts and
+                # declaration files the resolved user suite runs: a fix that
+                # rewrites its own judge fails at the write, not only at commit.
+                _protect_suite(adapter, workdir, readonly=True)
+                _protect_paths(
+                    adapter, workdir,
+                    suite_protected_paths(frozen_user.suite, root=checkout),
+                    readonly=True,
+                )
+
             steps.append("gates")
-            summary = adapter.run_gates(workdir, timeout=self._gate_timeout)
+            summary = adapter.run_gates(
+                workdir, timeout=self._gate_timeout, suite=frozen_user.suite
+            )
             gates = [gate_entry(item) for item in _gate_items(summary)]
+            suite_state = _summary_state(summary)
+            ai_summary = _run_ai_gates(adapter, workdir, self._gate_timeout, frozen_ai.suite)
+            ai_gates = [gate_entry(item) for item in _gate_items(ai_summary)]
+            ai_suite_state = _summary_state(ai_summary)
 
             steps.append("review")
             raw = list(
                 adapter.review(
-                    workdir, policy=policy, commit_sha=task.commit_sha, context=context
+                    workdir, policy=policy, commit_sha=task.commit_sha,
+                    context=context, kind=task.kind,
                 )
             )[: self._effective_max_findings(policy)]
+
+            # A curator proposal is proven (or not) by the *validator*, never by
+            # the model's claim: this runs before the commit and rewrites the
+            # manifest's ``validated`` flags from the falsifiability evidence.
+            curator_report = _curate(adapter, workdir, self._gate_timeout) if task.kind == "checks" else None
+            if curator_report is not None:
+                logger.info(
+                    "agent 任务 %s curator 提案：%s checks，%s validated，gating=%s",
+                    task.task_id, curator_report.get("total"),
+                    curator_report.get("validated"), curator_report.get("gating"),
+                )
 
             steps.append("search")
             enriched = [
@@ -1134,9 +1696,17 @@ class AgentRunner:
                         "repo": task.repo,
                         "started_at": started_at,
                         "finished_at": utc_now_iso(),
+                        "suite_hash": frozen_user.fingerprint,
+                        "suite_source": frozen_user.source,
+                        "suite_state": suite_state,
+                        "ai_suite_hash": frozen_ai.fingerprint,
+                        "ai_suite_source": frozen_ai.source,
+                        "ai_suite_state": ai_suite_state,
                     },
                     "findings": [dict(item) for item in enriched],
                     "gates": [item.model_dump() for item in gates],
+                    "ai_gates": [item.model_dump() for item in ai_gates],
+                    "curator": curator_report,
                 },
                 self._secrets,
             )
@@ -1159,22 +1729,169 @@ class AgentRunner:
                 )
 
             document = result.model_dump()
-            if task.kind == "fix":
+            pr_policy = self._effective_pr_policy(policy)
+            auto_fix = self._effective_auto_fix(policy)
+            failed_gates = _failed_gate_names(gates)
+            # §6.4: a push-triggered *review* may only become a fix+PR when the
+            # repository explicitly opted in (`auto_fix: true`) **and** there is
+            # something concrete to fix (a failed gate, which is in the
+            # "allowed to auto-fix" column).  Default false, like per-rule
+            # autofix.
+            escalate = task.kind == "review" and auto_fix and bool(failed_gates)
+            writes_source = task.kind in ("fix", "checks") or escalate
+            # Trust ladder (governance): the repository suite is authority; the
+            # AI suite is advisory.  L3 is only reachable when a policy turns it
+            # on (default off) — and no rung ever authorises a merge.
+            assurance = assess_assurance(user_summary=summary, ai_summary=ai_summary)
+            body_user_summary = summary
+            body_ai_summary = ai_summary
+            document["run"]["assurance_level"] = assurance.level
+            document["run"]["assurance_label"] = assurance.label
+            result = validate_result(document)
+            if writes_source:
                 # I4: refuse anything but agent/* before any push is attempted.
                 branch = assert_pushable(
-                    task.branch or f"{AGENT_BRANCH_PREFIX}fix-{task.task_id}"
+                    task.branch
+                    or f"{AGENT_BRANCH_PREFIX}{'checks' if task.kind == 'checks' else 'fix'}"
+                       f"-{task.task_id}"
                 )
-                adapter.push(workdir, branch=branch, commit_sha=task.commit_sha)
-                pr_url = adapter.open_pr(
-                    workdir,
-                    branch=branch,
-                    base=task.base_branch,
-                    title=_pr_title(result),
-                    body=self._pr_body(result),
+                # ── Path guard: the hard invariant, in code ──────────────
+                # A run that produces a fix may not have touched the frozen
+                # suite that judges it; a curator may not have touched source.
+                # This runs *before* commit, so a violation fails the task
+                # loudly and never reaches a branch or a PR.  The resolved user
+                # suite is passed in so its own entrypoints (and the files that
+                # declare how it runs) are protected too — freezing the
+                # descriptor without freezing the scripts it executes was the
+                # hole that let a fix rewrite its own judge.
+                _guard_task_paths(
+                    adapter, task, workdir, escalate=escalate, suite=frozen_user.suite,
                 )
+                if pr_policy == PR_POLICY_NEVER:
+                    logger.info(
+                        "agent 任务 %s：pr_policy=never，只产出 finding，不 commit/push/开 PR",
+                        task.task_id,
+                    )
+                else:
+                    # §9.3 step 6: the review's edits become a commit; an empty
+                    # one is a failed task, never an empty pull request.
+                    adapter.commit(
+                        workdir,
+                        branch=branch,
+                        commit_sha=task.commit_sha,
+                        message=_commit_message(result),
+                    )
+                    if task.kind == "checks":
+                        # A curator proposal is *not* a fix: it is the check suite
+                        # itself, and its checks are unvalidated by definition
+                        # until the validator runs on them.  Gating it on the
+                        # frozen base suite's on_green would make every first
+                        # proposal impossible — so it opens a labelled PR for
+                        # human review and can never merge.
+                        logger.info(
+                            "agent 任务 %s：curator 提案 PR 不按 on_green 门控"
+                            "（新 check 在 validated 之前本来就不能门控）；仍需人工 review",
+                            task.task_id,
+                        )
+                    if pr_policy == PR_POLICY_ON_GREEN and task.kind != "checks":
+                        # Re-run the **frozen** suites after the fix: step 3's
+                        # summary describes the base commit, and re-resolving
+                        # from the modified tree would let the fix grade its own
+                        # homework.  Pasting a green base summary into the PR
+                        # would claim a state the fix has not earned.
+                        fresh = adapter.run_gates(
+                            workdir, timeout=self._gate_timeout, suite=frozen_user.suite
+                        )
+                        gates = [gate_entry(item) for item in _gate_items(fresh)]
+                        failed_gates = _failed_gate_names(gates)
+                        fresh_ai = _run_ai_gates(
+                            adapter, workdir, self._gate_timeout, frozen_ai.suite
+                        )
+                        ai_gates = [gate_entry(item) for item in _gate_items(fresh_ai)]
+                        assurance = assess_assurance(
+                            user_summary=fresh, ai_summary=fresh_ai
+                        )
+                        body_user_summary = fresh
+                        body_ai_summary = fresh_ai
+                        document["gates"] = [item.model_dump() for item in gates]
+                        document["ai_gates"] = [item.model_dump() for item in ai_gates]
+                        document["run"]["suite_state"] = _summary_state(fresh)
+                        document["run"]["ai_suite_state"] = _summary_state(fresh_ai)
+                        document["run"]["assurance_level"] = assurance.level
+                        document["run"]["assurance_label"] = assurance.label
+                        result = validate_result(document)
+                        if not assurance.may_open_pr:
+                            # L0 (nothing verified) and a failed repository suite
+                            # both land here; the AI suite may never override a
+                            # repository-suite failure.
+                            reason = (
+                                f"pr_policy=on_green 但保证等级 {assurance.level} "
+                                f"不允许自动 push/开 PR（{assurance.reason}）"
+                                + (
+                                    "；失败 gate：" + ", ".join(failed_gates)
+                                    if failed_gates else ""
+                                )
+                                + (
+                                    "；校验 unverified（没有可门控的检查）"
+                                    if assurance.level == "L0" else ""
+                                )
+                                + "；已 commit 但按策略不 push、不开 PR"
+                            )
+                            logger.error("agent 任务 %s：%s", task.task_id, reason)
+                            self._sink.mark_failed(task.task_id, reason)
+                            return RunOutcome(
+                                task_id=task.task_id,
+                                status="failed",
+                                steps=tuple(steps),
+                                run=document["run"],
+                                findings=tuple(document["findings"]),
+                                gates=tuple(document["gates"]),
+                                error=reason,
+                            )
+                    # Durable record **before** the first external side effect:
+                    # a push/PR is not idempotent, so a crash after it would
+                    # leave a published change the platform never recorded and a
+                    # retry unable to reproduce.  Findings are the review's real
+                    # output and must survive even if publishing fails.
+                    result_ref = adapter.emit(workdir, payload=document)
+                    self._sink.record_findings(task.task_id, result)
+                    self._publish(branch=branch)
+                    adapter.push(workdir, branch=branch, commit_sha=task.commit_sha)
+                    self._publish(branch=branch)
+                    if task.kind == "checks" and curator_report is not None:
+                        # A curator proposal is labelled, so a reviewer (or an
+                        # audit) can find it without reading the diff.
+                        pr_title = proposal_title(
+                            count=int(curator_report.get("total") or 0),
+                            validated=int(curator_report.get("validated") or 0),
+                        )
+                        pr_body = proposal_body(
+                            CuratorReport.from_payload(curator_report),
+                            base_sha=task.commit_sha,
+                        )
+                    else:
+                        pr_title = _pr_title(result)
+                        pr_body = self._pr_body(
+                            result,
+                            assurance=assurance,
+                            user_summary=body_user_summary,
+                            ai_summary=body_ai_summary,
+                            user_suite=frozen_user.suite,
+                            ai_suite=frozen_ai.suite,
+                        )
+                    pr_url = adapter.open_pr(
+                        workdir,
+                        branch=branch,
+                        base=task.base_branch,
+                        title=pr_title,
+                        body=pr_body,
+                    )
 
-            result_ref = adapter.emit(workdir, payload=document)
-            self._sink.record_findings(task.task_id, result)
+            if result_ref is None:
+                # No publish path ran (pr_policy=never, or a review that did not
+                # escalate): still record the review before marking the task done.
+                result_ref = adapter.emit(workdir, payload=document)
+                self._sink.record_findings(task.task_id, result)
             self._sink.mark_done(task.task_id, result_ref=result_ref, pr_url=pr_url)
             return RunOutcome(
                 task_id=task.task_id,
@@ -1183,6 +1900,8 @@ class AgentRunner:
                 run=document["run"],
                 findings=tuple(document["findings"]),
                 gates=tuple(document["gates"]),
+                ai_gates=tuple(document.get("ai_gates") or ()),
+                curator=document.get("curator"),
                 result_ref=result_ref,
                 pr_url=pr_url,
             )
@@ -1207,15 +1926,65 @@ class AgentRunner:
             )
         finally:
             adapter.set_model_env({})
+            if frozen is not None and task.kind in ("fix", "checks"):
+                _protect_suite(adapter, workdir, readonly=False)
+                _protect_paths(
+                    adapter, workdir,
+                    suite_protected_paths(frozen.suite, root=checkout_root(workdir)),
+                    readonly=False,
+                )
             try:
                 mark_finished(workdir)
             except OSError as exc:
                 logger.warning("cannot mark work directory %s finished: %s", workdir, exc)
             logger.removeFilter(redaction)
 
+    def _publish(self, *, branch: str) -> None:
+        """Refuse to publish when the injected guard says this run lost its lease.
+
+        The queue's lease is the only mutual exclusion, and it is advisory: the
+        heartbeat only logs when it is lost.  Two replicas can therefore be
+        inside the same task.  The worker injects a DB liveness check here, so
+        the stale replica fails at the last moment instead of pushing a branch or
+        opening a PR that belongs to the current owner.
+        """
+        if self._publish_guard is None:
+            return
+        try:
+            self._publish_guard()
+        except AgentRunnerError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a broken guard must fail closed
+            raise AgentRunnerError(
+                f"发布前无法确认任务租约仍然有效（{type(exc).__name__}: {exc}）；"
+                f"拒绝 push {branch} / 开 PR"
+            ) from exc
+
     def _effective_max_findings(self, policy: PolicyView) -> int:
         budget = policy.max_findings_per_run or self._max_findings
         return max(1, min(int(budget), self._max_findings))
+
+    def _effective_pr_policy(self, policy: PolicyView) -> str:
+        """Explicit arg > ``AGENT_PR_POLICY`` > policy file > ``on_green``."""
+        if self._pr_policy_override is not None:
+            return self._pr_policy_override
+        return normalize_pr_policy(policy.pr_policy) or DEFAULT_PR_POLICY
+
+    def _effective_auto_fix(self, policy: PolicyView) -> bool:
+        if self._auto_fix_override is not None:
+            return bool(self._auto_fix_override)
+        return bool(policy.auto_fix)
+
+    @property
+    def pr_policy(self) -> str | None:
+        """The constructor/env override, or ``None`` when the policy file decides."""
+        return self._pr_policy_override
+
+    @property
+    def auto_fix(self) -> bool | None:
+        """The constructor/env override, or ``None`` when the policy file decides."""
+        return self._auto_fix_override
+
 
     def _log_model_env(self) -> None:
         if not self._model_env:
@@ -1223,7 +1992,16 @@ class AgentRunner:
             return
         logger.info("agent 运行时模型配置（已掩码）：%s", mask_env(self._model_env))
 
-    def _pr_body(self, result: Result) -> str:
+    def _pr_body(
+        self,
+        result: Result,
+        *,
+        assurance: Assurance | None = None,
+        user_summary: GateSummary | None = None,
+        ai_summary: GateSummary | None = None,
+        user_suite: CheckSuite | None = None,
+        ai_suite: CheckSuite | None = None,
+    ) -> str:
         lines = ["## 智能体发现", ""]
         if not result.findings:
             lines.append("本次 review 未产出 finding。")
@@ -1232,7 +2010,19 @@ class AgentRunner:
                 f"- [{finding.level}/{finding.severity}] "
                 f"`{finding.file_path}` — {finding.title}（`{finding.rule_id}`）"
             )
-        lines.extend(["", render_summary([g.model_dump() for g in result.gates])])
+        lines.append("")
+        if assurance is not None:
+            # Two distinct, labelled blocks — never one anonymous green list —
+            # plus the explicit "a human must merge this" notice.
+            lines.append(render_two_suites(
+                user_summary,
+                ai_summary,
+                assurance,
+                user_suite=user_suite,
+                ai_suite=ai_suite,
+            ))
+        else:
+            lines.extend(["", render_summary([g.model_dump() for g in result.gates])])
         return "\n".join(lines)
 
     def sweep(self, now: float | int | None = None) -> int:
@@ -1252,11 +2042,170 @@ def _gate_items(summary: Any) -> list[GateResult]:
     return items
 
 
+def _summary_state(summary: Any) -> str:
+    """The suite-level state of a summary; a duck-typed one defaults to passed.
+
+    A fake adapter in the offline gate returns a :class:`GateSummary` with an
+    explicit state; the fallback keeps an older duck-typed object working
+    without silently *improving* its verdict (``passed`` is the value such an
+    object already implied).
+    """
+    state = str(getattr(summary, "state", "") or "")
+    return state or "passed"
+
+
+def _run_ai_gates(
+    adapter: RunnerAdapter,
+    workdir: Path,
+    timeout: float,
+    suite: CheckSuite,
+) -> GateSummary:
+    """Run the AI suite when the adapter supports it; else an honest unverified.
+
+    An adapter that predates the two-suite model must not make the AI block look
+    green by omission — so the fallback is an explicit ``unverified`` summary.
+    """
+    method = getattr(adapter, "run_ai_gates", None)
+    if method is None:
+        return unverified_summary(
+            "adapter 未实现 run_ai_gates：AI 校验块按 unverified 处理（不参与门控）",
+            source=SOURCE_AGENT_CHECKS,
+        )
+    return method(workdir, timeout=timeout, suite=suite)
+
+
+def _curate(
+    adapter: RunnerAdapter,
+    workdir: Path,
+    timeout: float,
+) -> Mapping[str, Any] | None:
+    """Validate a curator proposal when the adapter can; else no report.
+
+    No report means every proposed check stays ``unvalidated`` in the tree — the
+    safe direction — so a missing hook can never promote a check to gating.
+    """
+    method = getattr(adapter, "curate", None)
+    if method is None:
+        logger.info("adapter 未实现 curate：提案不会被证伪验证，全部保持 unvalidated")
+        return None
+    report = method(workdir, timeout=timeout)
+    return dict(report) if report is not None else None
+
+
+#: Path fragments that a check's own execution leaves behind.  They are not
+#: edits the agent made and must not trip the path guard.
+_TRANSIENT_MARKERS: tuple[str, ...] = (
+    "__pycache__/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
+)
+
+
+def _is_transient_path(path: str) -> bool:
+    normalized = str(path or "").replace("\\", "/")
+    if normalized.endswith((".pyc", ".pyo")):
+        return True
+    return any(marker in normalized for marker in _TRANSIENT_MARKERS)
+
+
+def _protect_suite(adapter: RunnerAdapter, workdir: Path, *, readonly: bool) -> None:
+    """Best-effort OS-level protection; the path guard is authoritative.
+
+    Optional on purpose: an adapter that cannot chmod still gets the real
+    enforcement, and a failure here must never fail an otherwise valid task.
+    """
+    protect = getattr(adapter, "protect_suite", None)
+    if protect is None:
+        return
+    try:
+        protect(workdir, readonly=readonly)
+    except OSError as exc:
+        logger.debug("cannot change suite permissions under %s: %s", workdir, exc)
+
+
+def _protect_paths(
+    adapter: RunnerAdapter,
+    workdir: Path,
+    paths: Sequence[str],
+    *,
+    readonly: bool,
+) -> None:
+    """Best-effort lock/unlock of specific repo-relative files (defence in depth).
+
+    Complements :func:`_protect_suite`: the AI suite directory is protected
+    there, the *user* suite's base-revision entry scripts and declaration files
+    are protected here.
+    """
+    locked = tuple(paths)
+    protect = getattr(adapter, "protect_paths", None)
+    if protect is None or not locked:
+        return
+    try:
+        protect(workdir, locked, readonly=readonly)
+    except OSError as exc:
+        logger.debug("cannot change file permissions under %s: %s", workdir, exc)
+
+
+def _adapter_changed_paths(adapter: RunnerAdapter, workdir: Path) -> list[str]:
+    """The run's edits, or a loud failure when the adapter cannot report them.
+
+    Fail closed: an adapter that cannot enumerate what it changed cannot prove
+    it left the frozen suite alone, and "cannot prove" is not "may push".
+    """
+    method = getattr(adapter, "changed_paths", None)
+    if method is None:
+        raise AgentRunnerError(
+            "adapter 没有实现 changed_paths()，无法证明本次 run 没有改动被冻结的校验套件；"
+            "按失败处理（硬不变量：同一 run 不得既修复又削弱判它的检查）"
+        )
+    return [str(path) for path in method(workdir)]
+
+
+def _guard_task_paths(
+    adapter: RunnerAdapter,
+    task: TaskRequest,
+    workdir: Path,
+    *,
+    escalate: bool = False,
+    suite: CheckSuite | None = None,
+) -> None:
+    """Refuse a run whose edits cross its role boundary (the hard invariant).
+
+    * a ``fix`` (or an escalated review→fix) may not write ``.agent/checks/**``,
+      the resolved user suite's entrypoints, or the files that declare it;
+    * a ``checks`` curator may write only ``.agent/checks/**`` (plus test files).
+    """
+    changed = _adapter_changed_paths(adapter, workdir)
+    if task.kind == "checks":
+        violations = curator_guard_violations(changed)
+        if violations:
+            raise AgentRunnerError(
+                "checks（curator）任务写出了 .agent/checks/** 与测试文件之外的内容（"
+                + ", ".join(violations)
+                + "）：curator 只改校验套件，改源码是 fix 任务的职责"
+            )
+        return
+    if task.kind == "fix" or escalate:
+        violations = fix_guard_violations(changed, suite=suite)
+        if violations:
+            raise AgentRunnerError(
+                "fix 任务改动了被冻结的校验套件或它的执行入口（"
+                + ", ".join(violations)
+                + "）：硬不变量禁止同一 run 既产出修复又削弱判它的检查"
+            )
+
+
 def _pr_title(result: Result) -> str:
     count = len(result.findings)
     if count == 1:
         return f"fix: {result.findings[0].title}"
     return f"fix: 智能体修复 {count} 项发现"
+
+
+def _commit_message(result: Result) -> str:
+    """One-line subject plus the rule id, per the commit contract in AGENTS.md."""
+    if len(result.findings) == 1:
+        finding = result.findings[0]
+        return f"fix: {finding.title}\n\nrule: {finding.rule_id}"
+    return f"fix: 智能体修复 {len(result.findings)} 项发现"
 
 
 def run_task(
@@ -1275,12 +2224,19 @@ __all__ = [
     "AGENTS_FILENAME",
     "BUILTIN_POLICY_TEXT",
     "DEFAULT_MAX_FINDINGS",
+    "DEFAULT_PR_POLICY",
     "DEFAULT_RETENTION_SECONDS",
     "DEFAULT_WORK_ROOT",
+    "ENV_AUTO_FIX",
+    "ENV_PR_POLICY",
     "FINISHED_MARKER",
     "MODEL_ENV_PREFIX",
     "POLICY_RELPATH",
     "PROTECTED_BRANCHES",
+    "PR_POLICIES",
+    "PR_POLICY_ALWAYS",
+    "PR_POLICY_NEVER",
+    "PR_POLICY_ON_GREEN",
     "RESULT_FILENAME",
     "STEPS",
     "UNTRUSTED_TAG",
@@ -1307,8 +2263,11 @@ __all__ = [
     "assert_pushable",
     "build_model_env",
     "builtin_default_policy",
+    "checkout_root",
+    "configured_auto_fix",
     "configured_gate_timeout",
     "configured_max_findings",
+    "configured_pr_policy",
     "configured_retention_seconds",
     "configured_work_root",
     "gate_entry",
@@ -1316,6 +2275,7 @@ __all__ = [
     "mark_finished",
     "mask_env",
     "mask_secrets",
+    "normalize_pr_policy",
     "remove_workdirs",
     "resolve_model_env",
     "run_task",

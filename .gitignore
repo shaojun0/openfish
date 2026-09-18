@@ -34,8 +34,10 @@ docker/.env
 # platform admin token; only the template is tracked.
 docker/forgejo/forgejo.env
 !docker/forgejo/forgejo.env.example
-# Forgejo's bare repositories, SQLite database and logs; agent work directories.
-docker/forgejo/
+# Forgejo's runtime data (bare repositories, SQLite database, logs).  Ignore the
+# *contents*, not the directory: git cannot re-include a file whose parent
+# directory is excluded, which had silently dropped README.md and the template.
+docker/forgejo/*
 !docker/forgejo/README.md
 !docker/forgejo/forgejo.env.example
 docker/agent-work/

@@ -358,8 +358,10 @@ def check_migration() -> None:
     check("ix_repos_slug" in indexes, "its indexes are created too")
 
     second = ensure_schema(engine)
-    check(second == {"created_tables": [], "added_columns": [], "added_indexes": []},
-          f"a second ensure_schema is a no-op (got {second})")
+    check(second == {
+        "created_tables": [], "added_columns": [], "added_indexes": [],
+        "updated_constraints": [],
+    }, f"a second ensure_schema is a no-op (got {second})")
     engine.dispose()
 
     # And on a database this module created itself, twice more, for good measure.

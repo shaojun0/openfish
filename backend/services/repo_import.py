@@ -43,6 +43,7 @@ secret are never written to a file, a log line or a response body, matching the
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -57,6 +58,9 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib.parse import quote, urlparse
 
 import requests
+
+from services.agent_runner import POLICY_RELPATH, mask_secrets
+from services.git_auth import GIT_CREDENTIAL_HELPER, GIT_TOKEN_ENV, git_env
 
 logger = logging.getLogger("cpypiserver.repo_import")
 
@@ -610,6 +614,37 @@ class ForgejoClient:
         except ValueError as exc:
             raise ForgejoError(f"Forgejo {method} {path} 返回非 JSON：{exc}") from exc
 
+    def read_file(self, forgejo_repo: str, path: str) -> str | None:
+        """The text of one file at the repository's default branch.
+
+        ``None`` means "not there (or unreadable)", which is a normal answer: a
+        repository without ``.agent/review-policy.yml`` must not be an error.
+        Used to cache the per-repo review policy on the ``repos`` row, because
+        the API host has no checkout to read it from.
+        """
+        slug = str(forgejo_repo or "").strip().strip("/")
+        if not slug or "/" not in slug or not path:
+            return None
+        # Encode each segment, not the slashes: Forgejo's contents API routes on
+        # the path (`…/contents/.agent/review-policy.yml`), so `%2F` for the
+        # separator would 404.
+        encoded = "/".join(quote(segment, safe="") for segment in path.split("/") if segment)
+        try:
+            document = self._json("GET", f"repos/{slug}/contents/{encoded}")
+        except ForgejoError:
+            return None
+        if not isinstance(document, Mapping):
+            return None
+        content = document.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return None
+        try:
+            # The contents API wraps base64 at 60 columns; b64decode tolerates it.
+            return base64.b64decode(content).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            logger.warning("Forgejo contents API returned undecodable %s", path)
+            return None
+
     # -- migration ----------------------------------------------------
 
     def trigger_migration(
@@ -875,6 +910,52 @@ class ForgejoClient:
             "detail": str(data.get("full_name") or data.get("path_with_namespace") or ""),
         }
 
+    # -- pull requests ------------------------------------------------
+
+    def create_pull_request(
+        self,
+        forgejo_repo: str,
+        *,
+        head: str,
+        base: str,
+        title: str,
+        body: str = "",
+    ) -> str:
+        """Open a pull request and return its web URL.
+
+        This is the **single** seam the agent runtime opens PRs through, so the
+        credential lives only in :meth:`_headers` (the admin token, from the
+        environment via :class:`ImportConfig`): nothing about the token is passed
+        in, returned, or logged here, which is what lets the git-credential
+        refactor replace how credentials are obtained without touching callers.
+
+        ``head`` is the source branch (``agent/*`` by the runtime's I4 guard),
+        ``base`` the target branch.  Forgejo answers ``201`` with the PR object;
+        a duplicate or a protected branch comes back as a typed
+        :class:`ForgejoError`, never a bare ``requests`` exception.
+        """
+        slug = str(forgejo_repo or "").strip().strip("/")
+        if not slug or "/" not in slug:
+            raise ForgejoError(
+                f"forgejo_repo 必须是 <owner>/<name>，得到 {forgejo_repo!r}"
+            )
+        document = self._json(
+            "POST",
+            f"repos/{slug}/pulls",
+            json_body={
+                "head": str(head),
+                "base": str(base),
+                "title": str(title),
+                "body": str(body),
+            },
+        )
+        if not isinstance(document, Mapping):
+            raise ForgejoError("Forgejo 创建 PR 返回了非对象 JSON")
+        url = str(document.get("html_url") or document.get("url") or "").strip()
+        if not url:
+            raise ForgejoError("Forgejo 创建 PR 未返回 URL")
+        return url
+
 
 # ── Commit metadata via the read-only git copy ───────────────────────
 # §3.1: commits come from the Forgejo API by default, and from a shallow,
@@ -886,6 +967,13 @@ class ForgejoClient:
 #: so it is a safe field delimiter independent of locale.
 _GIT_SEP = "\x1f"
 _GIT_FORMAT = f"%H{_GIT_SEP}%an{_GIT_SEP}%aI{_GIT_SEP}%s"
+
+#: git credentials are built in one place — ``services.git_auth`` — so the
+#: mirror and the agent runner cannot drift into two different mechanisms.
+#: ``_GIT_TOKEN_ENV``/``_GIT_CREDENTIAL_HELPER`` remain as module aliases for
+#: compatibility with existing callers and gates.
+_GIT_TOKEN_ENV = GIT_TOKEN_ENV
+_GIT_CREDENTIAL_HELPER = GIT_CREDENTIAL_HELPER
 
 
 class GitCommitReader:
@@ -906,54 +994,111 @@ class GitCommitReader:
     # -- clone/fetch --------------------------------------------------
 
     def mirror_path(self, forgejo_repo: str) -> Path:
-        safe = forgejo_repo.replace("..", "_").strip("/")
+        # Percent-encode each path segment so the mapping is injective (``a..b``
+        # and ``a_b`` are different repositories) and ``..`` can never climb out
+        # of ``base``.
+        segments = [
+            segment for segment in forgejo_repo.split("/")
+            if segment and segment not in {".", ".."}
+        ]
+        safe = "/".join(quote(segment, safe="") for segment in segments) or "_"
         root = self.config.mirror_dir
         base = Path(root) if root else Path("data") / "forgejo-mirror"
         return base / f"{safe}.git"
 
-    def ensure_mirror(self, forgejo_repo: str, *, refresh: bool = False) -> Path:
-        """``git clone --bare --filter=blob:none`` (or ``fetch``) — never pushes."""
-        destination = self.mirror_path(forgejo_repo)
-        if forgejo_repo in self._ready and destination.is_dir():
-            return destination
-        destination.parent.mkdir(parents=True, exist_ok=True)
+    def _git_env(self) -> dict[str, str]:
+        """Environment that carries the git credential, never argv or disk.
+
+        The token reaches git through ``OPENFISH_GIT_TOKEN`` and an inline
+        ``credential.helper``, so it never appears in ``ps`` output, in an
+        exception message, or in the mirror's ``.git/config`` — the three places
+        a URL-embedded credential used to leak to.  No git-version floor beyond
+        the credential protocol itself.
+        """
         token = (self.config.admin_token or "").strip()
-        credentials = "x-access-token" if token else ""
-        # `git_base_url` is where *git* listens (the Forgejo container's own
-        # port).  It is the API base URL unless an operator fronted the git
-        # protocol with something else — the public `/git/` edge is for
-        # browsers and CI, and reaching it from inside the compose network
-        # would just add a hop.
-        url = self.config.git_base_url or self.config.base_url
-        if token:
-            scheme, _, host = url.partition("://")
-            url = f"{scheme or 'http'}://{credentials}:{quote(token, safe='')}@{host}"
-        clone_url = f"{url.rstrip('/')}/{forgejo_repo}.git"
+        env = {"GIT_TERMINAL_PROMPT": "0"}
+        env.update(git_env(token))
+        return env
+
+    def _git_auth_args(self) -> list[str]:
+        """``-c credential.helper=…`` for a token, or nothing when unset."""
+        if not (self.config.admin_token or "").strip():
+            return []
+        return ["-c", f"credential.helper={_GIT_CREDENTIAL_HELPER}"]
+
+    def _fetch_mirror(self, destination: Path) -> None:
+        """Refresh an existing mirror, un-shallowing a legacy depth-1 copy."""
+        env = self._git_env()
+        try:
+            self._git(
+                ["fetch", "--prune", "--filter=blob:none", "--unshallow", "origin"],
+                cwd=destination, extra_env=env,
+            )
+        except RepoImportError:
+            # Already complete: ``--unshallow`` is rejected, a plain fetch works.
+            self._git(
+                ["fetch", "--prune", "--filter=blob:none", "origin"],
+                cwd=destination, extra_env=env,
+            )
+
+    def ensure_mirror(self, forgejo_repo: str, *, refresh: bool = False) -> Path:
+        """``git clone --bare --filter=blob:none`` (or ``fetch``) — never pushes.
+
+        The clone is blobless but carries the full commit graph, because
+        :meth:`stream` is asked for up to ``IMPORT_MAX_COMMITS`` commits: a
+        ``--depth 1`` copy can only ever answer with one.
+        """
+        destination = self.mirror_path(forgejo_repo)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        base = (self.config.git_base_url or self.config.base_url).rstrip("/")
+        clone_url = f"{base}/{forgejo_repo}.git"
 
         if destination.is_dir():
+            # ``refresh`` must win over the readiness cache: a long-lived worker
+            # that short-circuits here would never see a new commit again.
             if refresh:
-                self._git(["fetch", "--depth", "1", "--prune", "origin"], cwd=destination)
-        else:
-            self._git([
-                "clone", "--bare", "--depth", "1", "--filter=blob:none",
+                self._fetch_mirror(destination)
+            self._ready.add(forgejo_repo)
+            return destination
+
+        self._git(
+            [
+                "clone", "--bare", "--filter=blob:none",
                 "--no-tags", clone_url, str(destination),
-            ])
+            ],
+            extra_env=self._git_env(),
+        )
         self._ready.add(forgejo_repo)
         return destination
 
-    def _git(self, args: Sequence[str], *, cwd: Path | None = None) -> str:
-        argv = [self.git, *args]
+    def _git(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        extra_env: Mapping[str, str] | None = None,
+    ) -> str:
+        argv = [self.git, *self._git_auth_args(), *args]
+        env = dict(os.environ)
+        env.update(extra_env or {})
         try:
             proc = self._run(
                 argv, cwd=str(cwd) if cwd else None, capture_output=True,
-                text=True, timeout=600,
+                text=True, timeout=600, env=env,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise RepoImportError(f"git 调用失败（{args[0]}）：{exc}") from exc
-        if proc.returncode != 0:
             raise RepoImportError(
-                f"git {' '.join(args)} 退出码 {proc.returncode}："
-                f"{(proc.stderr or '').strip()[:400]}"
+                f"git 调用失败（{args[0]}）："
+                f"{mask_secrets(str(exc), [self.config.admin_token])}"
+            ) from exc
+        if proc.returncode != 0:
+            # Only ``args[0]`` is quoted: the full argv used to carry the clone
+            # URL, and with it the admin token, into the error message and logs.
+            detail = mask_secrets(
+                (proc.stderr or "").strip()[:400], [self.config.admin_token],
+            )
+            raise RepoImportError(
+                f"git {args[0]} 退出码 {proc.returncode}：{detail}"
             )
         return proc.stdout or ""
 
@@ -967,10 +1112,21 @@ class GitCommitReader:
         """Yield up to *limit* commits, newest first, from the read-only copy."""
         destination = self.ensure_mirror(forgejo_repo)
         reference = branch if branch else "HEAD"
-        raw = self._git(
-            ["log", f"--max-count={max(1, limit)}", f"--format={_GIT_FORMAT}", reference],
-            cwd=destination,
-        )
+        log_argv = [
+            "log", f"--max-count={max(1, limit)}", f"--format={_GIT_FORMAT}", reference,
+        ]
+        try:
+            raw = self._git(log_argv, cwd=destination)
+        except RepoImportError:
+            # A stale ``default_branch`` must not empty the index: a bare mirror
+            # always has HEAD, which is the forge's real default branch.
+            if reference == "HEAD":
+                raise
+            logger.warning(
+                "branch %r not found in the mirror for %s; falling back to HEAD",
+                reference, forgejo_repo,
+            )
+            raw = self._git([*log_argv[:-1], "HEAD"], cwd=destination)
         for line in raw.splitlines():
             if not line.strip():
                 continue
@@ -1346,6 +1502,41 @@ class RepoImportService:
         cursor.phase = "mirror_issues"
         return True
 
+    def _refresh_repo_policy(self, repo: Any, forgejo_repo: str) -> None:
+        """Cache ``.agent/review-policy.yml``'s ``auto_review`` on the repo row.
+
+        The webhook runs on the API host, which has no checkout, so it cannot read
+        the file itself — and ``read_policy_auto_review(repo_root=None)`` used to
+        fall through to ``True``, making a repository's ``auto_review: false``
+        impossible to honour.  Reading it here (once per job) is what makes the
+        per-repo opt-out real.  A missing or unparsable file means the documented
+        default: review on.
+        """
+        try:
+            text = self.client.read_file(forgejo_repo, str(POLICY_RELPATH).replace("\\", "/"))
+        except Exception as exc:  # noqa: BLE001 - policy I/O never fails an import
+            logger.warning("could not read the review policy of %s: %s", forgejo_repo, exc)
+            return
+        value = True
+        if text and text.strip():
+            try:
+                from services.review_policy import (  # noqa: PLC0415 - optional layer
+                    SOURCE_FILE,
+                    parse_document,
+                    parse_yaml,
+                )
+
+                value = bool(
+                    parse_document(parse_yaml(text), source=SOURCE_FILE).defaults.auto_review
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("ignoring unparsable review policy of %s: %s",
+                               forgejo_repo, exc)
+                value = True
+        if _get(repo, "auto_review") != value:
+            _assign(repo, {"auto_review": value, "updated_at": _now()})
+            logger.info("cached auto_review=%s for %s", value, forgejo_repo)
+
     def _step_mirror_issues(self, job: Any, cursor: Cursor) -> bool:
         if not bool(cursor.extras.get("include_issues", True)):
             cursor.phase = "index_commits"
@@ -1426,6 +1617,12 @@ class RepoImportService:
         _assign(repo, {"sync_state": "indexing", "updated_at": _now()})
         forgejo_repo = str(cursor.extras.get("forgejo_repo") or _get(repo, "forgejo_repo") or "")
         branch = str(_get(repo, "default_branch") or DEFAULT_BRANCH)
+
+        # Read the review policy once per job (this step runs page by page, and a
+        # fetch per page would be N redundant API calls).
+        if forgejo_repo and not cursor.extras.get("policy_read"):
+            self._refresh_repo_policy(repo, forgejo_repo)
+            cursor.extras["policy_read"] = True
 
         room = max(0, self.config.max_commits - cursor.commits_seen)
         page = max(1, cursor.commit_page)

@@ -171,13 +171,14 @@ const cloneUrl = computed(() => {
 const cloneCommand = computed(() => `git clone ${cloneUrl.value}`)
 
 /**
- * The authenticated form.  The password is the API key (username arbitrary);
- * the placeholder is deliberate — a real key must come from `/api-keys` and
- * never be pasted into a doc or a script.
+ * The authenticated form.  git and the API do **not** share a credential: the
+ * API key authenticates the caller, and this endpoint brokers a short-lived
+ * Forgejo token (`username`/`password` in the response) that Forgejo accepts on
+ * `git-receive-pack`.  The real key is never pasted into this page.
  */
 const cloneAuthCommand = computed(() => {
-  const host = typeof window !== 'undefined' ? window.location.host : '<host>'
-  return `git clone http://<any-user>:<API-KEY>@${host}/git/${repoGitPath.value}.git`
+  const origin = typeof window !== 'undefined' ? window.location.origin : '<host>'
+  return `curl -fsS -H "Authorization: Bearer $OPENFISH_API_KEY" ${origin}/api/v1/repos/${repoGitPath.value}/git-credential`
 })
 
 async function load(): Promise<void> {

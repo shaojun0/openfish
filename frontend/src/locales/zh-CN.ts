@@ -782,9 +782,9 @@ export default {
     cloneCommandLabel: '只读地址（内部网络）',
     authTitle: '鉴权说明',
     authDesc:
-      'git 与 API 共用一套凭据：HTTP Basic，用户名任意，密码为 API Key。请勿把带 key 的地址写入脚本或提交进仓库。',
-    cloneAuthLabel: '带 API Key 的地址示例',
-    authNote: 'API Key 在「API 密钥」页面创建；push 需要 repo:push 权限，并受分支保护约束。',
+      'git 不复用 API Key：该接口用平台凭据（repo:push）换一张短期 Forgejo 票，git 询问时用返回的 username/password 做 HTTP Basic。请勿把带 key 的地址写入脚本或提交进仓库。',
+    cloneAuthLabel: '兑换 git 票（API Key → 短期 Forgejo token）',
+    authNote: 'API Key 在「API 密钥」页面创建；push 需要 repo:push 权限。DSH 企业内网插件会安装 credential helper 自动换票。',
     keyLink: '去创建 API Key',
     loadFailed: '加载仓库详情失败',
     issuesTitle: 'Issue 浏览',

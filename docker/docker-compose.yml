@@ -119,6 +119,46 @@ x-backend-env: &backend-env
   AGENT_WORK_RETENTION_SECONDS: ${AGENT_WORK_RETENTION_SECONDS:-86400}
   AGENT_GATE_TIMEOUT: ${AGENT_GATE_TIMEOUT:-120}
   AGENT_MAX_FINDINGS: ${AGENT_MAX_FINDINGS:-50}
+  # 生产侧准入控制：同一仓库的在途（queued/leased/running）任务上限。0 = 不限。
+  # webhook 风暴或误配策略不会再把单一仓库灌满全局队列。
+  AGENT_MAX_IN_FLIGHT_PER_REPO: ${AGENT_MAX_IN_FLIGHT_PER_REPO:-2}
+
+# ── 智能体运行时沙箱的**全部**环境（§9.2）────────────────────────────
+# 刻意**不**继承 x-backend-env：runner 会执行仓库自带的 check_*.py 与 headless
+# review 命令（services/sandbox_env.py 又把这层再收窄一次），而 backend 的环境里
+# 有 SECRET_KEY / FORGEJO_ADMIN_TOKEN / GIT_IDENTITY_KEY。沙箱只拿到三样东西：
+#   1. 队列数据库（worker 必须领任务）；
+#   2. 模型路由表（只读挂载 + MODELS_FILE）；
+#   3. 一枚可单独吊销、**非 admin** 的 FORGEJO_RUNNER_TOKEN，同时用于 git
+#      credential helper 与开 PR；未设置时 fix/PR 明确失败，不会静默借用 admin。
+# 完整隔离（`network: internal` + 出口白名单）仍需部署侧网络分段，见
+# docs/agent-hub/DESIGN-git-thin-layer.md。
+x-runner-env: &runner-env
+  # 队列数据库：默认 SQLite 文件；PostgreSQL 部署用 DATABASE_URL。
+  API_KEYS_FILE: /app/data/cpypiserver.db
+  DATABASE_URL: ${DATABASE_URL:-}
+  # 模型路由：只读挂载。
+  MODELS_FILE: /app/config/model_routes.json
+  # Forgejo：只有内网基址与组织名，都不含密钥。
+  FORGEJO_BASE_URL: ${FORGEJO_BASE_URL:-http://forgejo:3000}
+  FORGEJO_OWNER: ${FORGEJO_OWNER:-openfish}
+  # runner 专用凭据（**不是** FORGEJO_ADMIN_TOKEN）。
+  FORGEJO_RUNNER_TOKEN: ${FORGEJO_RUNNER_TOKEN:-}
+  # 运行时旋钮。
+  AGENT_WORK_ROOT: /work
+  AGENT_WORK_RETENTION_SECONDS: "${AGENT_WORK_RETENTION_SECONDS:-86400}"
+  AGENT_GATE_TIMEOUT: "${AGENT_GATE_TIMEOUT:-120}"
+  AGENT_MAX_FINDINGS: "${AGENT_MAX_FINDINGS:-50}"
+  # headless review 命令：留空时 review 任务**明确失败**，不会被静默当 done。
+  AGENT_REVIEW_COMMAND: "${AGENT_REVIEW_COMMAND:-}"
+  AGENT_REVIEW_TIMEOUT: "${AGENT_REVIEW_TIMEOUT:-900}"
+  # 仓库级策略优先：这里给空值，让 .agent/review-policy.yml 决定 pr_policy /
+  # auto_fix；只有运维显式设置非空值才覆盖仓库策略。
+  AGENT_PR_POLICY: "${AGENT_PR_POLICY:-}"
+  AGENT_AUTO_FIX: "${AGENT_AUTO_FIX:-}"
+  # 沙箱固定值。
+  GIT_TERMINAL_PROMPT: "0"
+  PYTHONDONTWRITEBYTECODE: "1"
 
 # 制品库与运行态：**所有** bind-mount 源都在本文件所在的 docker/ 目录下
 # （一律写成 ./xxx），挂载拓扑里不含任何宿主机绝对路径，也就没有 ../backend/…。
@@ -232,7 +272,12 @@ services:
       context: ../backend
       dockerfile: ../docker/runner/Dockerfile
     image: openfish-runner:latest
-    container_name: openfish-runner
+    # **No `container_name` on purpose.**  A fixed name makes
+    # `docker compose --profile runner up --scale runner=N` fail with
+    # "container name is already in use", which is exactly the horizontal
+    # scaling the queue's `FOR UPDATE SKIP LOCKED` claim path exists to support.
+    # Compose derives a stable per-replica name (`<project>-runner-<n>`) without
+    # it.  Single-replica usage is unchanged.
     profiles:
       - runner
     restart: unless-stopped
@@ -248,8 +293,7 @@ services:
     tmpfs:
       - /tmp:size=512m
     environment:
-      <<: *backend-env
-      AGENT_WORK_ROOT: /work
+      <<: *runner-env
     volumes:
       - ./agent-work:/work
       - ./data:/app/data

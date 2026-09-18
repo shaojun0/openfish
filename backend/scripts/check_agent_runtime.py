@@ -16,6 +16,12 @@ four rules that are cheap to get wrong:
 * **§9.4 gates** — normalisation, per-gate timeout and output tailing.
 * **§9.5 schema** — a document missing ``rule_id``/``gates`` or carrying a wrong
   type fails the *task* and writes no finding.
+* **result-gated PRs** — ``pr_policy=on_green`` never pushes on a red gate,
+  ``never`` never pushes, ``always`` is the documented escape hatch, and a fix
+  with no commit never pushes.
+* **defects A1/A2** — the production worker builds a real handler (not
+  ``placeholder_handler``), an unconfigured ``AGENT_REVIEW_COMMAND`` fails the
+  task, and a validated result really reaches the ``findings`` table.
 * the 24h work-directory rule, and that a model key never lands in a log or a
   result document.
 """
@@ -35,9 +41,20 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 os.chdir(REPO_ROOT)
 
+from models.agent_hub import Finding, Repo  # noqa: E402
+from services import agent_worker  # noqa: E402
+from services.agent_queue import (  # noqa: E402
+    AgentQueue,
+    Worker,
+    build_engine,
+    build_worker,
+    default_handler,
+    placeholder_handler,
+)
 from services.agent_runner import (  # noqa: E402
     STEPS,
     AgentRunner,
+    AgentRunnerError,
     ProtectedBranchError,
     ReadContext,
     ResultValidationError,
@@ -63,12 +80,22 @@ from services.gates import (  # noqa: E402
     run_gates,
     scripts_root,
 )
+from services.repo_import import (  # noqa: E402
+    ForgejoClient,
+    ForgejoError,
+    ImportConfig,
+)
+from services.review_policy import (  # noqa: E402
+    PolicyValidationError,
+    parse_document,
+)
 
 _SECRET = "sk-live-DEADBEEF-0123456789"
 
 #: Expected task failures are logged deliberately; keep them out of the gate's
 #: stdout so the ✅/❌ report stays readable.
 logging.getLogger("cpypiserver.agent_runner").addHandler(logging.NullHandler())
+logging.getLogger("cpypiserver.agent_worker").addHandler(logging.NullHandler())
 
 _problems: list[str] = []
 
@@ -111,6 +138,9 @@ class FakeAdapter:
         findings: Sequence[Mapping[str, Any]] | None = None,
         *,
         gates: Sequence[GateResult] | None = None,
+        changed: bool = True,
+        policy_text: str | None = None,
+        changed_paths: Sequence[str] | None = None,
     ) -> None:
         self.calls: list[str] = []
         self.findings = list(findings or [])
@@ -120,6 +150,16 @@ class FakeAdapter:
         )
         self.emitted: dict[str, Any] | None = None
         self.pushed: list[str] = []
+        self.changed = changed
+        self.committed: list[str] = []
+        self.policy_text = policy_text
+        #: What the run's edits look like to the path guard.  Empty by default:
+        #: a plain fix, not one that touched the frozen suite.
+        self.changed_paths_list = list(changed_paths or [])
+        #: The frozen suite handed to ``run_gates`` (P1.3) and the role handed
+        #: to ``review`` (P1.4), recorded so a check can assert both.
+        self.suites: list[Any] = []
+        self.review_kinds: list[str] = []
 
     def set_model_env(self, env: Mapping[str, str]) -> None:
         self.calls.append("set_model_env")
@@ -132,10 +172,17 @@ class FakeAdapter:
 
     def read_context(self, workdir: Path) -> ReadContext:
         self.calls.append("read")
-        return ReadContext(agents_md="# AGENTS", policy_text=None)
+        return ReadContext(agents_md="# AGENTS", policy_text=self.policy_text)
 
-    def run_gates(self, workdir: Path, *, timeout: float) -> GateSummary:
+    def run_gates(
+        self,
+        workdir: Path,
+        *,
+        timeout: float,
+        suite: Any | None = None,
+    ) -> GateSummary:
         self.calls.append("gates")
+        self.suites.append(suite)
         passed = sum(1 for item in self.gates if item.passed)
         return GateSummary(
             gates=self.gates,
@@ -144,8 +191,13 @@ class FakeAdapter:
             failed=len(self.gates) - passed,
         )
 
-    def review(self, workdir: Path, *, policy: Any, commit_sha: str, context: ReadContext):
+    def changed_paths(self, workdir: Path) -> Sequence[str]:
+        return list(self.changed_paths_list)
+
+    def review(self, workdir: Path, *, policy: Any, commit_sha: str, context: ReadContext,
+               kind: str = "review"):
         self.calls.append("review")
+        self.review_kinds.append(kind)
         return self.findings
 
     def search(self, workdir: Path, *, finding: Mapping[str, Any], commit_sha: str, context: ReadContext):
@@ -160,6 +212,20 @@ class FakeAdapter:
     def push(self, workdir: Path, *, branch: str, commit_sha: str) -> None:
         self.calls.append("push")
         self.pushed.append(branch)
+
+    def commit(
+        self,
+        workdir: Path,
+        *,
+        branch: str,
+        commit_sha: str,
+        message: str,
+    ) -> bool:
+        self.calls.append("commit")
+        if not self.changed:
+            raise AgentRunnerError("no changes to commit")
+        self.committed.append(branch)
+        return True
 
     def open_pr(self, workdir: Path, *, branch: str, base: str, title: str, body: str) -> str:
         self.calls.append("open_pr")
@@ -263,6 +329,403 @@ def check_push_guard() -> None:
         )
         check("fix 模式推 main 被拒且任务 failed", outcome.status == "failed" and not adapter.pushed)
         check("推 main 失败时无 finding 入库", sink.recorded == [])
+
+    with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+        sink = RecordingSink()
+        adapter = FakeAdapter([])
+        runner = AgentRunner(adapter=adapter, sink=sink, work_root=root)
+        outcome = runner.run(
+            TaskRequest(
+                task_id="3",
+                repo_url="http://forgejo/o/r.git",
+                commit_sha="c" * 40,
+                kind="fix",
+                branch="agent/fix-3",
+            )
+        )
+        check(
+            "fix 模式先 commit 再 push",
+            outcome.status == "done"
+            and adapter.committed == ["agent/fix-3"]
+            and adapter.calls.index("commit") < adapter.calls.index("push"),
+            f"calls={adapter.calls}",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+        sink = RecordingSink()
+        adapter = FakeAdapter([], changed=False)
+        runner = AgentRunner(adapter=adapter, sink=sink, work_root=root)
+        outcome = runner.run(
+            TaskRequest(
+                task_id="4",
+                repo_url="http://forgejo/o/r.git",
+                commit_sha="d" * 40,
+                kind="fix",
+                branch="agent/fix-4",
+            )
+        )
+        check(
+            "无改动的 fix 任务失败且不 push、不开 PR",
+            outcome.status == "failed"
+            and not adapter.pushed
+            and "open_pr" not in adapter.calls
+            and sink.recorded == [],
+            f"calls={adapter.calls}",
+        )
+
+
+#: A gate suite carrying one failure — the trigger for `on_green` refusals.
+RED_GATES = [GateResult(gate="check_lint", passed=False, exit_code=1, duration_ms=3)]
+
+
+def _fix_runner(adapter: "FakeAdapter", sink: RecordingSink, root: str, **kwargs: Any) -> AgentRunner:
+    return AgentRunner(adapter=adapter, sink=sink, work_root=root, **kwargs)
+
+
+# ── result-gated PR policy (§9.3 step 6 / C) ─────────────────────────
+
+def check_pr_policy() -> None:
+    print("\n结果门控的 PR 策略（on_green / always / never / auto_fix）")
+
+    # on_green (the default) must refuse to push when a gate is red.
+    with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+        sink = RecordingSink()
+        adapter = FakeAdapter([], gates=RED_GATES)
+        outcome = _fix_runner(adapter, sink, root).run(TaskRequest(
+            task_id="10", repo_url="u", commit_sha="a" * 40,
+            kind="fix", branch="agent/fix-10",
+        ))
+        check(
+            "on_green：gates 红 → 不 push、不开 PR",
+            outcome.status == "failed" and not adapter.pushed and "open_pr" not in adapter.calls,
+            f"status={outcome.status} calls={adapter.calls}",
+        )
+        check("on_green：失败原因带上具体的失败 gate",
+              "check_lint" in (outcome.error or ""), str(outcome.error))
+
+    # on_green with green gates still pushes (the happy path).
+    with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+        sink = RecordingSink()
+        adapter = FakeAdapter([])
+        outcome = _fix_runner(adapter, sink, root).run(TaskRequest(
+            task_id="11", repo_url="u", commit_sha="b" * 40,
+            kind="fix", branch="agent/fix-11",
+        ))
+        check(
+            "on_green：gates 绿 → push + 开 PR",
+            outcome.status == "done" and adapter.pushed == ["agent/fix-11"]
+            and "open_pr" in adapter.calls,
+            f"status={outcome.status} calls={adapter.calls}",
+        )
+
+    # never is report-only: no commit, no push, no PR — but the task still ends.
+    with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+        sink = RecordingSink()
+        adapter = FakeAdapter([])
+        outcome = _fix_runner(adapter, sink, root, pr_policy="never").run(TaskRequest(
+            task_id="12", repo_url="u", commit_sha="c" * 40,
+            kind="fix", branch="agent/fix-12",
+        ))
+        check(
+            "never：不 commit、不 push、不开 PR，任务仍 done",
+            outcome.status == "done" and not adapter.pushed
+            and adapter.committed == [] and "open_pr" not in adapter.calls,
+            f"status={outcome.status} calls={adapter.calls}",
+        )
+
+    # always is the documented escape hatch: push even with a red gate.
+    with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+        sink = RecordingSink()
+        adapter = FakeAdapter([], gates=RED_GATES)
+        outcome = _fix_runner(adapter, sink, root, pr_policy="always").run(TaskRequest(
+            task_id="13", repo_url="u", commit_sha="d" * 40,
+            kind="fix", branch="agent/fix-13",
+        ))
+        check(
+            "always：gates 红也 commit + push + 开 PR（已文档化）",
+            outcome.status == "done" and adapter.pushed == ["agent/fix-13"]
+            and "open_pr" in adapter.calls,
+            f"status={outcome.status} calls={adapter.calls}",
+        )
+
+    # §6.4: a push-triggered review only escalates when auto_fix is on.
+    with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+        sink = RecordingSink()
+        adapter = FakeAdapter([], gates=RED_GATES)
+        outcome = _fix_runner(adapter, sink, root).run(TaskRequest(
+            task_id="14", repo_url="u", commit_sha="e" * 40, kind="review",
+        ))
+        check(
+            "auto_fix 默认关：review 不升级为 fix（不 commit/push）",
+            outcome.status == "done" and adapter.committed == [] and not adapter.pushed,
+            f"status={outcome.status} calls={adapter.calls}",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+        sink = RecordingSink()
+        adapter = FakeAdapter([], gates=RED_GATES)
+        outcome = _fix_runner(adapter, sink, root, auto_fix=True).run(TaskRequest(
+            task_id="15", repo_url="u", commit_sha="f" * 40, kind="review",
+            branch="agent/fix-15",
+        ))
+        check(
+            "auto_fix 开 + gates 红：review 升级为 fix（先 commit）",
+            adapter.committed == ["agent/fix-15"],
+            f"status={outcome.status} calls={adapter.calls}",
+        )
+        check("升级后仍按 on_green 门控：gates 红则不 push",
+              outcome.status == "failed" and not adapter.pushed,
+              f"status={outcome.status} calls={adapter.calls}")
+
+    with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+        sink = RecordingSink()
+        adapter = FakeAdapter([], gates=[GateResult(gate="check_lint", passed=True, exit_code=0)])
+        outcome = _fix_runner(adapter, sink, root, auto_fix=True).run(TaskRequest(
+            task_id="16", repo_url="u", commit_sha="1" * 40, kind="review",
+            branch="agent/fix-16",
+        ))
+        check(
+            "auto_fix 开但 gates 全绿：无可修项，review 不升级",
+            outcome.status == "done" and adapter.committed == [] and not adapter.pushed,
+            f"status={outcome.status} calls={adapter.calls}",
+        )
+
+    # C1: the repository's .agent/review-policy.yml also configures the knob.
+    policy_parser = agent_worker.build_policy_parser()
+    never_policy = "version: 1\ndefaults:\n  pr_policy: never\n  auto_fix: true\n"
+    view = policy_parser(never_policy)
+    check("policy 文件解析出 pr_policy/auto_fix",
+          view.pr_policy == "never" and view.auto_fix is True,
+          f"pr_policy={view.pr_policy} auto_fix={view.auto_fix}")
+
+    with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+        sink = RecordingSink()
+        adapter = FakeAdapter([], policy_text=never_policy)
+        outcome = AgentRunner(
+            adapter=adapter, sink=sink, work_root=root, policy_parser=policy_parser,
+        ).run(TaskRequest(
+            task_id="17", repo_url="u", commit_sha="2" * 40,
+            kind="fix", branch="agent/fix-17",
+        ))
+        check("policy 文件 pr_policy=never：不 commit/push/开 PR",
+              outcome.status == "done" and adapter.committed == []
+              and not adapter.pushed and "open_pr" not in adapter.calls,
+              f"status={outcome.status} calls={adapter.calls}")
+
+    with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+        sink = RecordingSink()
+        adapter = FakeAdapter(
+            [], gates=RED_GATES, policy_text="version: 1\ndefaults:\n  auto_fix: true\n",
+        )
+        outcome = AgentRunner(
+            adapter=adapter, sink=sink, work_root=root, policy_parser=policy_parser,
+        ).run(TaskRequest(
+            task_id="18", repo_url="u", commit_sha="3" * 40, kind="review",
+            branch="agent/fix-18",
+        ))
+        check("policy 文件 auto_fix=true：review 升级为 fix",
+              adapter.committed == ["agent/fix-18"],
+              f"status={outcome.status} calls={adapter.calls}")
+
+    # An unknown value in the schema is rejected, not silently defaulted.
+    try:
+        parse_document({"version": 1, "defaults": {"pr_policy": "sometimes"}})
+        check("非法 pr_policy 被 policy schema 拒绝", False, "竟然通过了")
+    except PolicyValidationError:
+        check("非法 pr_policy 被 policy schema 拒绝", True)
+
+    # The environment override wins over the file and is normalised.
+    os.environ["AGENT_PR_POLICY"] = "NEVER"
+    try:
+        with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+            sink = RecordingSink()
+            adapter = FakeAdapter([], policy_text="version: 1\ndefaults:\n  pr_policy: always\n")
+            outcome = AgentRunner(
+                adapter=adapter, sink=sink, work_root=root, policy_parser=policy_parser,
+            ).run(TaskRequest(
+                task_id="19", repo_url="u", commit_sha="4" * 40,
+                kind="fix", branch="agent/fix-19",
+            ))
+        check("AGENT_PR_POLICY 覆盖 policy 文件（normalise 大小写）",
+              outcome.status == "done" and adapter.committed == [] and not adapter.pushed,
+              f"status={outcome.status} calls={adapter.calls}")
+    finally:
+        os.environ.pop("AGENT_PR_POLICY", None)
+
+
+# ── production worker wiring (defects A1 / A2) ───────────────────────
+
+class _FakeClaimed:
+    """A ``ClaimedTask``-shaped row; only the fields the handler reads."""
+
+    def __init__(self, *, kind: str, task_id: int = 1, repo_id: int = 1) -> None:
+        self.id = task_id
+        self.repo_id = repo_id
+        self.kind = kind
+        self.payload: dict[str, Any] = {}
+
+
+def check_findings_ingestion() -> None:
+    """Defect A2: a validated result must actually reach the findings table."""
+    print("\nfindings 落库（缺陷 A2）")
+    with tempfile.TemporaryDirectory(prefix="agent-ingest-") as root:
+        engine = build_engine(f"sqlite:///{root}/queue.db")
+        queue = AgentQueue(engine)
+        queue.ensure_schema()
+        try:
+            session = queue.session()
+            repo = Repo(slug="gate/ingest", kind="workspace")
+            session.add(repo)
+            session.commit()
+            repo_id = int(repo.id)
+            session.close()
+
+            queued_id = queue.enqueue(repo_id, kind="review", payload={})
+            claimed = _FakeClaimed(kind="review", task_id=queued_id, repo_id=repo_id)
+            task = TaskRequest(
+                task_id=str(queued_id), repo_url="u", commit_sha="a" * 40,
+                kind="review", repo="gate/ingest",
+            )
+            sessions = agent_worker.sqlalchemy_session_factory(engine)
+            run_id = agent_worker._open_review_run(claimed, task, sessions)
+
+            result = validate_result({
+                "run": {
+                    "commit_sha": "a" * 40, "policy_hash": "h",
+                    "started_at": "2026-01-01T00:00:00Z",
+                },
+                "findings": [_finding()],
+                "gates": [{"gate": "check_lint", "passed": True, "exit_code": 0}],
+            })
+            agent_worker._make_ingest(repo_id, run_id, sessions)(str(queued_id), result)
+
+            session = sessions()
+            try:
+                rows = session.query(Finding).filter(Finding.repo_id == repo_id).all()
+            finally:
+                session.close()
+            check(
+                "ingest 把 finding 写进 findings 表",
+                len(rows) == 1 and rows[0].rule_id == "backend.no-typing-optional",
+                f"rows={[(r.rule_id, r.fingerprint) for r in rows]}",
+            )
+        finally:
+            engine.dispose()
+
+
+def check_worker_wiring() -> None:
+    print("\n§9.1 生产 worker 装配真实 runner（不是 placeholder）")
+    with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+        engine = build_engine(f"sqlite:///{root}/queue.db")
+        queue = AgentQueue(engine)
+        queue.ensure_schema()
+        try:
+            handler = default_handler(queue)
+            check("default_handler 不是 placeholder_handler",
+                  handler is not placeholder_handler)
+            check("Worker 在不注入 handler 时也不用 placeholder",
+                  Worker(queue).handler is not placeholder_handler)
+
+            fake = lambda task: "fake"  # noqa: E731 - deliberately a tiny sentinel
+            seen: list[Any] = []
+            worker = build_worker(
+                queue, handler_factory=lambda q: (seen.append(q), fake)[1]
+            )
+            check("build_worker 的 handler_factory 注入生效",
+                  worker.handler is fake and seen == [queue])
+
+            built = agent_worker.build_handler(engine=engine)
+            check("agent_worker.build_handler 返回真实处理器",
+                  callable(built) and built is not placeholder_handler)
+
+            # A kind this sandbox runner cannot run must fail loudly, never be
+            # retired as if it had run.
+            try:
+                built(_FakeClaimed(kind="backfill"))
+                check("未支持的 kind 大声失败（不静默退休）", False, "竟然返回了")
+            except AgentRunnerError:
+                check("未支持的 kind 大声失败（不静默退休）", True)
+        finally:
+            engine.dispose()
+
+
+def check_review_command() -> None:
+    print("\nreview 命令：未配置必须失败，配置了才产出 findings")
+    unset = agent_worker.build_review_fn("")
+    try:
+        unset(Path(tempfile.gettempdir()), policy=None, commit_sha="a" * 40, context=None)
+        check("空 AGENT_REVIEW_COMMAND → 抛错（任务失败而非 done）", False, "竟然返回了")
+    except AgentRunnerError as exc:
+        check("空 AGENT_REVIEW_COMMAND → 抛错（任务失败而非 done）",
+              "AGENT_REVIEW_COMMAND" in str(exc), str(exc))
+
+    with tempfile.TemporaryDirectory(prefix="agent-review-") as root:
+        script = Path(root) / "review.py"
+        script.write_text(
+            "import json, sys\n"
+            "print(json.dumps([{'rule_id': 'backend.logger-name'}]))\n",
+            encoding="utf-8",
+        )
+        review_fn = agent_worker.build_review_fn(f"{sys.executable} {script}")
+        findings = review_fn(Path(root), policy=None, commit_sha="b" * 40, context=None)
+        check("配置了命令时解析 findings JSON",
+              len(findings) == 1 and findings[0]["rule_id"] == "backend.logger-name",
+              repr(findings))
+
+        failing = Path(root) / "fail.py"
+        failing.write_text("import sys; sys.exit(3)\n", encoding="utf-8")
+        broken = agent_worker.build_review_fn(f"{sys.executable} {failing}")
+        try:
+            broken(Path(root), policy=None, commit_sha="c" * 40, context=None)
+            check("review 命令非零退出 → 抛错", False, "竟然返回了")
+        except AgentRunnerError:
+            check("review 命令非零退出 → 抛错", True)
+
+
+def check_open_pr_seam() -> None:
+    """B3: PR creation goes through the Forgejo client and nothing else."""
+    print("\nPR 创建接缝（ForgejoClient）")
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[Any, ...]] = []
+
+        def create_pull_request(self, repo: str, *, head: str, base: str,
+                                title: str, body: str = "") -> str:
+            self.calls.append((repo, head, base, title, body))
+            return "http://forgejo.local/o/r/pulls/9"
+
+    fake = FakeClient()
+    open_pr = agent_worker.build_open_pr_fn("o/r", client=fake)
+    url = open_pr(Path("/tmp"), branch="agent/fix-1", base="main",
+                  title="t", body="b")
+    check("build_open_pr_fn 调 ForgejoClient.create_pull_request",
+          fake.calls == [("o/r", "agent/fix-1", "main", "t", "b")]
+          and url.endswith("/pulls/9"),
+          f"calls={fake.calls} url={url}")
+
+    client = ForgejoClient(config=ImportConfig(base_url="http://forgejo:3000",
+                                               admin_token="gate-token"))
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def fake_json(method: str, path: str, **kwargs: Any) -> Any:
+        calls.append((method, path, kwargs))
+        return {"html_url": "http://forgejo/o/r/pulls/7", "number": 7}
+
+    client._json = fake_json  # type: ignore[method-assign]
+    url = client.create_pull_request("o/r", head="agent/fix-2", base="main",
+                                     title="标题", body="正文")
+    posted = calls[0] if calls else ("", "", {})
+    check("create_pull_request POST repos/<slug>/pulls 并回 URL",
+          posted[0] == "POST" and posted[1] == "repos/o/r/pulls"
+          and posted[2].get("json_body", {}).get("head") == "agent/fix-2"
+          and url.endswith("/pulls/7"),
+          f"calls={calls} url={url}")
+    try:
+        client.create_pull_request("noslash", head="a", base="b", title="t")
+        check("非法 forgejo_repo 被拒", False, "竟然通过了")
+    except ForgejoError:
+        check("非法 forgejo_repo 被拒", True)
 
 
 # ── §9.4: gates normalisation ────────────────────────────────────────
@@ -438,13 +901,86 @@ def check_secret_masking() -> None:
 
 # ── main ─────────────────────────────────────────────────────────────
 
+def check_publish_safety() -> None:
+    """Publish order, lease fencing and retry isolation (P0-1/P0-2/P1-5)."""
+    print("\n发布顺序 / 租约 fencing / 重试隔离")
+
+    # Findings are the durable record of a review and must be written before the
+    # non-idempotent push/PR, so a crash after publishing cannot lose them.
+    with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+        sink = RecordingSink()
+        adapter = FakeAdapter([_finding()])
+        outcome = AgentRunner(adapter=adapter, sink=sink, work_root=root).run(
+            TaskRequest(task_id="30", repo_url="u", commit_sha="f" * 40,
+                        kind="fix", branch="agent/fix-30")
+        )
+        calls = adapter.calls
+        check(
+            "emit 与 record_findings 发生在 push/open_pr 之前",
+            outcome.status == "done"
+            and "emit" in calls and "push" in calls and "open_pr" in calls
+            and calls.index("emit") < calls.index("push") < calls.index("open_pr")
+            and bool(sink.recorded),
+            f"calls={calls}",
+        )
+
+    # A worker that lost its lease must fail before touching the remote.
+    with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+        sink = RecordingSink()
+        adapter = FakeAdapter([_finding()])
+
+        def lost_lease() -> None:
+            raise AgentRunnerError("租约已被回收")
+
+        outcome = AgentRunner(
+            adapter=adapter, sink=sink, work_root=root, publish_guard=lost_lease,
+        ).run(TaskRequest(task_id="31", repo_url="u", commit_sha="a" * 40,
+                          kind="fix", branch="agent/fix-31"))
+        check(
+            "租约丢失 → 不 push、不开 PR，任务 failed",
+            outcome.status == "failed" and not adapter.pushed
+            and "open_pr" not in adapter.calls,
+            f"status={outcome.status} calls={adapter.calls}",
+        )
+
+    # A broken guard must fail closed, not silently allow the publish.
+    with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
+        adapter = FakeAdapter([_finding()])
+
+        def broken() -> None:
+            raise OSError("db down")
+
+        outcome = AgentRunner(
+            adapter=adapter, sink=RecordingSink(), work_root=root, publish_guard=broken,
+        ).run(TaskRequest(task_id="32", repo_url="u", commit_sha="b" * 40,
+                          kind="fix", branch="agent/fix-32"))
+        check(
+            "发布守卫自身报错也 fail-closed",
+            outcome.status == "failed" and not adapter.pushed,
+            f"status={outcome.status} calls={adapter.calls}",
+        )
+
+    # A retry must not reuse the previous attempt's directory (or branch).
+    check(
+        "重试使用独立的工作目录",
+        workdir_for("/w", "7") != workdir_for("/w", "7", 1)
+        and "attempt1" in workdir_for("/w", "7", 1).name,
+    )
+
+
 def main() -> int:
     check_protocol_order()
     check_push_guard()
+    check_pr_policy()
+    check_worker_wiring()
+    check_review_command()
+    check_findings_ingestion()
+    check_open_pr_seam()
     check_gates()
     check_result_schema()
     check_workdir_retention()
     check_secret_masking()
+    check_publish_safety()
 
     if _problems:
         print(f"\n❌ {len(_problems)} check(s) failed")

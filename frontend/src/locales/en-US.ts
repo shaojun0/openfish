@@ -803,10 +803,10 @@ export default {
     cloneCommandLabel: 'Read-only URL (intranet)',
     authTitle: 'Authentication',
     authDesc:
-      'git and the API share one credential: HTTP Basic, any username, the API key as the password. Never paste a key-bearing URL into a script or commit it to a repository.',
-    cloneAuthLabel: 'Example with an API key',
+      'git does not reuse the API key. This endpoint exchanges a platform credential (repo:push) for a short-lived Forgejo token; use the returned username/password as HTTP Basic when git asks. Never paste a key-bearing URL into a script or commit it to a repository.',
+    cloneAuthLabel: 'Mint a git ticket (API key → short-lived Forgejo token)',
     authNote:
-      'Create keys on the API keys page. Pushing needs repo:push and is still subject to branch protection.',
+      'Create keys on the API keys page. Pushing needs repo:push. The DSH enterprise-intranet plugin installs a credential helper that mints the ticket automatically.',
     keyLink: 'Create an API key',
     loadFailed: 'Failed to load the repository',
     issuesTitle: 'Issue browser',

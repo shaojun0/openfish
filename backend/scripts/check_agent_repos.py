@@ -49,12 +49,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from sqlalchemy import (  # noqa: E402
-    Boolean, Column, DateTime, Integer, MetaData, String, Text, create_engine,
-    event, select,
+    Boolean, CheckConstraint, Column, DateTime, Integer, MetaData, String, Text,
+    create_engine, event, select,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker  # noqa: E402
 
-from models.agent_hub import TASK_KIND  # noqa: E402
+#: ``_in_check`` is the model's own CHECK-expression builder.  The fake
+#: ``import_jobs`` below reuses it so the substitute table carries the real
+#: ``ck_import_jobs_phase``; without it ``ensure_schema`` would rebuild the
+#: substitute into the real DDL and the fake ORM class would no longer match.
+from models.agent_hub import IMPORT_PHASE, TASK_KIND, _in_check  # noqa: E402
 from routes.repo_webhook import (  # noqa: E402
     AGENT_LABEL, PRIORITY_DOC, PRIORITY_FIX, PRIORITY_REVIEW, backfill_pr_url,
     compute_signature, enqueue_task, parse_event, plan_actions, verify_signature,
@@ -119,11 +123,22 @@ def _build_models(*, with_partial: bool) -> tuple[dict[str, Any], MetaData]:
         synced_at = Column(DateTime(timezone=True))
         issue_count = Column(Integer, nullable=False, default=0)
         commit_count = Column(Integer, nullable=False, default=0)
+        # The webhook reads the cached per-repo review policy off this column
+        # (``None`` = "not read yet" → review on), so the substitute table must
+        # carry it or the server-side Repo query selects a missing column.
+        auto_review = Column(Boolean, nullable=True)
         created_at = Column(DateTime(timezone=True))
         updated_at = Column(DateTime(timezone=True))
 
     class ImportJob(Base):
         __tablename__ = "import_jobs"
+        #: Same name and literals as the model's generated CHECK: this is what
+        #: stops ``models.agent_hub_migrate.evolve_check_constraints`` from
+        #: rebuilding the substitute table out from under the fake ORM class.
+        __table_args__ = (
+            CheckConstraint(_in_check("phase", IMPORT_PHASE),
+                            name="ck_import_jobs_phase"),
+        )
         id = Column(Integer, primary_key=True, autoincrement=True)
         repo_id = Column(Integer, nullable=False)
         mode = Column(String(32), nullable=False, default="code+issues")
@@ -137,6 +152,7 @@ def _build_models(*, with_partial: bool) -> tuple[dict[str, Any], MetaData]:
         error = Column(Text)
         started_at = Column(DateTime(timezone=True))
         finished_at = Column(DateTime(timezone=True))
+        created_at = Column(DateTime(timezone=True))
         if with_partial:
             partial = Column(Boolean, nullable=False, default=False)
 
@@ -791,6 +807,26 @@ def scenario_webhook() -> None:
     check("push to a side branch queues nothing",
           plan_actions(parse_event("push", _push_payload("agent/x")), repo_id=7) == [])
 
+    after_only = _push_payload()
+    after_only.pop("commits")
+    after_only["after"] = "e" * 40
+    actions = plan_actions(parse_event("push", after_only), repo_id=7, auto_review=True)
+    check("push uses `after` when the commit list is absent",
+          [a.payload["commit_sha"] for a in actions] == ["e" * 40],
+          str([a.payload for a in actions]))
+
+    deleted = _push_payload()
+    deleted["deleted"] = True
+    deleted["after"] = "0" * 40
+    deleted["commits"] = []
+    check("branch deletion queues nothing",
+          plan_actions(parse_event("push", deleted), repo_id=7, auto_review=True) == [])
+
+    shapeless = _push_payload()
+    shapeless["commits"] = []
+    check("push without a usable sha queues nothing",
+          plan_actions(parse_event("push", shapeless), repo_id=7, auto_review=True) == [])
+
     issue = parse_event("issues", _issue_payload([AGENT_LABEL, "bug"]))
     actions = plan_actions(issue, repo_id=7)
     check("issue labelled `agent` queues a fix",
@@ -808,17 +844,35 @@ def scenario_webhook() -> None:
                        "default_branch": "main"},
     })
     actions = plan_actions(merged, repo_id=7)
-    check("merged PR queues the doc write-back",
-          [a.kind for a in actions] == ["backfill"], str([a.kind for a in actions]))
-    check("the doc task uses one of S0's task kinds",
-          all(kind in TASK_KIND for kind in (a.kind for a in actions)),
-          str(TASK_KIND))
+    check("merged PR queues nothing — the write-back runs inline",
+          actions == [], str([a.kind for a in actions]))
+    check("the reserved doc kind is still in S0's vocabulary (documented, never queued)",
+          "backfill" in TASK_KIND, str(TASK_KIND))
     unmerged = parse_event("pull_request", {
         "action": "closed",
         "pull_request": {"number": 56, "state": "closed", "merged": False},
         "repository": {"full_name": "openfish/vllm-project__vllm"},
     })
     check("unmerged PR queues nothing", plan_actions(unmerged, repo_id=7) == [])
+
+    # The per-repo opt-out must actually reach the decision: the import pipeline
+    # caches `.agent/review-policy.yml`'s auto_review on the repos row, and the
+    # view feeds that through as the policy reader.
+    from routes.repo_webhook import _repo_policy_reader
+
+    class _CachedOff:
+        auto_review = False
+
+    class _NotRead:
+        auto_review = None
+
+    check("cached auto_review=False 会抑制 push review",
+          plan_actions(push_main, repo_id=7,
+                       policy_reader=_repo_policy_reader(_CachedOff())) == [])
+    check("未读取策略时默认开启 review",
+          [a.kind for a in plan_actions(
+              push_main, repo_id=7, policy_reader=_repo_policy_reader(_NotRead()),
+          )] == ["review"])
 
     # -- end-to-end through the queue shim
     queue = FakeQueue()
@@ -1115,13 +1169,24 @@ def scenario_queue_delivery() -> None:
                 rows = conn.execute(text(
                     "SELECT repo_id, kind, priority, status, payload FROM agent_tasks"
                 )).fetchall()
-            check("exactly one agent_task row was written", len(rows) == 1, str(rows))
-            row = dict(rows[0]._mapping) if rows else {}
+            by_kind = {row._mapping["kind"]: dict(row._mapping) for row in rows}
+            check(
+                "the push queues a review and one curator (checks) proposal",
+                set(by_kind) == {"review", "checks"}, str(rows),
+            )
+            row = by_kind.get("review", {})
             check("the task targets the right repo", row.get("repo_id") == repo.id,
                   str(row))
-            check("the task kind is review", row.get("kind") == "review", str(row))
             check("the task carries the pushed sha",
                   "a" * 40 in str(row.get("payload")), str(row.get("payload")))
+            proposal = by_kind.get("checks", {})
+            check(
+                "the curator proposal is a bootstrap-scoped checks task",
+                proposal.get("repo_id") == repo.id
+                and proposal.get("priority") == 4
+                and "bootstrap" in str(proposal.get("payload")),
+                str(proposal),
+            )
             check("the queue can lease what the webhook wrote",
                   queue.claim(worker="gate-worker") is not None,
                   "claim returned nothing")
@@ -1132,7 +1197,112 @@ def scenario_queue_delivery() -> None:
         harness.close()
 
 
+# ── Import phase vocabulary (the `validate` 500 regression) ──────────
+
+def scenario_import_phase_vocabulary() -> None:
+    """The model's CHECK must admit every phase the pipeline can persist.
+
+    A fresh job is created in ``phase="validate"`` (``repo_import.create_job``).
+    While ``IMPORT_PHASE`` omitted it, the generated ``ck_import_jobs_phase``
+    rejected the insert and ``POST /repos/import`` answered 500 — and this gate
+    stayed green, because every other scenario runs against a hand-built fake
+    schema.  This one uses the **real** model tables, so the two vocabularies
+    cannot drift apart again without turning the gate red.
+    """
+    section("import phase vocabulary")
+
+    from models.agent_hub import IMPORT_PHASE, ImportJob, Repo
+    from models.base import Base as ModelBase
+
+    check("the model admits the pipeline's first phase",
+          "validate" in IMPORT_PHASE, f"IMPORT_PHASE={IMPORT_PHASE!r}")
+    check("JOB_PHASES is covered by IMPORT_PHASE",
+          set(repo_import.JOB_PHASES) <= set(IMPORT_PHASE),
+          f"extra={sorted(set(repo_import.JOB_PHASES) - set(IMPORT_PHASE))}")
+    check("PHASE_BOUNDS covers exactly JOB_PHASES",
+          set(repo_import.PHASE_BOUNDS) == set(repo_import.JOB_PHASES),
+          f"bounds={sorted(repo_import.PHASE_BOUNDS)}")
+
+    engine = create_engine("sqlite://")
+    ModelBase.metadata.create_all(engine, tables=[Repo.__table__, ImportJob.__table__])
+    try:
+        with Session(engine) as session:
+            repo = Repo(
+                slug="phase-vocabulary", source="local", kind="workspace",
+                default_branch="main", sync_state="ready",
+            )
+            session.add(repo)
+            session.commit()
+            for phase in repo_import.JOB_PHASES:
+                session.add(ImportJob(
+                    repo_id=repo.id, mode="code", status="queued", phase=phase,
+                ))
+                try:
+                    session.commit()
+                except Exception as exc:  # noqa: BLE001 - the CHECK is the assertion
+                    session.rollback()
+                    check(f"the real schema admits phase {phase!r}", False, str(exc))
+                    continue
+                check(f"the real schema admits phase {phase!r}", True)
+    finally:
+        engine.dispose()
+
+
 # ── main ─────────────────────────────────────────────────────────────
+
+def scenario_enqueue_admission() -> None:
+    """Producer-side admission control: dedup by key + per-repo ceiling.
+
+    A webhook storm (redelivery, force-push loop) used to create unbounded rows:
+    the same commit could be queued N times and one repository could fill the
+    single global queue.  ``AgentQueue.enqueue`` now suppresses an active
+    duplicate (``(repo_id, kind, dedup_key)``) and any enqueue past the repo's
+    in-flight ceiling, returning ``0`` so the caller reports ``delivered: false``
+    instead of mistaking the storm for success.
+    """
+    section("9 · producer-side admission control")
+
+    from services.agent_queue import AgentQueue
+    from models.agent_hub import AgentTask, Repo as RealRepo
+    from models.agent_hub_migrate import ensure_schema
+
+    engine = create_engine("sqlite://")
+    ensure_schema(engine)
+    with Session(engine) as session:
+        repo = RealRepo(slug="admission", source="local", kind="workspace",
+                        default_branch="main", sync_state="ready")
+        session.add(repo)
+        session.commit()
+        repo_id = int(repo.id)
+
+    queue = AgentQueue(engine)
+    sha = "a" * 40
+    first = queue.enqueue(repo_id, kind="review", payload={"commit_sha": sha},
+                          dedup_key=sha)
+    check("首次入队成功", first > 0, str(first))
+    check("同一 dedup_key 的在途任务被抑制",
+          queue.enqueue(repo_id, kind="review", payload={"commit_sha": sha},
+                        dedup_key=sha) == 0)
+
+    # A *finished* task is not an active duplicate: the key may be enqueued again.
+    with Session(engine) as session:
+        task = session.get(AgentTask, first)
+        task.status = "done"
+        session.commit()
+    check("任务结束后同一 key 可以再次入队",
+          queue.enqueue(repo_id, kind="review", payload={"commit_sha": sha},
+                        dedup_key=sha) > 0)
+
+    # The ceiling counts every active status for the repo, across kinds.  One
+    # review is already active here, so a ceiling of 1 suppresses the next.
+    check("per-repo 在途上限生效",
+          queue.enqueue(repo_id, kind="checks", payload={"commit_sha": "b" * 40},
+                        dedup_key="b" * 40, max_in_flight_per_repo=1) == 0)
+    check("不超过上限时仍可入队",
+          queue.enqueue(repo_id, kind="fix", payload={"sha": "c"},
+                        dedup_key="c", max_in_flight_per_repo=5) > 0)
+    engine.dispose()
+
 
 def main() -> int:
     print("── Agent Hub · repository slice (S1) offline gate " + "─" * 12)
@@ -1146,6 +1316,8 @@ def main() -> int:
         scenario_webhook,
         scenario_http,
         scenario_queue_delivery,
+        scenario_import_phase_vocabulary,
+        scenario_enqueue_admission,
     ):
         try:
             scenario()

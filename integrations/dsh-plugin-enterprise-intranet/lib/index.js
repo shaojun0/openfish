@@ -594,6 +594,13 @@ export function apply(ctx, config) {
     const apiKey = JSON.stringify(String(key || ''))
     const verifyTls = configNow().verifyTls === true
     const caFile = JSON.stringify(String(configNow().caFile || ''))
+    // The helper must only ever answer for *this* platform.  Without the host
+    // check, git would hand the minted Forgejo token to any https host whose
+    // path looks like <owner>/<name>.
+    const platformHost = (() => {
+      try { return new URL(configNow().platformUrl || DEFAULTS.platformUrl).host.toLowerCase() } catch { return '' }
+    })()
+    const platformHostLiteral = JSON.stringify(platformHost)
     return `#!/usr/bin/env node
 // 由 dsh-plugin-enterprise-intranet 自动生成，请勿手改。
 // openfish git credential helper：把平台 API key 换成短期 Forgejo 票。
@@ -603,6 +610,7 @@ const http = require('node:http')
 const https = require('node:https')
 
 const PLATFORM = ${platform}
+const PLATFORM_HOST = ${platformHostLiteral}
 const API_KEY = ${apiKey}
 const VERIFY_TLS = ${verifyTls ? 'true' : 'false'}
 const CA_FILE = ${caFile}
@@ -610,6 +618,14 @@ const CA_FILE = ${caFile}
 function fail(reason) {
   process.stderr.write('openfish-git-credential: ' + reason + '\\n')
   process.exit(0) // 空答案 = 没有凭据，让 git 继续（可能提示输入），不阻塞
+}
+
+/** Strip a default port so :443 / :80 compare equal to the bare host. */
+function normalizeHost(value) {
+  const host = String(value || '').toLowerCase()
+  if (host.endsWith(':443')) return host.slice(0, -4)
+  if (host.endsWith(':80')) return host.slice(0, -3)
+  return host
 }
 
 function readStdin() {
@@ -663,6 +679,10 @@ async function main() {
     if (at > 0) fields[line.slice(0, at)] = line.slice(at + 1)
   }
   if (fields.protocol !== 'http' && fields.protocol !== 'https') return
+  if (!PLATFORM_HOST || normalizeHost(fields.host) !== normalizeHost(PLATFORM_HOST)) {
+    fail('refusing to answer for host ' + (fields.host || '<none>'))
+    return
+  }
   const parts = String(fields.path || '')
     .replace(/^\\/+/, '')
     .replace(/\\.git$/, '')

@@ -36,6 +36,7 @@ import hmac
 import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from flask import Blueprint, current_app, jsonify, request
@@ -43,6 +44,11 @@ from flask import Blueprint, current_app, jsonify, request
 from models.agent_hub import TASK_KIND
 from openapi import api_operation, errors, json_body, ok
 from services.repo_import import ImportConfig, read_policy_auto_review
+from services.review_policy import (
+    CURATOR_AUTO,
+    CURATOR_BOOTSTRAP,
+    DEFAULT_CURATOR_MIN_INTERVAL_SECONDS,
+)
 
 logger = logging.getLogger("cpypiserver.routes.repo_webhook")
 
@@ -61,16 +67,19 @@ EVENT_HEADERS = ("X-Forgejo-Event", "X-Gitea-Event", "X-GitHub-Event")
 AGENT_LABEL = "agent"
 
 #: Queue priorities.  ``AgentQueue.lease`` orders by ``priority DESC``, so a
-#: *larger* number is more urgent.  A merge-triggered doc write-back is the
-#: least urgent thing the webhook can ask for; an ``agent``-labelled issue is a
-#: person waiting, so it outranks the automatic review.
+#: *larger* number is more urgent.  A merge-triggered doc write-back is no longer
+#: queued (it runs inline in the view), so ``PRIORITY_DOC`` survives only as the
+#: floor that keeps the ordering assertions honest; an ``agent``-labelled issue
+#: is a person waiting, so it outranks the automatic review.
 PRIORITY_DOC = 3
+#: A curator proposal is background housekeeping: below a review, above nothing.
+PRIORITY_CURATOR = 4
 PRIORITY_REVIEW = 5
 PRIORITY_FIX = 8
 
-#: The task kind a merged pull request queues.  S0's ``TASK_KIND`` is a closed
-#: set (``review | fix | import | backfill``) and there is no "docs" kind: the
-#: doc write-back *is* a backfill of the repository's history into ``/docs``.
+#: The task kind S0 reserves for a repository-wide history write-back.  No
+#: handler implements it, so the webhook must never enqueue it: a merged PR's
+#: write-back is the synchronous :func:`backfill_pr_url` call in the view.
 DOC_TASK_KIND = "backfill"
 
 #: Actions that make an issue worth acting on.
@@ -326,6 +335,9 @@ class QueuedAction:
     delivered: bool = False
     task: Any = None
     reason: str = ""
+    #: Producer idempotency token, checked by ``AgentQueue.enqueue`` against the
+    #: active tasks of the same ``(repo_id, kind)``.  Empty means no dedup.
+    dedup_key: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -385,14 +397,20 @@ def enqueue_task(
     payload: dict[str, Any],
     priority: int,
     enqueue: Callable[..., Any] | None = None,
+    dedup_key: str = "",
 ) -> QueuedAction:
     """Queue one agent task, degrading to a logged no-op when the queue is absent.
 
     The call shape is S0's::
 
-        queue.enqueue(repo_id, kind=..., payload=dict, priority=int)
+        queue.enqueue(repo_id, kind=..., payload=dict, priority=int, dedup_key=...)
+
+    A ``0`` return is the queue's "suppressed" sentinel (an active duplicate, or
+    the repository at its in-flight ceiling): the action is reported as *not*
+    delivered, with the reason, so a storm is visible instead of looking queued.
     """
-    action = QueuedAction(kind=kind, repo_id=repo_id, priority=priority, payload=payload)
+    action = QueuedAction(kind=kind, repo_id=repo_id, priority=priority,
+                          payload=payload, dedup_key=dedup_key)
     if kind not in TASK_KIND:
         action.reason = f"未知任务类型 {kind!r}（TASK_KIND={TASK_KIND}）"
         logger.warning("webhook will not queue %s for repo %s: %s",
@@ -406,8 +424,16 @@ def enqueue_task(
         return action
     sender, _owner = resolved
     try:
-        action.task = sender(repo_id, kind=kind, payload=payload, priority=priority)
-        action.delivered = True
+        action.task = sender(
+            repo_id, kind=kind, payload=payload, priority=priority,
+            dedup_key=dedup_key,
+        )
+        if action.task:
+            action.delivered = True
+        else:
+            action.reason = "重复投递或该仓库在途任务已达上限，已抑制（未写入队列）"
+            logger.info("webhook suppressed %s for repo %s: %s",
+                        kind, repo_id, action.reason)
     except Exception as exc:  # noqa: BLE001 - a queue fault must not 500 a webhook
         action.reason = f"{type(exc).__name__}: {exc}"
         logger.exception("webhook could not queue %s for repo %s", kind, repo_id)
@@ -416,12 +442,59 @@ def enqueue_task(
 
 # ── Policy ───────────────────────────────────────────────────────────
 
+def read_curator_policy(repo_root: str | Path | None = None) -> tuple[str, int]:
+    """``(mode, min_interval_seconds)`` for the curator trigger.
+
+    Reads the repository's ``.agent/review-policy.yml`` through S3's parser when
+    it is available and degrades to the documented default (``bootstrap``, one
+    hour) on any error: a broken policy must never turn a webhook into a 500,
+    and the default is the conservative one.
+    """
+    try:
+        from services.review_policy import load as load_policy
+
+        document = load_policy(repo_root)
+        return (
+            str(document.defaults.curator),
+            int(document.defaults.curator_min_interval_seconds),
+        )
+    except Exception as exc:  # noqa: BLE001 - policy trouble never blocks a webhook
+        logger.warning("curator policy lookup failed; using default bootstrap: %s", exc)
+        return CURATOR_BOOTSTRAP, DEFAULT_CURATOR_MIN_INTERVAL_SECONDS
+
+
+def curator_enqueue_allowed(
+    session: Any,
+    repo_id: int,
+    *,
+    mode: str = CURATOR_BOOTSTRAP,
+    min_interval_seconds: int = 0,
+) -> tuple[bool, str]:
+    """The DB-backed dedup/rate-limit verdict for a curator proposal.
+
+    Fails *closed*: if the gate cannot be evaluated we do not enqueue, because
+    the failure mode of "too many proposal PRs" is worse than "a proposal was
+    skipped and a later push will ask again".
+    """
+    try:
+        from services.check_store import curator_should_enqueue
+
+        return curator_should_enqueue(
+            session, repo_id, mode=mode, min_interval_seconds=min_interval_seconds
+        )
+    except Exception as exc:  # noqa: BLE001 - never 500 a webhook
+        logger.warning("curator enqueue gate unavailable for repo %s: %s", repo_id, exc)
+        return False, f"curator gate unavailable: {exc}"
+
+
 def plan_actions(
     event: WebhookEvent,
     *,
     repo_id: int,
     auto_review: bool | None = None,
     policy_reader: Callable[[], bool] | None = None,
+    curator_mode: str | None = None,
+    curator_allowed: bool = True,
 ) -> list[QueuedAction]:
     """Decide what *event* should queue.  Pure: no I/O, no database.
 
@@ -431,11 +504,29 @@ def plan_actions(
     and anything else queues nothing.  ``auto_review`` (when given) overrides
     the policy lookup, which is how the gate drives both branches of that
     decision with no files on disk.
+
+    ``curator_mode`` (``DESIGN-ai-checks.md`` §B) additionally queues a
+    ``checks`` proposal on a default-branch push when it is ``bootstrap`` or
+    ``auto`` **and** ``curator_allowed`` is true.  The mode is independent of
+    ``auto_review``: a repository that does not want automatic reviews may still
+    want its check suite bootstrapped.  ``curator_allowed`` carries the
+    enqueue-side dedup/rate-limit verdict, which needs the database and so is
+    computed by the caller and passed in — keeping this function pure.
     """
     actions: list[QueuedAction] = []
 
     if event.kind == "push":
         if not event.is_default_branch:
+            return actions
+        # A branch deletion carries no tip to review: ``after`` is all zeroes and
+        # the commit list is empty.  Queueing here would fail the task later.
+        if event.raw.get("deleted"):
+            return actions
+        head_sha = _head_sha(event)
+        if not head_sha:
+            logger.info(
+                "push on %s carried no usable commit sha; nothing queued", event.branch,
+            )
             return actions
         if auto_review is not None:
             allowed = bool(auto_review)
@@ -446,20 +537,35 @@ def plan_actions(
             except Exception as exc:  # noqa: BLE001 - policy trouble never blocks a push
                 logger.warning("auto_review policy lookup failed: %s", exc)
                 allowed = True
-        if not allowed:
-            return actions
-        actions.append(QueuedAction(
-            kind="review",
-            repo_id=repo_id,
-            priority=PRIORITY_REVIEW,
-            payload={
-                "commit_sha": _head_sha(event),
-                "branch": event.branch,
-                "trigger": "push",
-                "sender": event.sender,
-            },
-            reason="push to default branch with auto_review",
-        ))
+        if allowed:
+            actions.append(QueuedAction(
+                kind="review",
+                repo_id=repo_id,
+                priority=PRIORITY_REVIEW,
+                payload={
+                    "commit_sha": head_sha,
+                    "branch": event.branch,
+                    "trigger": "push",
+                    "sender": event.sender,
+                },
+                reason="push to default branch with auto_review",
+                dedup_key=head_sha,
+            ))
+        if curator_mode in (CURATOR_BOOTSTRAP, CURATOR_AUTO) and curator_allowed:
+            actions.append(QueuedAction(
+                kind="checks",
+                repo_id=repo_id,
+                priority=PRIORITY_CURATOR,
+                payload={
+                    "commit_sha": head_sha,
+                    "branch": event.branch,
+                    "trigger": "push",
+                    "suite_scope": curator_mode,
+                    "sender": event.sender,
+                },
+                reason=f"curator={curator_mode} on push to default branch",
+                dedup_key=f"checks:{curator_mode}:{head_sha}",
+            ))
         return actions
 
     if event.kind == "issues":
@@ -478,29 +584,49 @@ def plan_actions(
                 "sender": event.sender,
             },
             reason=f"issue carries the {AGENT_LABEL!r} label",
+            dedup_key=f"issue:{event.issue_number}" if event.issue_number else "",
         ))
         return actions
 
     if event.kind == "pull_request" and event.merged:
-        # `TASK_KIND` is S0's closed set — `backfill` is the repository-wide
-        # "write the history back" task, which is what §5.4's doc write-back is.
-        actions.append(QueuedAction(
-            kind=DOC_TASK_KIND,
-            repo_id=repo_id,
-            priority=PRIORITY_DOC,
-            payload={
-                "pr_number": event.pr_number,
-                "pr_url": event.pr_url,
-                "trigger": "pull_request-merged",
-                "sender": event.sender,
-            },
-            reason="merged pull request triggers the doc write-back",
-        ))
+        # The doc write-back is *synchronous*: the view calls
+        # :func:`backfill_pr_url` against the findings table directly (see the
+        # route below).  Queueing a ``backfill`` task here was pure waste — no
+        # handler implements that kind, so every merged PR produced a task that
+        # burned three attempts and landed in ``dead``.  The event is still
+        # ``handled`` (the write-back ran); nothing is queued.
+        logger.info(
+            "merged pull request %s: doc write-back runs inline, nothing queued",
+            event.pr_number,
+        )
     return actions
 
 
+def _repo_policy_reader(repo: Any) -> Callable[[], bool]:
+    """``auto_review`` for *repo*, from the value the import pipeline cached.
+
+    The API host has no checkout, so ``read_policy_auto_review()`` with no
+    ``repo_root`` could only ever answer ``True``.  The import/sync pipeline reads
+    ``.agent/review-policy.yml`` from the Forgejo contents API and stores the
+    result on the row (``repos.auto_review``); ``None`` means "never read", which
+    keeps the documented default of reviewing every default-branch push.
+    """
+    def read() -> bool:
+        value = getattr(repo, "auto_review", None)
+        return True if value is None else bool(value)
+
+    return read
+
+
 def _head_sha(event: WebhookEvent) -> str:
-    """The pushed tip, from the payload's commit list when it is present."""
+    """The pushed tip: ``after`` first, then the payload's commit list.
+
+    ``commits`` is truncated by the forge and empty for a deletion; ``after`` is
+    the field that always names the new tip.
+    """
+    after = str(event.raw.get("after") or "").strip()
+    if after and set(after) != {"0"}:
+        return after
     for commit in reversed(event.commits):
         sha = commit.get("id") or commit.get("sha")
         if sha:
@@ -528,18 +654,26 @@ def resolve_repo(session: Any, event: WebhookEvent) -> Any | None:
             continue
         attr = getattr(Repo, column)
         for value in candidates:
-            found = session.query(Repo).filter(attr == value).one_or_none()
+            # ``first()``, not ``one_or_none()``: two slugs can resolve to the
+            # same Forgejo name while the naming policy is being tuned, and a
+            # webhook must never answer 500 over that.
+            found = session.query(Repo).filter(attr == value).first()
             if found is not None:
                 return found
     return None
 
 
 def backfill_pr_url(session: Any, repo_id: int, number: int, url: str) -> int:
-    """Record ``pr_url`` on the findings whose run produced this PR.
+    """Record ``pr_url`` on this repository's findings that have none yet.
 
     S3 owns the finding state machine; this is the one write §5.4 asks the
     webhook to make.  It is defensive on purpose: a schema S3 has not finished
     shipping must not turn a webhook into a 500.
+
+    Scope note: the schema has no PR↔finding link (``review_runs`` carries no PR
+    number), so this is deliberately repository-wide over ``pr_url IS NULL`` and
+    the caller must only invoke it for a **merged** pull request.  Narrowing it
+    further needs S3 to persist the run that opened the PR.
     """
     if not number or not url:
         return 0
@@ -610,9 +744,10 @@ def _session():
         "about which of the two it was. The comparison is constant-time.\n\n"
         "A `push` to the default branch queues a `review` task when the review "
         "policy allows; an `issues` event whose labels include `agent` queues a "
-        "`fix` task; a `pull_request` event records the PR URL against the "
-        "findings it closes. Unknown events answer `200` with "
-        "`handled: false` so Forgejo does not retry them forever."
+        "`fix` task; a **merged** `pull_request` event records the PR URL against "
+        "the findings that have none yet. Unknown events and events for a "
+        "repository this platform has not imported answer `200` with "
+        "`handled: false`, so Forgejo does not retry them forever."
     ),
     tags=["Repositories"],
     # Anonymous on purpose: the HMAC is the credential.  `security=[]` is what
@@ -621,7 +756,7 @@ def _session():
     request_body={"required": True, "content": json_body()},
     responses={
         "200": ok("The event was accepted", _WEBHOOK_SCHEMA),
-        **errors("400", "401", "404", "500"),
+        **errors("400", "401", "500"),
     },
 )
 def forgejo_webhook():
@@ -660,18 +795,45 @@ def forgejo_webhook():
     session = _session()
     repo = resolve_repo(session, event)
     if repo is None:
+        # 200, not 404: an unimported repository is a permanent condition, and a
+        # 4xx makes Forgejo retry the delivery forever (the same reason unknown
+        # events answer 200).
         logger.warning("webhook for unknown repository %r (%s)",
                        event.forgejo_repo or event.repo_slug, event.kind)
         return jsonify({
-            "error": "repo_not_found",
-            "error_description": (
-                f"平台没有镜像仓库 {event.forgejo_repo or event.repo_slug!r}；"
-                "先用 POST /api/v1/repos/import 导入"
-            ),
+            "ok": True,
             "event": event.kind,
-        }), 404
+            "action": event.action,
+            "repo": event.forgejo_repo or event.repo_slug,
+            "slug": None,
+            "handled": False,
+            "queued": [],
+            "findings_updated": 0,
+            "note": (
+                f"平台没有镜像仓库 {event.forgejo_repo or event.repo_slug!r}；"
+                "先用 POST /api/v1/repos/import 导入（返回 200 以免 Forgejo 反复重试）"
+            ),
+        })
 
-    actions = plan_actions(event, repo_id=repo.id)
+    curator_mode, curator_interval = read_curator_policy()
+    if event.kind == "push" and event.is_default_branch:
+        curator_allowed, curator_reason = curator_enqueue_allowed(
+            session, repo.id, mode=curator_mode, min_interval_seconds=curator_interval,
+        )
+    else:
+        curator_allowed, curator_reason = True, ""
+
+    actions = plan_actions(
+        event,
+        repo_id=repo.id,
+        policy_reader=_repo_policy_reader(repo),
+        curator_mode=curator_mode,
+        curator_allowed=curator_allowed,
+    )
+    if not curator_allowed and curator_reason:
+        logger.info(
+            "webhook curator proposal suppressed for %s: %s", repo.slug, curator_reason,
+        )
     queued: list[QueuedAction] = []
     for action in actions:
         queued.append(enqueue_task(
@@ -679,15 +841,18 @@ def forgejo_webhook():
             repo_id=action.repo_id,
             payload=action.payload,
             priority=action.priority,
+            dedup_key=action.dedup_key,
         ))
 
     updated = 0
-    if event.kind == "pull_request":
+    if event.kind == "pull_request" and event.merged:
+        # Only a merged PR is evidence of a fix; an opened or closed-unmerged PR
+        # must not be stamped onto the repository's findings.
         updated = backfill_pr_url(
             session, repo.id, event.pr_number or 0, event.pr_url,
         )
 
-    handled = bool(queued) or event.kind == "pull_request"
+    handled = bool(queued) or (event.kind == "pull_request" and event.merged)
     note = None
     if event.kind == "push" and not event.is_default_branch:
         note = "push 目标不是默认分支，未入队"
@@ -714,14 +879,17 @@ def forgejo_webhook():
 __all__ = [
     "AGENT_LABEL",
     "EVENT_HEADERS",
+    "PRIORITY_CURATOR",
     "SIGNATURE_HEADERS",
     "QueuedAction",
     "WebhookEvent",
     "backfill_pr_url",
     "compute_signature",
+    "curator_enqueue_allowed",
     "enqueue_task",
     "parse_event",
     "plan_actions",
+    "read_curator_policy",
     "repo_webhook_bp",
     "resolve_repo",
     "signature_header",
