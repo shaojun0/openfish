@@ -264,6 +264,36 @@ export async function fetchRepo(slug) {
 }
 
 /**
+ * The repository's logical per-repo runner (`repo:read`).
+ *
+ * Reading is pure: a repository nobody configured answers the platform
+ * defaults with `id: null` and no row is created.  The sealed credential is
+ * never returned — `has_credential` says only whether one exists.
+ * @param {string} slug
+ * @returns {Promise<object>}
+ */
+export async function fetchRepoRunner(slug) {
+  const { data } = await http.get(`/repos/${repoPath(slug)}/runner`)
+  return data
+}
+
+/**
+ * Exchange the platform credential for a **Forgejo** git ticket (`repo:push`).
+ *
+ * The response carries a plaintext `password` (a Forgejo access token).  It is
+ * shown once and must never be stored, logged or put in a URL: the caller keeps
+ * it in memory for exactly as long as the user needs to copy it.  The ticket is
+ * **account-wide** (`read:repository` / `write:repository`), not bound to
+ * `slug`; whether a push succeeds is decided by that account's Forgejo ACL.
+ * @param {string} slug
+ * @returns {Promise<object>}
+ */
+export async function fetchGitCredential(slug) {
+  const { data } = await http.get(`/repos/${repoPath(slug)}/git-credential`)
+  return data
+}
+
+/**
  * One page of mirrored issues.
  * @param {string} slug
  * @param {{state?: string, label?: string, author?: string, q?: string, page?: number, per_page?: number, since?: string, until?: string}} [params]

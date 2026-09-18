@@ -110,6 +110,7 @@ const EXPECTED = {
   '/models': ['page__title', 'stat-row'],
   '/documentation/npm': ['page__title', 'docs-view'],
   '/repos': ['page__title', 'repos-view'],
+  '/repos/git-preview': ['page__title', 'repo-git-preview'],
   '/repos/vllm-project/vllm': ['page__title', 'repo-detail'],
   '/findings': ['page__title', 'findings-view'],
   '/findings/42': ['page__title', 'finding-detail'],

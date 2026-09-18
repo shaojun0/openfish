@@ -165,6 +165,14 @@ const groups = computed<NavGroup[]>(() => {
       items: [
         { index: '/repos', titleKey: 'nav.repos', icon: 'Folder' },
         {
+          // Preview leaf: the git access story (ticket exchange + the repo's
+          // logical runner).  Labelled as a preview so nobody treats it as a
+          // settled surface.
+          index: '/repos/git-preview',
+          titleKey: 'nav.gitPreview',
+          icon: 'Connection',
+        },
+        {
           index: '/findings',
           titleKey: 'nav.findings',
           icon: 'Warning',

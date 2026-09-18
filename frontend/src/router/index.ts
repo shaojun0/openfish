@@ -79,6 +79,15 @@ const routes: RouteRecordRaw[] = [
         meta: { titleKey: 'nav.repos', icon: 'Folder', requiresPermission: 'repo:read' },
       },
       {
+        // Git access **preview** — a static leaf inside the repos namespace.
+        // It must stay a single segment (`repos/git-preview`) and is declared
+        // before the `repos/:slug` records so a slug can never shadow it.
+        path: 'repos/git-preview',
+        name: 'repo-git-preview',
+        component: () => import('@/views/RepoGitPreview.vue'),
+        meta: { titleKey: 'nav.gitPreview', icon: 'Connection', requiresPermission: 'repo:read' },
+      },
+      {
         path: 'repos/:owner/:name',
         name: 'repo-detail',
         component: () => import('@/views/RepoDetail.vue'),
