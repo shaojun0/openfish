@@ -18,6 +18,10 @@ DSH（DeepSeek Harness）的**企业内网模式**插件。它让 DSH：
    功能（embedding / rerank / ocr / asr / tts）只在面板里展示。
 3. **切换内网包源**：pip / npm / apt / docker / nvm 的配置一次写好。
 4. **接上工具与文档目录**：面板里列出 `/api/v1/tools`、`/api/v1/docs`。
+5. **可以干净卸载**：面板「完全还原」会注销 provider、还原默认模型、删除平台
+   api-key 与各路由 key、删除 git 凭据助手、删除本插件生成的包源配置与状态文件
+   （被用户改过的文件保留）。DSH 没有卸载钩子，所以顺序是「先完全还原，再
+   `dsh plugin remove`」，详见插件 README。
 
 ### 它依赖平台的哪些接口
 

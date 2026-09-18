@@ -14,8 +14,12 @@
   "type": "module",
   "main": "lib/index.js",
   "private": true,
+  "scripts": {
+    "test": "node test/teardown.test.mjs"
+  },
   "files": [
     "lib",
+    "test",
     "cordis.patch.yml",
     "README.md"
   ],

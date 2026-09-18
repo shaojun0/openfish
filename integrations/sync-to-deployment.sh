@@ -24,7 +24,7 @@ DEPLOY_DIR="${DEPLOY_DIR:-/home/linaro/dsh/enterprise-intranet}"
 DST_DIR="${DEPLOY_DIR}/plugin"
 
 # 参与同步的文件（相对包根）；新增文件时记得加到这里。
-FILES=(package.json cordis.patch.yml README.md lib/index.js lib/panel.js)
+FILES=(package.json cordis.patch.yml README.md lib/index.js lib/panel.js test/teardown.test.mjs)
 
 MODE="to-deployment"
 case "${1:-}" in

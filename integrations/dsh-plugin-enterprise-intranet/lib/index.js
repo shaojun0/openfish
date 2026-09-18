@@ -70,8 +70,28 @@ const DEFAULTS = {
   apiKey: '',
 }
 
+/**
+ * 本插件写系统配置时用的根目录，默认 `/`（即真的写 `/etc/pip.conf` 等）。
+ *
+ * 置 `ENTERPRISE_INTRANET_CONFIG_ROOT` 可以把这一批文件整体挪到别处，用来在
+ * 本地完整验证「写入 → 完全还原」这条删文件的路径而不碰宿主机。它不授予任何
+ * 新权限：插件本来就要写这些路径。
+ */
+const CONFIG_ROOT = process.env.ENTERPRISE_INTRANET_CONFIG_ROOT || '/'
+
+/** 拼一个系统配置路径，锚定在 CONFIG_ROOT 下。 */
+function configPath(...parts) {
+  return path.join(CONFIG_ROOT, ...parts)
+}
+
 /** 插件生成的 git credential helper 路径（gitconfig 里指向它）。 */
-const GIT_HELPER_PATH = '/usr/local/bin/openfish-git-credential'
+const GIT_HELPER_PATH = configPath('usr/local/bin/openfish-git-credential')
+
+/** 包名，用于判断本插件是否仍被某个 profile 声明（见 `pluginStillDeclared`）。 */
+const PACKAGE_NAME = 'dsh-plugin-enterprise-intranet'
+
+/** 包源切换写下的文件清单：`路径 -> 写入内容的 sha256`（见 `revertMirrors`）。 */
+const MIRRORS_WRITTEN_KEY = 'mirrorsWritten'
 
 /** openfish 的 provider 取值 → pi-ai 的 wire protocol。 */
 const API_BY_PROVIDER = {
@@ -125,6 +145,50 @@ function refForRoute(name) {
 
 function nowIso() {
   return new Date().toISOString()
+}
+
+/** 写入内容的指纹，用来判断一个已生成的文件是否还被用户改过。 */
+function sha256Hex(text) {
+  return crypto.createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+/**
+ * 本插件是否仍被某个 profile 声明（bundle 列表或 patch 文件里还看得到包名）。
+ *
+ * DSH 在「插件被卸载」和「进程正常关停 / 热重载」两种情况下都会 dispose 插件，
+ * 但对后者做破坏性还原是错的 —— 那只是重启。所以卸载路径上的自动还原要先用这个
+ * 判断区分两者：还声明着就什么都不动，声明没了才 `teardown()`。
+ *
+ * 读不到 `profiles/` 时保守返回 `true`（宁可不清理，也不误删）。注意：如果插件
+ * 是通过命令行 `--patch` 浮层挂载、profile 清单里从来没有过包名，热重载时可能被
+ * 误判为已卸载 —— 那种场景请用面板的「完全还原」按钮或 `POST /teardown`。
+ */
+function pluginStillDeclared() {
+  const profilesDir = path.join(DSH_HOME, 'profiles')
+  let entries
+  try {
+    entries = fs.readdirSync(profilesDir)
+  } catch {
+    return true
+  }
+  for (const entry of entries) {
+    const dir = path.join(profilesDir, entry)
+    for (const file of ['cordis.patch.yml', 'cordis.yml']) {
+      try {
+        if (fs.readFileSync(path.join(dir, file), 'utf8').includes(PACKAGE_NAME)) return true
+      } catch {
+        // 没有这个文件就继续看下一个
+      }
+    }
+    try {
+      const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
+      const bundles = manifest && manifest.dsh && manifest.dsh.profile && manifest.dsh.profile.bundles
+      if (Array.isArray(bundles) && bundles.includes(PACKAGE_NAME)) return true
+    } catch {
+      // 清单缺失或损坏时不据此判定
+    }
+  }
+  return false
 }
 
 function readState() {
@@ -772,10 +836,10 @@ main().catch((err) => fail(String((err && err.message) || err)))
       // 只读路径或本来就不存在
     }
     try {
-      const current = fs.readFileSync('/etc/gitconfig', 'utf8')
+      const current = fs.readFileSync(configPath('etc/gitconfig'), 'utf8')
       if (current.includes(GIT_HELPER_PATH)) {
-        fs.rmSync('/etc/gitconfig', { force: true })
-        removed.push('/etc/gitconfig')
+        fs.rmSync(configPath('etc/gitconfig'), { force: true })
+        removed.push(configPath('etc/gitconfig'))
       }
     } catch {
       // 没有 gitconfig 就不用管
@@ -799,7 +863,7 @@ main().catch((err) => fail(String((err && err.message) || err)))
           PIP_TRUSTED_HOST: bareHost,
         },
         files: {
-          '/etc/pip.conf': `[global]\nindex-url = ${pipIndex}\ntrusted-host = ${bareHost}\n`,
+          [configPath('etc/pip.conf')]: `[global]\nindex-url = ${pipIndex}\ntrusted-host = ${bareHost}\n`,
         },
       },
       npm: {
@@ -810,7 +874,7 @@ main().catch((err) => fail(String((err && err.message) || err)))
           npm_config_registry: `${base}/npm/`,
         },
         files: {
-          '/usr/local/etc/npmrc': `registry=${base}/npm/\n//${host}/npm/:_authToken=${key}\nstrict-ssl=false\n`,
+          [configPath('usr/local/etc/npmrc')]: `registry=${base}/npm/\n//${host}/npm/:_authToken=${key}\nstrict-ssl=false\n`,
         },
       },
       node: {
@@ -824,7 +888,7 @@ main().catch((err) => fail(String((err && err.message) || err)))
       debian: {
         label: 'apt',
         files: {
-          '/etc/apt/sources.list.d/enterprise-intranet.list':
+          [configPath('etc/apt/sources.list.d/enterprise-intranet.list')]:
             `deb [trusted=yes] ${aptSource} ./\n`,
         },
         env: {},
@@ -834,7 +898,7 @@ main().catch((err) => fail(String((err && err.message) || err)))
         // docker daemon 的 registry-mirrors 只接受 host[:port]，不接受路径前缀，
         // 因此 ECS 侧 nginx 额外把 /v2/ 映射到了平台的 /docker/v2/。
         files: {
-          '/etc/docker/daemon.json': JSON.stringify({
+          [configPath('etc/docker/daemon.json')]: JSON.stringify({
             'insecure-registries': [host],
             'registry-mirrors': [`https://${host}`],
           }, null, 2) + '\n',
@@ -847,35 +911,219 @@ main().catch((err) => fail(String((err && err.message) || err)))
         // useHttpPath，这样同一 host 下的不同 <owner>/<name> 都能区分。
         files: {
           [GIT_HELPER_PATH]: { content: gitCredentialHelperSource(key), mode: 0o700 },
-          '/etc/gitconfig': { content: gitConfigSource(), mode: 0o644 },
+          [configPath('etc/gitconfig')]: { content: gitConfigSource(), mode: 0o644 },
         },
         env: {},
       },
     }
   }
 
-  async function applyMirrors(key) {
+  /**
+   * 写包源配置，并返回 `{results, written}`。
+   *
+   * `written` 是 `路径 -> 内容 sha256` 的清单，落进状态文件；`teardown()` 靠它
+   * 只删除**本插件写下且仍未被改动**的文件，绝不碰用户自己的 `/etc/pip.conf`。
+   *
+   * `includeNonGit=false` 只写 git 那两个文件（`autoMirrors` 关掉时的自动路径）；
+   * 面板上显式的「重写包源配置」走默认值，用户点了就写。git 部分始终受
+   * `autoGitCredential` 控制 —— 关掉它时绝不能把带 key 的 helper 留在盘上。
+   */
+  async function applyMirrors(key, { includeNonGit = true } = {}) {
     const mirrors = mirrorsFor(key)
     const results = []
+    const written = {}
     const envLines = ['# 由 dsh-plugin-enterprise-intranet 自动生成（企业内网模式）']
     for (const [name, entry] of Object.entries(mirrors)) {
-      if (name === 'git' && configNow().autoGitCredential === false) {
-        // 关掉 git 自动化时不能把带 key 的 helper 留在盘上。
-        for (const file of removeGitCredential()) results.push({ file, ok: true, removed: true })
+      if (name === 'git') {
+        if (configNow().autoGitCredential === false) {
+          for (const file of removeGitCredential()) results.push({ file, ok: true, removed: true })
+          continue
+        }
+      } else if (!includeNonGit) {
         continue
       }
       for (const [file, spec] of Object.entries(entry.files || {})) {
         const value = spec && typeof spec === 'object' && !Array.isArray(spec)
           ? spec
           : { content: spec, mode: null }
-        results.push(writeConfigFile(file, value.content, value.mode))
+        const result = writeConfigFile(file, value.content, value.mode)
+        if (result.ok) written[file] = sha256Hex(value.content)
+        results.push(result)
       }
       for (const [envName, value] of Object.entries(entry.env || {})) {
         envLines.push(`export ${envName}="${String(value).replace(/"/g, '\\"')}"`)
       }
     }
-    results.push(writeConfigFile('/etc/profile.d/enterprise-intranet.sh', envLines.join('\n') + '\n'))
-    return results
+    // 只有确实有环境变量要下发时才写这个文件：git 没有 env，`includeNonGit=false`
+    // 时写一个只剩注释的文件既是残留也容易让人误解。
+    if (envLines.length > 1) {
+      const envFile = configPath('etc/profile.d/enterprise-intranet.sh')
+      const envContent = envLines.join('\n') + '\n'
+      const envResult = writeConfigFile(envFile, envContent)
+      if (envResult.ok) written[envFile] = sha256Hex(envContent)
+      results.push(envResult)
+    }
+    return { results, written }
+  }
+
+  /**
+   * 删除本插件生成、且内容仍与写入时一致的包源文件。
+   *
+   * 逐文件比对 sha256：用户改过的文件**保留**并报进 `kept`，因为那已经是他的
+   * 配置，不是我们的残留。返回 `{removed, kept}`。
+   */
+  function revertMirrors(written) {
+    const removed = []
+    const kept = []
+    for (const [file, digest] of Object.entries(written || {})) {
+      let current
+      try {
+        current = fs.readFileSync(file, 'utf8')
+      } catch {
+        continue // 已经不在了
+      }
+      if (sha256Hex(current) !== digest) {
+        kept.push(file)
+        continue
+      }
+      try {
+        fs.rmSync(file, { force: true })
+        removed.push(file)
+      } catch {
+        kept.push(file)
+      }
+    }
+    return { removed, kept }
+  }
+
+  /**
+   * 已知的包源文件路径（不含 git，那两个由 `removeGitCredential` 负责）。
+   * @returns 路径列表。
+   */
+  function knownMirrorPaths() {
+    return [
+      configPath('etc/pip.conf'),
+      configPath('usr/local/etc/npmrc'),
+      configPath('etc/apt/sources.list.d/enterprise-intranet.list'),
+      configPath('etc/docker/daemon.json'),
+      configPath('etc/profile.d/enterprise-intranet.sh'),
+    ]
+  }
+
+  /**
+   * 清单里没有、但内容里带着平台地址的包源文件 —— 旧版本插件留下的残留。
+   *
+   * 新版本每次 apply 都会把 `路径 -> sha256` 写进状态文件，所以清单是权威的。
+   * 但用旧版本启用过、升级后还没来得及重新 apply 就卸载时，清单是空的，那些文件
+   * 会被漏掉。因为无法证明它一定是我们的（也可能是用户自己指向内网镜像的配置），
+   * 这里**只报告、不删除**，交给人工确认。
+   */
+  function unmanagedMirrorFiles(written) {
+    let host = ''
+    try {
+      host = new URL(String(configNow().platformUrl || DEFAULTS.platformUrl)).host
+    } catch {
+      return []
+    }
+    const out = []
+    for (const file of knownMirrorPaths()) {
+      if (written && Object.prototype.hasOwnProperty.call(written, file)) continue
+      try {
+        if (fs.readFileSync(file, 'utf8').includes(host)) out.push(file)
+      } catch {
+        // 不存在就不用管
+      }
+    }
+    return out
+  }
+
+  /** 本插件可能写进凭据服务的全部引用名（平台 key + 每条路由的上游 key）。 */
+  function credentialRefsOf(state) {
+    const refs = new Set([PLATFORM_KEY_REF])
+    for (const route of state.routes || []) {
+      if (route && route.name) refs.add(refForRoute(route.name))
+    }
+    // 状态文件里记过实际用过的引用名（老版本按 `名称 -> 引用名` 存成字符串），
+    // 它比重新 slug 更权威，能覆盖改名 / slug 冲突留下的孤儿引用。
+    for (const entry of state.keysStored || []) {
+      const text = String(entry || '')
+      const ref = text.includes('->') ? text.split('->').pop().trim() : ''
+      if (ref) refs.add(ref)
+    }
+    return [...refs].filter(Boolean)
+  }
+
+  /**
+   * 完全还原：把本插件在企业内网模式下写到这台机器上的东西全部收回。
+   *
+   * 与「停用」不同，这是**卸载前**用的破坏性操作，依次做五件事：
+   *   1. 注销 `llm-pi-ai` provider、还原默认模型（复用停用逻辑）；
+   *   2. 删除凭据服务里的平台 key 与各路由 key；
+   *   3. 删除 git credential helper 与 `/etc/gitconfig`；
+   *   4. 删除本插件生成、且未被改动的包源文件（pip / npm / apt / docker / 环境变量）；
+   *   5. 删除状态文件。
+   *
+   * `disableEnterpriseMode()` 只做第 1、3 步，因为它要保留"再次启用"所需的东西；
+   * 卸载则必须连 key 一起收走，否则平台 api-key 会留在 `.credentials.yaml` 里。
+   */
+  async function teardown({ reason = 'explicit' } = {}) {
+    const before = readState()
+
+    // 第 1 步：注销 provider / 还原默认模型。卸载路径上 settings 服务可能已经
+    // 随插件一起被销毁，那一步失败也不能拦住后面的文件与凭据清理。
+    let disabled
+    try {
+      disabled = await disableEnterpriseMode()
+    } catch (err) {
+      disabled = {
+        restored_default: null,
+        providers_unregistered: null,
+        settings_error: String((err && err.message) || err),
+      }
+    }
+
+    // 第 2 步：删凭据。
+    const credentialsRemoved = []
+    const credentialsKept = []
+    for (const ref of credentialRefsOf(before)) {
+      try {
+        await credentials().unset(ref)
+        credentialsRemoved.push(ref)
+      } catch {
+        // 只读来源（例如进程环境里的同名变量）会遮蔽引用，unset 会拒绝 —— 那不是
+        // 我们写得进去的东西，报出来让人处理，不要假装删掉了。
+        credentialsKept.push(ref)
+      }
+    }
+
+    // 第 3、4 步：git helper 与包源文件。
+    const gitRemoved = removeGitCredential()
+    const mirrors = revertMirrors(before[MIRRORS_WRITTEN_KEY])
+    const unmanaged = unmanagedMirrorFiles(before[MIRRORS_WRITTEN_KEY])
+
+    // 第 5 步：状态文件。
+    let stateRemoved = false
+    try {
+      fs.rmSync(STATE_FILE, { force: true })
+      stateRemoved = true
+    } catch {
+      // 删不掉就留着，下一次 teardown 还能再试
+    }
+
+    return {
+      ok: true,
+      reason,
+      restored_default: disabled.restored_default,
+      providers_unregistered: disabled.providers_unregistered,
+      settings_error: disabled.settings_error || null,
+      credentials_removed: credentialsRemoved,
+      credentials_kept: credentialsKept,
+      git_removed: gitRemoved,
+      mirrors_removed: mirrors.removed,
+      mirrors_kept: mirrors.kept,
+      mirrors_unmanaged: unmanaged,
+      state_removed: stateRemoved,
+    }
   }
 
   // ── 启用 / 停用 企业内网模式 ────────────────────────────────────────
@@ -920,9 +1168,18 @@ main().catch((err) => fail(String((err && err.message) || err)))
 
     await settings().replace(DEFAULT_MODEL_NS, { provider: providerId, model: modelId })
 
+    // `autoMirrors: false` 只该关掉包源文件；`autoGitCredential` 单独控制 git。
+    // 旧实现把两者混成一个条件，导致 autoMirrors=false 时照样写满 /etc。
+    const autoMirrors = configNow().autoMirrors !== false
+    const autoGitCredential = configNow().autoGitCredential !== false
     let mirrorResults = null
-    if (configNow().autoMirrors || configNow().autoGitCredential !== false) {
-      mirrorResults = await applyMirrors(key)
+    let mirrorsWritten = current[MIRRORS_WRITTEN_KEY] || {}
+    if (autoMirrors || autoGitCredential) {
+      const mirror = await applyMirrors(key, { includeNonGit: autoMirrors })
+      mirrorResults = mirror.results
+      // 合并而不是覆盖：这一轮没碰的文件（例如 autoMirrors 关掉时的 pip/npm/apt）
+      // 仍然留在清单里，之后 teardown 才能把它们收回。
+      mirrorsWritten = { ...(current[MIRRORS_WRITTEN_KEY] || {}), ...mirror.written }
     }
 
     const next = {
@@ -948,6 +1205,7 @@ main().catch((err) => fail(String((err && err.message) || err)))
         has_api_key: !!r.api_key,
       })),
       mirrors: mirrorResults,
+      [MIRRORS_WRITTEN_KEY]: mirrorsWritten,
     }
     writeState(next)
     Object.assign(merged, { enterpriseMode: true })
@@ -966,7 +1224,8 @@ main().catch((err) => fail(String((err && err.message) || err)))
 
   async function disableEnterpriseMode() {
     const current = readState()
-    await unregisterProviders(current.providers || [])
+    const unregistered = current.providers || []
+    await unregisterProviders(unregistered)
 
     // 停用意味着不再有平台 key 可用，所以带 key 的 git helper 必须删掉，
     // 不能留在镜像里等下一次 clone 时被人读出来。
@@ -991,7 +1250,11 @@ main().catch((err) => fail(String((err && err.message) || err)))
     const next = { ...current, config: { ...(current.config || {}), enterpriseMode: false } }
     writeState(next)
     Object.assign(merged, { enterpriseMode: false })
-    return { enterprise_mode: false, restored_default: restored }
+    return {
+      enterprise_mode: false,
+      restored_default: restored,
+      providers_unregistered: unregistered.length,
+    }
   }
 
   // ── 状态快照 ────────────────────────────────────────────────────────
@@ -1215,7 +1478,18 @@ main().catch((err) => fail(String((err && err.message) || err)))
         sendJson(res, 200, { ok: true, ...(await applyEnterpriseMode()) })
         return
       }
+      // `purge: true` = 卸载前的完全还原，见 teardown()。
+      if (body.purge === true) {
+        sendJson(res, 200, await teardown({ reason: 'mode' }))
+        return
+      }
       sendJson(res, 200, { ok: true, ...(await disableEnterpriseMode()) })
+    })
+  })
+
+  register('POST', '/teardown', (req, res) => {
+    guard(req, res, async () => {
+      sendJson(res, 200, await teardown({ reason: 'endpoint' }))
     })
   })
 
@@ -1233,9 +1507,13 @@ main().catch((err) => fail(String((err && err.message) || err)))
         err.code = 'API_KEY_REQUIRED'
         throw err
       }
-      const results = await applyMirrors(key)
+      const { results, written } = await applyMirrors(key)
       const current = readState()
-      writeState({ ...current, mirrors: results })
+      writeState({
+        ...current,
+        mirrors: results,
+        [MIRRORS_WRITTEN_KEY]: { ...(current[MIRRORS_WRITTEN_KEY] || {}), ...written },
+      })
       sendJson(res, 200, { ok: true, mirrors: results })
     })
   })
@@ -1316,6 +1594,12 @@ main().catch((err) => fail(String((err && err.message) || err)))
         } catch {
           // 卸载路径上的失败不该影响其它 disposer。
         }
+      }
+      // 自动清理只在「插件确实已经从 profile 里被移除」时发生 —— 正常关停或热重载
+      // 时它仍然被声明着，还原会把用户的重启变成一次卸载。这里不 await：dispose 是
+      // 同步契约，清理由进程收尾兜底；手动卸载请走面板按钮或 POST /teardown。
+      if (!pluginStillDeclared()) {
+        teardown({ reason: 'dispose' }).catch(() => {})
       }
     }
   })

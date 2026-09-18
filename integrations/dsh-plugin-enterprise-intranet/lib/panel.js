@@ -117,6 +117,19 @@
       panel.appendChild(el('h2', null, heading || '企业内网模式'))
     }
 
+    /**
+     * 一条要在下一次渲染后显示的通知。
+     *
+     * `render(null)` 会先清空面板再异步取状态，紧接着 `msg()` 写下的字会在状态
+     * 回来时被清掉。所以「先给用户看结果、再刷新状态」的流程一律先把要说的话放
+     * 这里，由 `render(state)` 在重建面板时补上。
+     */
+    var pendingNotice = null
+
+    function notice(text, kind) {
+      pendingNotice = { text: text, kind: kind || '' }
+    }
+
     // ── 状态与渲染 ──────────────────────────────────────────────────
     function render(state) {
       clearPanel()
@@ -128,6 +141,10 @@
       if (state.ok === false) {
         msg(state.error || '读取状态失败', 'err')
         return
+      }
+      if (pendingNotice) {
+        msg(pendingNotice.text, pendingNotice.kind)
+        pendingNotice = null
       }
 
       var on = state.enterprise_mode === true
@@ -159,9 +176,11 @@
         var toggle = el('button', { type: 'button', class: on ? '' : 'primary' }, on ? '停用企业内网模式' : '启用企业内网模式')
         var reapply = el('button', { type: 'button' }, '重新应用')
         var relogin = el('button', { type: 'button' }, '重新登录获取 Key')
+        var purge = el('button', { type: 'button' }, '完全还原（卸载前）')
         act.appendChild(toggle)
         act.appendChild(reapply)
         act.appendChild(relogin)
+        act.appendChild(purge)
         panel.appendChild(act)
 
         toggle.addEventListener('click', function () {
@@ -182,13 +201,45 @@
           api('/apply', { method: 'POST', body: {} })
             .then(function (r) {
               reapply.disabled = false
+              if (r.ok === false) { msg(r.code + ': ' + r.error, 'err'); return }
+              notice('已接入 ' + (r.providers || []).length + ' 个 provider，默认模型 ' + r.default_provider + ' / ' + r.default_model, 'ok')
               render(null)
-              if (r.ok === false) msg(r.code + ': ' + r.error, 'err')
-              else msg('已接入 ' + (r.providers || []).length + ' 个 provider，默认模型 ' + r.default_provider + ' / ' + r.default_model, 'ok')
             })
             .catch(function (e) { reapply.disabled = false; msg(String(e), 'err') })
         })
         relogin.addEventListener('click', function () { renderLogin(true) })
+        purge.addEventListener('click', function () {
+          var ok = window.confirm(
+            '完全还原会：停用企业内网模式、注销模型 provider、删除平台 API key 与各路由 key、' +
+            '删除 git 凭据助手、删除本插件生成的包源配置（pip / npm / apt / docker）、删除状态文件。\n\n' +
+            '被你手动改过的配置文件会保留。确定继续吗？'
+          )
+          if (!ok) return
+          purge.disabled = true
+          api('/teardown', { method: 'POST', body: {} })
+            .then(function (r) {
+              purge.disabled = false
+              if (r.ok === false) { msg(r.code + ': ' + r.error, 'err'); return }
+              var text =
+                '已完全还原：删除 ' + (r.credentials_removed || []).length + ' 条凭据、' +
+                (r.git_removed || []).length + ' 个 git 文件、' +
+                (r.mirrors_removed || []).length + ' 个包源文件' +
+                (r.state_removed ? '，状态文件已删除' : '，状态文件删除失败')
+              if ((r.mirrors_kept || []).length) {
+                text += '\n保留（已被你改过，未删除）：' + r.mirrors_kept.join('、')
+              }
+              if ((r.credentials_kept || []).length) {
+                text += '\n未能删除（被只读来源遮蔽，请手工处理）：' + r.credentials_kept.join('、')
+              }
+              if ((r.mirrors_unmanaged || []).length) {
+                text += '\n像是旧版本留下的残留（未删除，请手工确认）：' + r.mirrors_unmanaged.join('、')
+              }
+              text += '\n现在可以安全卸载：dsh plugin --profile <profile> remove dsh-plugin-enterprise-intranet'
+              notice(text, 'ok')
+              render(null)
+            })
+            .catch(function (e) { purge.disabled = false; msg(String(e), 'err') })
+        })
       }
 
       if (state.routes && state.routes.length) {

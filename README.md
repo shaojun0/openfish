@@ -997,7 +997,14 @@ is why `integrations/` is in `.dockerignore`). Once installed it:
   the route whose aliases contain `default` — embedding, rerank, OCR and speech
   routes are registry entries, not LLM providers;
 * points pip / npm / apt / docker / nvm at this server's mirrors;
-* surfaces `/api/v1/tools` and `/api/v1/docs` in its panel.
+* surfaces `/api/v1/tools` and `/api/v1/docs` in its panel;
+* can be reverted completely before removal — its “完全还原” action (or
+  `POST /dsh-intranet/teardown`) unregisters the providers, restores the
+  previous default model, deletes the platform key and route keys from the DSH
+  credential store, removes the git credential helper and every mirror file the
+  plugin itself wrote (a file the user edited is kept), and deletes its state
+  file. DSH has no uninstall hook, so the order is purge first, then
+  `dsh plugin remove`.
 
 The folder's own `README.md` documents installation, configuration and the sync
 relationship with the Docker build copy used by the deployment.

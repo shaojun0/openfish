@@ -69,13 +69,64 @@ dsh plugin --profile web add link:<openfish 仓库路径>/integrations/dsh-plugi
 | GET | `/login/poll?login_id=` | 轮询；批准后自动落 key 并应用模式 |
 | POST | `/login/cancel` | 取消 |
 | POST | `/key` | 手工提交一枚 key（校验后落库） |
-| POST | `/mode` | `{enabled:true|false}` 启用/停用企业内网模式 |
+| POST | `/mode` | `{enabled:true|false}` 启用/停用企业内网模式；再带 `purge:true` 等价于 `/teardown` |
+| POST | `/teardown` | **完全还原**：停用 + 注销 provider + 删凭据 + 删 git 助手 + 删本插件生成的包源配置 + 删状态文件。卸载前用，见下节 |
 | POST | `/apply` | 重新拉取路由并应用 |
 | GET | `/mirrors.json` | 包源配置预览 |
 | POST | `/mirrors/apply` | 重写包源配置文件 |
 | GET | `/routes.json` | 原始模型路由 |
 | GET | `/catalog.json` | 工具 / 文档目录与入口链接 |
 | POST | `/config` | 改 `platformUrl` / `autoMirrors` / `autoGitCredential` / `verifyTls` / `defaultAlias` |
+
+## 停用与卸载（不残留）
+
+**先说结论：`dsh plugin remove` 本身清不干净。** 它只是 `pnpm remove` 加重算
+profile 的 bundle 层列表（`@deepseek-ai/dsh/lib/plugin-*.js`），DSH 没有插件卸载
+钩子，也不会回收插件写过的设置、凭据或文件。所以卸载的正确顺序是：
+
+```bash
+# 1. 在 DSH 面板点「完全还原（卸载前）」。
+#    要调端点也可以（POST /dsh-intranet/teardown，或 POST /mode 带
+#    {enabled:false, purge:true}），但它和面板其它端点一样要求
+#    X-DSH-Intranet-Token —— 那是只下发在 index HTML 里的 per-process CSRF
+#    token，脚本里得先从页面 HTML 里取出来。
+# 2. 确认面板回到「未配置 api-key」后，再移除插件：
+dsh plugin --profile web remove dsh-plugin-enterprise-intranet
+```
+
+「完全还原」（`POST /teardown`、或 `POST /mode {enabled:false, purge:true}`）
+依次做五件事：
+
+1. 注销本插件注册进 `llm-pi-ai` 的 provider，并把 `agent-default-model` 还原成
+   启用前的基线；
+2. 删除凭据服务里的 `ENTERPRISE_INTRANET_PLATFORM_KEY` 与各条
+   `ENTERPRISE_INTRANET_KEY_<SLUG>`（即平台 api-key 不再留在 `.credentials.yaml`）；
+3. 删除 `/usr/local/bin/openfish-git-credential` 与 `/etc/gitconfig`；
+4. 删除本插件生成的包源文件：`/etc/pip.conf`、`/usr/local/etc/npmrc`、
+   `/etc/apt/sources.list.d/enterprise-intranet.list`、`/etc/docker/daemon.json`、
+   `/etc/profile.d/enterprise-intranet.sh` —— **只删内容与写入时完全一致的**，
+   你改过的文件会保留并在结果里列出来。清单里没有、但内容指向平台的旧版本残留
+   （`mirrors_unmanaged`）只报告、不删除，因为那也可能是你自己写的内网源配置；
+5. 删除状态文件 `$DSH_HOME/enterprise-intranet.json`。
+
+与「停用」的区别：**停用是非破坏性的**（保留 key、包源配置与状态文件，方便再次
+启用），**完全还原是卸载路径**。只停用就卸载，会在磁盘上留下平台 api-key 和一堆
+指向内网的包源配置。
+
+另外两条自动化：
+
+* 插件被 **dispose**（热卸载 / 重载）时，如果它在任何 profile 的 bundle 列表与
+  patch 文件里都已经不存在了，插件会自动做一次完全还原；如果仍被某个 profile
+  声明（正常重启也会 dispose），则**什么都不动** —— 重启不该变成卸载。
+* 手动兜底清单（DSH 之外）：删 `/usr/local/bin/openfish-git-credential`、
+  `/etc/gitconfig`、`/etc/profile.d/enterprise-intranet.sh`，以及上面第 2、4、5 步
+  列出的文件；`grep -rn enterprise-intranet /etc` 可以自查。
+
+本地验证这条删文件的路径（在临时目录里跑，不碰宿主机 `/etc`，不需要 DSH）：
+
+```bash
+cd integrations/dsh-plugin-enterprise-intranet && npm test   # = node test/teardown.test.mjs
+```
 
 ## 安全
 
