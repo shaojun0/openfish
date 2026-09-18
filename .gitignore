@@ -30,6 +30,15 @@ backend/static/dist/
 docker/.env
 !docker/.env.example
 !backend/.env.example
+# Forgejo's env file holds SECRET_KEY / INTERNAL_TOKEN / JWT_SECRET and the
+# platform admin token; only the template is tracked.
+docker/forgejo/forgejo.env
+!docker/forgejo/forgejo.env.example
+# Forgejo's bare repositories, SQLite database and logs; agent work directories.
+docker/forgejo/
+!docker/forgejo/README.md
+!docker/forgejo/forgejo.env.example
+docker/agent-work/
 
 # ── Private test-environment bundle ─────────────────────────────────
 # Plaintext passwords, the deployment handbook, TLS cert and runtime data

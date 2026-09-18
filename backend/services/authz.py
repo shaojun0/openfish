@@ -78,6 +78,11 @@ _AUTHENTICATED_SEED = (
     P.DEBIAN_OFFLINE,
     P.DOC_READ,
     P.APP_READ,
+    # Agent Hub: a signed-in developer browses repositories and findings, clones
+    # (repo:push) and triggers a review.  Import / decide / policy stay
+    # admin-only — the classification lives in
+    # ``scripts/check_permission_catalog.py`` and must match this tuple.
+    P.REPO_READ, P.REPO_PUSH, P.FINDING_READ, P.AGENT_RUN,
     P.KEY_LIST, P.KEY_CREATE, P.KEY_DELETE, P.KEY_STATS,
 )
 
@@ -160,6 +165,17 @@ _SEED_TOPUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "2026-09-anonymous-doc-read",
         P.ANONYMOUS_ROLE,
         (P.DOC_READ,),
+    ),
+    # Agent Hub.  Browsing repositories and findings, cloning (`repo:push`) and
+    # triggering a review are what a signed-in developer is here for, so an
+    # upgraded deployment receives them instead of the whole feature being
+    # admin-only by accident.  `repo:write` / `finding:decide` / `agent:admin` /
+    # `policy:write` stay admin-only and are deliberately absent —
+    # `scripts/check_permission_catalog.py` pins that classification.
+    (
+        "2026-09-agent-hub",
+        P.AUTHENTICATED_ROLE,
+        (P.REPO_READ, P.REPO_PUSH, P.FINDING_READ, P.AGENT_RUN),
     ),
 )
 

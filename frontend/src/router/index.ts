@@ -69,6 +69,40 @@ const routes: RouteRecordRaw[] = [
         meta: { titleKey: 'nav.doc', icon: 'Document', requiresPermission: 'doc:read' },
       },
       {
+        // Agent hub (S5).  The repo list needs `repo:read`; the detail page
+        // accepts both `repos/<owner>/<name>` (a real slug) and `repos/<slug>`
+        // (a local repo whose slug has no slash).  Two records keep the path
+        // params simple — no regex param is needed for either shape.
+        path: 'repos',
+        name: 'repos',
+        component: () => import('@/views/Repos.vue'),
+        meta: { titleKey: 'nav.repos', icon: 'Folder', requiresPermission: 'repo:read' },
+      },
+      {
+        path: 'repos/:owner/:name',
+        name: 'repo-detail',
+        component: () => import('@/views/RepoDetail.vue'),
+        meta: { titleKey: 'nav.repos', icon: 'Folder', requiresPermission: 'repo:read' },
+      },
+      {
+        path: 'repos/:slug',
+        name: 'repo-detail-flat',
+        component: () => import('@/views/RepoDetail.vue'),
+        meta: { titleKey: 'nav.repos', icon: 'Folder', requiresPermission: 'repo:read' },
+      },
+      {
+        path: 'findings',
+        name: 'findings',
+        component: () => import('@/views/Findings.vue'),
+        meta: { titleKey: 'nav.findings', icon: 'Warning', requiresPermission: 'finding:read' },
+      },
+      {
+        path: 'findings/:id',
+        name: 'finding-detail',
+        component: () => import('@/views/FindingDetail.vue'),
+        meta: { titleKey: 'nav.findings', icon: 'Warning', requiresPermission: 'finding:read' },
+      },
+      {
         path: 'api-keys',
         name: 'api-keys',
         component: () => import('@/views/ApiKeysView.vue'),

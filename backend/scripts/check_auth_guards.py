@@ -86,6 +86,12 @@ PUBLIC_ENDPOINTS: dict[str, str] = {
     # here (including `?user_code=…`). The page itself exposes nothing; the
     # approval it leads to is the guarded `POST /device/approve`.
     "device.authorize": "device-authorization page; redirects into the login flow",
+    # The Agent Hub webhook is a *machine* surface: Forgejo calls it with no
+    # session, and its authentication is the §5.4 shared-secret HMAC
+    # (X-Forgejo-Signature) verified inside the view.  A request without a valid
+    # signature is answered 401, so it is not anonymously *usable* — but it is
+    # anonymously *reachable* by design, which is what this list records.
+    "repo_webhook.forgejo_webhook": "Forgejo webhook; authenticated by HMAC, not a session",
 }
 
 #: Statuses that prove the guard ran.

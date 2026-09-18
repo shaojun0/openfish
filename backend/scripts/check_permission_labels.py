@@ -173,6 +173,34 @@ EXPECTED: dict[tuple[str, str], str] = {
     # unauthenticated visitor through the login flow, and the approval it
     # renders lands on this guarded POST.
     ("device", "approve_device"): "KEY_CREATE",
+    # ── Agent Hub ────────────────────────────────────────────────────────
+    # Browsing is `*_read`; importing/syncing mutates the shared mirror and
+    # deciding a finding is a governance act, so both carry the write point.
+    # `fix_finding` and `create_agent_task` are mutating but their point is
+    # `agent:run` (spend shared compute), and `git_credential` is read-only
+    # while minting a push credential — `repo:push` names that capability
+    # rather than an HTTP verb, which is exactly the intent of §5.1.
+    ("repos", "list_repos"): "REPO_READ",
+    ("repos", "get_repo"): "REPO_READ",
+    ("repos", "list_issues"): "REPO_READ",
+    ("repos", "get_issue"): "REPO_READ",
+    ("repos", "get_import"): "REPO_READ",
+    ("repos", "create_repo"): "REPO_WRITE",
+    ("repos", "import_repo"): "REPO_WRITE",
+    ("repos", "sync_repo"): "REPO_WRITE",
+    ("repos", "git_credential"): "REPO_PUSH",
+    ("repo_context", "search_repo_context"): "REPO_READ",
+    ("findings", "list_findings"): "FINDING_READ",
+    ("findings", "get_finding"): "FINDING_READ",
+    ("findings", "get_policy"): "FINDING_READ",
+    ("findings", "decide_finding"): "FINDING_DECIDE",
+    ("findings", "put_policy"): "POLICY_WRITE",
+    ("findings", "fix_finding"): "AGENT_RUN",
+    ("agent_tasks", "list_agent_tasks"): "AGENT_RUN",
+    ("agent_tasks", "create_agent_task"): "AGENT_RUN",
+    ("agent_tasks", "retry_agent_task"): "AGENT_ADMIN",
+    ("agent_tasks", "cancel_agent_task"): "AGENT_ADMIN",
+    ("agent_tasks", "agent_task_log"): "AGENT_ADMIN",
 }
 
 MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})

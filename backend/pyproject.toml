@@ -18,6 +18,11 @@ dependencies = [
     # DATABASE_URL is empty and SQLite is in use.
     "psycopg[binary]>=3.1",
     "pydantic-settings>=2.14.2",
+    # Parses a repository's `.agent/review-policy.yml` — the file every rule's
+    # level, due and autofix flag comes from.  A runtime dependency, not a dev
+    # one: it must be present in the production image, not just in the venv that
+    # happens to pull it in transitively through openapi-spec-validator.
+    "pyyaml>=6.0",
     "python-magic>=0.4.27",
     "requests>=2.34.2",
     "sqlalchemy>=2.0",

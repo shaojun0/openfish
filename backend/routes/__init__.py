@@ -31,7 +31,14 @@ from __future__ import annotations
 
 from config import settings
 from auth.decorators import require_auth, require_permission
-from auth.permissions import ADMIN_ROLES, ADMIN_VIEW, APP_READ
+from auth.permissions import (
+    ADMIN_ROLES,
+    ADMIN_VIEW,
+    AGENT_RUN,
+    APP_READ,
+    FINDING_READ,
+    REPO_READ,
+)
 
 
 def register_all(app):
@@ -54,6 +61,11 @@ def register_all(app):
     from routes.docs import docs_bp
     from routes.certs import certs_bp
     from routes.device import device_bp
+    from routes.repos import repo_bp
+    from routes.repo_context import repo_context_bp
+    from routes.findings import findings_bp
+    from routes.agent_tasks import agent_tasks_bp
+    from routes.repo_webhook import repo_webhook_bp
 
     prefix = settings.server.route_prefix
     api = prefix + "/api/v1"
@@ -80,6 +92,21 @@ def register_all(app):
     # session gets a 401, which the error handler turns into the OAuth redirect
     # (or a Basic challenge) — see `extensions/error_handlers.py`.
     spa_bp.before_request(require_permission(APP_READ))
+    # ── Agent Hub (S1–S4 routes) ────────────────────────────────────
+    # Same convention as everywhere else: the blueprint-wide guard is the
+    # *floor*, and the finer points are supplied per view (importing and
+    # deciding carry `repo:write` / `finding:decide` / `policy:write` /
+    # `repo:push` / `agent:admin` on their own routes).  A missing floor would
+    # let a view without a decorator answer anonymously, which is exactly what
+    # `scripts/check_auth_guards.py` probes for.
+    repo_bp.before_request(require_permission(REPO_READ))
+    repo_context_bp.before_request(require_permission(REPO_READ))
+    findings_bp.before_request(require_permission(FINDING_READ))
+    agent_tasks_bp.before_request(require_permission(AGENT_RUN))
+    # `repo_webhook_bp` deliberately gets **no** guard here: Forgejo calls it
+    # with no session, and its authentication is the shared-secret HMAC in
+    # §5.4.  It is listed in `scripts/check_auth_guards.py`'s PUBLIC_ENDPOINTS
+    # with that reason, which is what keeps the decision visible.
     # `python_build_bp` and `node_build_bp` intentionally have no
     # blueprint-wide guard: their `/*-builds/health` endpoints are public
     # mirror probes.  The other routes there carry `@require_permission`
@@ -128,6 +155,16 @@ def register_all(app):
     #    design (the caller has no credential yet), while the HTML approval
     #    page at /device is reached through the normal browser login flow.
     app.register_blueprint(device_bp, url_prefix=prefix)
+
+    # ── Agent Hub: repositories, findings and the agent runtime ─────────
+    # Registered at the bare prefix like the artifact-hub blueprints, so each
+    # view declares its full path internally (/api/v1/repos…,
+    # /api/v1/findings…, /api/v1/agent/tasks…, /api/v1/repos/<slug>/context…).
+    app.register_blueprint(repo_bp, url_prefix=prefix)
+    app.register_blueprint(repo_context_bp, url_prefix=prefix)
+    app.register_blueprint(findings_bp, url_prefix=prefix)
+    app.register_blueprint(agent_tasks_bp, url_prefix=prefix)
+    app.register_blueprint(repo_webhook_bp, url_prefix=prefix)
 
     # ── SPA shell. Machine routes above win by rule specificity, so this
     #    only ever handles browser-facing URLs.

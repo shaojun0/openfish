@@ -390,6 +390,14 @@ The permission points shipped today, and the routes that enforce them:
 | `debian:offline` | the relay's producing half: `GET /debian/offline`, `GET /debian/offline/snapshot`, `POST /debian/offline/plan`, `POST /debian/offline/bundle` — exports a package snapshot, diffs it into a pending-update plan and packs a bundle |
 | `debian:upload` | `POST /debian/offline/import` — verifies an offline bundle and writes its `.deb` files into `DEBIAN_DIR` (admin only) |
 | `key:list` / `key:create` / `key:delete` / `key:stats` | the matching `/api/v1/keys*` endpoints |
+| `repo:read` | `GET /api/v1/repos`, `GET /api/v1/repos/<slug>`, `GET /api/v1/repos/<slug>/issues[/<number>]`, `GET /api/v1/repos/<slug>/context/search` — the repository mirror and its imported collaboration history |
+| `repo:write` | `POST /api/v1/repos`, `POST /api/v1/repos/import`, `POST /api/v1/repos/<slug>/sync` — imports a repository, triggers a sync or changes its configuration (admin only) |
+| `repo:push` | `GET /api/v1/repos/<slug>/git-credential` — signs a one-time credential for the git plane. **`clone` works; `push` is not closed yet**: Forgejo validates the Basic credential against *its* accounts, not this platform's API keys, so a deployment must either delegate Forgejo auth back here or mint a Forgejo token instead (DEVELOPMENT.md §13 open question 1). Branch protection is independent: an agent may only ever push `agent/*` (invariant I4) |
+| `finding:read` | `GET /api/v1/findings`, `GET /api/v1/findings/<id>`, `GET /api/v1/policies/<slug>` — the debt board and the review policy it is measured against |
+| `finding:decide` | `POST /api/v1/findings/<id>/decide` — acknowledge / wontfix / reject. `wontfix` and `acknowledge` require both `owner` and `due` (I2), and a `blocking` finding may not be deferred at all (I3) |
+| `agent:run` | `POST /api/v1/agent/tasks`, `GET /api/v1/agent/tasks`, `POST /api/v1/findings/<id>/fix` — queue a review/fix task and watch it (quota applies) |
+| `agent:admin` | `POST /api/v1/agent/tasks/<id>/retry`, `POST /api/v1/agent/tasks/<id>/cancel`, `GET /api/v1/agent/tasks/<id>/log` — retry, terminate or read the log of anybody's task (admin only) |
+| `policy:write` | `PUT /api/v1/policies/<slug>` — write `.agent/review-policy.yml`, the file every rule's level, due and autofix flag comes from (admin only) |
 | `admin:view` | `/api/v1/admin/stats` |
 | `admin:refresh` | `POST /api/v1/admin/refresh-stats` |
 | `admin:roles` | `/api/v1/admin/{roles,permissions,users}` |

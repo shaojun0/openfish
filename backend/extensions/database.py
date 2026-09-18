@@ -190,6 +190,14 @@ def init_engine(
 
     Base.metadata.create_all(engine)
     _apply_light_migrations(engine)
+    # The Agent Hub tables ship their own idempotent migration helper (added
+    # columns / indexes on a database that predates them).  ``create_all`` above
+    # has already created the tables; this call is what keeps an *upgraded*
+    # deployment's existing rows readable.  Imported here rather than at module
+    # scope so a deployment that never uses Agent Hub pays nothing for it.
+    from models.agent_hub_migrate import ensure_schema
+
+    ensure_schema(engine)
     logger.info("Database ready: %s", _safe_url(url))
     return engine
 

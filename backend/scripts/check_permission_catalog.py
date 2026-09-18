@@ -87,6 +87,9 @@ AUTHENTICATED_SEEDED: frozenset[str] = frozenset({
     P.MODEL_RESOLVE,
     P.DOC_READ,
     P.APP_READ,
+    # Agent Hub: browsing repositories, findings and the agent runtime is what a
+    # signed-in developer is here for; `repo:push` is what a checkout needs.
+    P.REPO_READ, P.REPO_PUSH, P.FINDING_READ, P.AGENT_RUN,
     P.KEY_LIST, P.KEY_CREATE, P.KEY_DELETE, P.KEY_STATS,
 })
 
@@ -96,6 +99,10 @@ ADMIN_ONLY: frozenset[str] = frozenset({
     P.TOOL_UPLOAD,          # publishes into the shared tools catalog
     P.DOCKER_UPLOAD,        # publishes into the shared docker catalog
     P.DEBIAN_UPLOAD,        # writes .deb files into the shared debian repository
+    # Agent Hub: importing writes a shared mirror, deciding a finding is a
+    # governance act (it can silence a debt rule), and the runtime spends
+    # shared compute.
+    P.REPO_WRITE, P.FINDING_DECIDE, P.AGENT_ADMIN, P.POLICY_WRITE,
     P.ADMIN_VIEW,
     P.ADMIN_REFRESH,
     P.ADMIN_ROLES,

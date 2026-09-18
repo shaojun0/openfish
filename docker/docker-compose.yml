@@ -88,6 +88,33 @@ x-backend-env: &backend-env
   IS_4A: ${IS_4A:-false}
   # ── 上传限制（需与 nginx client_max_body_size 保持一致）──
   MAX_CONTENT_LENGTH: "104857600"
+  # ── Agent Hub：仓库面（decision D1 — Forgejo owns the git wire protocol）
+  #    后端走 compose 内网 http://forgejo:3000，不经边缘 nginx。
+  FORGEJO_BASE_URL: ${FORGEJO_BASE_URL:-http://forgejo:3000}
+  # git 回退路径的容器内地址；留空 = 与 FORGEJO_BASE_URL 相同。
+  FORGEJO_GIT_BASE_URL: ${FORGEJO_GIT_BASE_URL:-}
+  # Forgejo 侧承载镜像的组织名（repos.forgejo_repo = "<owner>/<owner>__<name>"）。
+  FORGEJO_OWNER: ${FORGEJO_OWNER:-openfish}
+  # 给客户端展示的公开 git 前缀（只用于生成 URL，不参与认证）。
+  FORGEJO_PUBLIC_BASE_URL: ${FORGEJO_PUBLIC_BASE_URL:-/git}
+  # 平台专用 Forgejo admin token 与 webhook 共享密钥。
+  # **密钥只走环境变量，永不进仓库、不进日志**（与 model_routes.json 的不落密原则一致）。
+  FORGEJO_ADMIN_TOKEN: ${FORGEJO_ADMIN_TOKEN:-}
+  FORGEJO_WEBHOOK_SECRET: ${FORGEJO_WEBHOOK_SECRET:-}
+  # 大仓保护（§8.2）：到上限标 partial=true 并由 API 显式暴露，绝不静默截断。
+  IMPORT_MAX_ISSUES: ${IMPORT_MAX_ISSUES:-20000}
+  IMPORT_MAX_COMMITS: ${IMPORT_MAX_COMMITS:-5000}
+  IMPORT_MAX_RATE: ${IMPORT_MAX_RATE:-2}
+  IMPORT_PAGE_SIZE: ${IMPORT_PAGE_SIZE:-50}
+  IMPORT_POLL_INTERVAL: ${IMPORT_POLL_INTERVAL:-2}
+  IMPORT_POLL_ATTEMPTS: ${IMPORT_POLL_ATTEMPTS:-150}
+  IMPORT_HTTP_TIMEOUT: ${IMPORT_HTTP_TIMEOUT:-30}
+  GIT_MIRROR_DIR: ${GIT_MIRROR_DIR:-/app/data/forgejo-mirror}
+  # 智能体运行时（§9.2）；worker 跑在 profile `runner` 的容器里，后端只登记状态。
+  AGENT_WORK_ROOT: ${AGENT_WORK_ROOT:-/work}
+  AGENT_WORK_RETENTION_SECONDS: ${AGENT_WORK_RETENTION_SECONDS:-86400}
+  AGENT_GATE_TIMEOUT: ${AGENT_GATE_TIMEOUT:-120}
+  AGENT_MAX_FINDINGS: ${AGENT_MAX_FINDINGS:-50}
 
 # 制品库与运行态：**所有** bind-mount 源都在本文件所在的 docker/ 目录下
 # （一律写成 ./xxx），挂载拓扑里不含任何宿主机绝对路径，也就没有 ../backend/…。
@@ -165,6 +192,70 @@ services:
       start_period: 5s
       retries: 3
 
+  # ── Forgejo：git 协议面（decision D1）────────────────────────────
+  # 只做两件事：承载 bare 仓库、实现 smart HTTP clone/push；**不发布宿主端口**，
+  # 由边缘 nginx 暴露 /git/。原生 GitHub/Gitee migration 会连 issue / PR /
+  # label / milestone 一起拉进来——这正是 §8「导入历史 issue」的实现方式。
+  # 数据落在 ./forgejo（由 prepare-mounts.sh 创建），与现有 6 个挂载点同风格。
+  forgejo:
+    image: ${FORGEJO_IMAGE:-codeberg.org/forgejo/forgejo:15}
+    container_name: openfish-forgejo
+    restart: unless-stopped
+    env_file:
+      # The instance's identity and secrets live here, not in this file: the
+      # template is tracked, the filled copy is 600 and gitignored.  Nothing
+      # below overrides it, so `FORGEJO__server__ROOT_URL` in that file wins.
+      - ./forgejo/forgejo.env
+    expose:
+      - "3000"
+    volumes:
+      - ./forgejo:/data
+    networks:
+      - openfish
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  # ── 智能体运行时（profile: runner，§9.2）─────────────────────────
+  # 沙箱边界 = 容器边界：每任务在本容器内的 /work/<task_id> 以子进程执行，
+  # 不挂宿主 docker socket、不按任务起容器。必须与 backend 共用同一数据库，
+  # 否则 worker 领不到 backend 入队的任务。
+  runner:
+    build:
+      context: ../backend
+      dockerfile: ../docker/runner/Dockerfile
+    image: openfish-runner:latest
+    container_name: openfish-runner
+    profiles:
+      - runner
+    restart: unless-stopped
+    command: ["python", "-m", "services.agent_queue", "worker", "--loop"]
+    cpus: 2.0
+    mem_limit: 2g
+    pids_limit: 512
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=512m
+    environment:
+      <<: *backend-env
+      AGENT_WORK_ROOT: /work
+    volumes:
+      - ./agent-work:/work
+      - ./data:/app/data
+      - ./config/model_routes.json:/app/config/model_routes.json:ro
+    networks:
+      - openfish
+    depends_on:
+      backend:
+        condition: service_healthy
+
   # ── 边缘网关：唯一对外入口，按路径分流到 frontend / backend ──────
   nginx:
     image: nginx:1.27-alpine
@@ -175,6 +266,8 @@ services:
         condition: service_healthy
       frontend:
         condition: service_healthy
+      forgejo:
+        condition: service_started
     ports:
       - "${PYPISERVER_PORT:-20416}:80"
     volumes:

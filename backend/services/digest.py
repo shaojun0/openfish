@@ -88,6 +88,25 @@ def _write_sidecar(sidecar: Path, stamp: str, digest: str) -> None:
         pass
 
 
+# ── Byte and text digestion ──────────────────────────────────────────
+# The only place in this project that turns bytes into a SHA-256 hex digest.
+# `fingerprint()` (Agent Hub finding identity) and the policy hash both need a
+# digest *of a string*; before this existed each caller called `hashlib` itself,
+# which is the "one concern, one implementation" rule's canonical violation.
+
+def _hexdigest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_text(text: str, *, encoding: str = "utf-8") -> str:
+    """SHA-256 of *text*, as 64 lowercase hex characters.
+
+    Not memoised: the callers hash short strings they have just built (a finding
+    fingerprint, a policy document), so a cache would cost more than it saves.
+    """
+    return _hexdigest(text.encode(encoding))
+
+
 def _hash_file(path: Path) -> str:
     digester = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -189,5 +208,6 @@ __all__ = [
     "compute_sha256",
     "invalidate_digest_cache",
     "sha256_or_none",
+    "sha256_text",
     "store_digest",
 ]

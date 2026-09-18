@@ -94,6 +94,27 @@ DOC_UPLOAD = "doc:upload"
 # `anonymous` role does not hold is what actually closes the UI.
 APP_READ = "app:read"
 
+# ── Agent Hub（仓库内智能体）────────────────────────────────────────
+# The eight points that govern git repositories, findings and the agent runtime.
+# They are *defined* in `auth/agent_hub_permissions.py` (one concern, one file)
+# and re-exported here because both permission gates resolve a guard argument by
+# name against this module: `check_permission_catalog.py` does
+# `getattr(auth.permissions, <bare name>)` and `check_permission_labels.py`
+# records the AST name.  A route that writes `require_permission(REPO_READ)`
+# therefore needs `REPO_READ` importable from here, not merely present in
+# `BUILTIN`.
+from auth.agent_hub_permissions import (
+    AGENT_ADMIN,
+    AGENT_RUN,
+    FINDING_DECIDE,
+    FINDING_READ,
+    POLICY_WRITE,
+    REPO_PUSH,
+    REPO_READ,
+    REPO_WRITE,
+    install_into,
+)
+
 # API key self-service
 KEY_LIST = "key:list"
 KEY_CREATE = "key:create"
@@ -159,6 +180,12 @@ BUILTIN: dict[str, tuple[str, str]] = {
     ADMIN_REFRESH: ("刷新统计缓存", "手动触发统计重算"),
     ADMIN_ROLES: ("管理角色与权限", "创建角色、调整授权、任命管理员"),
 }
+
+# Merge the Agent Hub points into the same catalogue.  `seed_catalog()` hands
+# every `BUILTIN` row to `AuthzService.sync_permissions()`, so this is the one
+# place a new point's curated name and description enter the database; the
+# database row stays authoritative once an admin edits it.
+install_into(BUILTIN)
 
 
 # ── Points discovered at import time ─────────────────────────────────
@@ -260,6 +287,9 @@ __all__ = [
     "DEBIAN_OFFLINE", "DEBIAN_UPLOAD",
     "DOC_READ", "DOC_UPLOAD",
     "APP_READ",
+    "REPO_READ", "REPO_WRITE", "REPO_PUSH",
+    "FINDING_READ", "FINDING_DECIDE",
+    "AGENT_RUN", "AGENT_ADMIN", "POLICY_WRITE",
     "KEY_LIST", "KEY_CREATE", "KEY_DELETE", "KEY_STATS",
     "ADMIN_VIEW", "ADMIN_REFRESH", "ADMIN_ROLES",
     "BUILTIN", "BUILTIN_ROLES",

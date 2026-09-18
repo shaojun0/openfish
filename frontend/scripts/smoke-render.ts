@@ -109,6 +109,10 @@ const EXPECTED = {
   '/tools': ['page__title', 'toolbar__search'],
   '/models': ['page__title', 'stat-row'],
   '/documentation/npm': ['page__title', 'docs-view'],
+  '/repos': ['page__title', 'repos-view'],
+  '/repos/vllm-project/vllm': ['page__title', 'repo-detail'],
+  '/findings': ['page__title', 'findings-view'],
+  '/findings/42': ['page__title', 'finding-detail'],
   '/api-keys': ['create-row', 'card-title'],
   '/admin': ['stat-grid', 'card-title'],
   '/access': ['access-view', 'card-title'],
@@ -136,6 +140,8 @@ for (const [path, markers] of Object.entries(EXPECTED)) {
       'admin:refresh',
       'admin:roles',
       'admin:view',
+      'agent:admin',
+      'agent:run',
       'build:download',
       'build:read',
       'build:sha256',
@@ -146,6 +152,8 @@ for (const [path, markers] of Object.entries(EXPECTED)) {
       'docker:download',
       'docker:read',
       'docker:upload',
+      'finding:decide',
+      'finding:read',
       'key:create',
       'key:delete',
       'key:list',
@@ -155,6 +163,10 @@ for (const [path, markers] of Object.entries(EXPECTED)) {
       'npm:read',
       'package:read',
       'package:write',
+      'policy:write',
+      'repo:push',
+      'repo:read',
+      'repo:write',
       'tool:download',
       'tool:read',
       'tool:upload',
@@ -280,6 +292,53 @@ const fakeDoc = {
   results.push({
     path: 'doc:editor',
     route: 'docs',
+    bytes: html.length,
+    missing,
+    ok: html.length > 400 && missing.length === 0,
+  })
+}
+
+// ── Import progress panel ───────────────────────────────────────────
+// The panel only renders once an import or sync is in flight — a state the
+// route renders above cannot reach (`job` is null there).  Render it directly
+// with a *partial* job so the §8.2 big-repo warning is exercised, not just the
+// progress bar; this also runs the panel's dynamic `import.phase.*` and
+// `import.status.*` keys through i18n.
+const { default: ImportJobPanel } = await import('../src/components/ImportJobPanel.vue')
+{
+  const partialJob = {
+    id: 'job-1',
+    repo_slug: 'vllm-project/vllm',
+    mode: 'mirror',
+    status: 'running',
+    phase: 'mirror_issues',
+    progress: 42,
+    total: 20000,
+    done: 8400,
+    cursor: '8400',
+    partial: true,
+    error: null,
+    started_at: '2026-09-15T00:00:00+00:00',
+    finished_at: null,
+  }
+  const subApp = createSSRApp({
+    render: () => h(ImportJobPanel, { job: partialJob, polling: true }),
+  })
+  const subPinia = createPinia()
+  subApp.use(subPinia)
+  setActivePinia(subPinia)
+  subApp.use(i18n)
+  subApp.use(ElementPlus)
+  for (const [name, component] of Object.entries(ElementPlusIcons)) {
+    if (name !== 'default') subApp.component(name, component)
+  }
+  const html = await renderToString(subApp)
+  const missing = ['import-job__alert--partial', 'el-progress'].filter(
+    (m) => !html.includes(m),
+  )
+  results.push({
+    path: 'import:panel',
+    route: 'imports',
     bytes: html.length,
     missing,
     ok: html.length > 400 && missing.length === 0,

@@ -158,6 +158,21 @@ const groups = computed<NavGroup[]>(() => {
       ],
     },
     {
+      key: 'group-agent',
+      titleKey: 'nav.groupAgent',
+      icon: 'Collection',
+      permission: 'repo:read',
+      items: [
+        { index: '/repos', titleKey: 'nav.repos', icon: 'Folder' },
+        {
+          index: '/findings',
+          titleKey: 'nav.findings',
+          icon: 'Warning',
+          permission: 'finding:read',
+        },
+      ],
+    },
+    {
       key: 'group-system',
       titleKey: 'nav.groupSystem',
       icon: 'Setting',
@@ -187,10 +202,23 @@ const groups = computed<NavGroup[]>(() => {
 /** Every visible item, for turning a menu selection back into an action. */
 const allItems = computed<NavItem[]>(() => [home, ...groups.value.flatMap((g) => g.items)])
 
-/** Highlight the SPA item that matches the current route. */
+/**
+ * Highlight the SPA item that matches the current route.
+ *
+ * A detail page (`/repos/owner/name`, `/findings/42`) has no menu entry of its
+ * own, so a prefix match keeps the parent item lit instead of leaving the whole
+ * menu unselected.  The home entry is excluded — every path starts with `/`.
+ */
 const activeIndex = computed(() => {
-  const match = allItems.value.find((item) => !item.href && item.index === route.path)
-  return match?.index ?? route.path
+  const exact = allItems.value.find((item) => !item.href && item.index === route.path)
+  if (exact) return exact.index
+  const parent = allItems.value.find(
+    (item) =>
+      !item.href &&
+      item.index !== '/' &&
+      route.path.startsWith(`${item.index}/`),
+  )
+  return parent?.index ?? route.path
 })
 
 /** Build stamp injected by vite.config.ts; makes stale bundles obvious. */

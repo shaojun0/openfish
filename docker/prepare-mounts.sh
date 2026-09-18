@@ -114,5 +114,26 @@ link "$DOCKER_DIR/data" "$PROJECT_DIR/backend/data"
 mkdir -p "$DOCKER_DIR/config"
 link "$DOCKER_DIR/config/model_routes.json" "$PROJECT_DIR/backend/config/model_routes.json"
 
+# ── Agent Hub: git plane + agent work directories ───────────────────────────
+# Forgejo's bare repositories and SQLite database.  A real directory, always
+# writable, and re-pointed at the data disk when one was given.
+if [ -n "$DATA_ROOT" ]; then
+    mkdir -p "$DATA_ROOT/forgejo"
+    link "$DOCKER_DIR/forgejo" "$DATA_ROOT/forgejo"
+else
+    mkdir -p "$DOCKER_DIR/forgejo"
+fi
+# The instance's secrets live in this file, not in the repository: copy the
+# template on first run and lock it down (compose reads it via env_file, so a
+# missing file aborts `docker compose up` rather than starting an insecure one).
+if [ ! -f "$DOCKER_DIR/forgejo/forgejo.env" ]; then
+    cp "$DOCKER_DIR/forgejo/forgejo.env.example" "$DOCKER_DIR/forgejo/forgejo.env"
+    chmod 600 "$DOCKER_DIR/forgejo/forgejo.env"
+    echo "  created docker/forgejo/forgejo.env — fill in SECRET_KEY / INTERNAL_TOKEN /"
+    echo "  JWT_SECRET (and later FORGEJO_ADMIN_TOKEN) before starting Forgejo."
+fi
+# Each agent task gets /work/<task_id>; kept 24h after it finishes for triage.
+mkdir -p "$DOCKER_DIR/agent-work"
+
 echo
 echo "Done.  Next:  cp .env.example .env   then   docker compose up -d --build"
