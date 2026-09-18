@@ -20,7 +20,10 @@ untrusted child be?".  This gate pins both halves of the fix:
   a *fake* capability probe, so no real privilege drop, container or network is
   involved; the sandbox ``HOME`` must be a worker-owned directory **outside** the
   checkout, and a symlinked work directory must fail closed rather than be
-  relaxed through;
+  relaxed through; the suite-protection ``chmod`` (``protect_suite`` /
+  ``protect_paths``) runs as the *trusted* worker after untrusted code has had a
+  writable checkout, so it too must skip symlinks instead of following them into
+  a worker-owned file outside the checkout;
 * **wiring** — the gate executor and the review runner must merge
   ``untrusted_popen_kwargs()`` and ``sandbox_env_overrides()``, the worker's git
   subprocesses must re-assert the post-clone ``.git/config`` (a repo-config
@@ -54,6 +57,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from services import sandbox_identity  # noqa: E402
+from services.agent_runner import SubprocessRunnerAdapter  # noqa: E402
 from services.sandbox_env import ALLOWED_NAMES, PLATFORM_SECRETS  # noqa: E402
 from services.sandbox_identity import (  # noqa: E402
     SANDBOX_GID_ENV,
@@ -330,6 +334,104 @@ def check_symlink_refusal() -> None:
         prepare_untrusted_workdir(link, env={})
 
 
+# ── 2c. no worker chmod follows a repository symlink ─────────────────
+
+def check_protect_no_follow() -> None:
+    """The suite-protection chmod must never follow a repository symlink.
+
+    ``SubprocessRunnerAdapter.protect_suite`` / ``protect_paths`` run as the
+    **trusted** worker, twice: once read-only before the gates, and once
+    widening (``readonly=False``) in ``AgentRunner.run``'s ``finally`` — *after*
+    untrusted repository code has had a writable checkout.  A ``chmod`` that
+    followed a link there made the worker hand the sandbox access to any
+    worker-owned file it can reach (``.agent/checks -> /app/data`` turned the
+    queue database from ``0600`` into ``0644``), which undoes the uid separation
+    this whole slice exists for.  This scenario pins both the behaviour and the
+    source, because "no chmod follows a link" is exactly the kind of guard a
+    later refactor deletes while the existing gates stay green.
+    """
+    section("2c · suite protection: no worker chmod follows a repo symlink")
+    adapter = SubprocessRunnerAdapter()
+    with tempfile.TemporaryDirectory(prefix="openfish-protect-link-") as tmp:
+        base = Path(tmp)
+        workdir = base / "work"
+        checkout = workdir / "repo"
+        (checkout / ".agent").mkdir(parents=True)
+        outside = base / "outside"
+        outside.mkdir()
+        worker_file = outside / "cpypiserver.db"
+        worker_file.write_text("secret\n", encoding="utf-8")
+        worker_file.chmod(0o600)
+        # A repository can commit this link (or plant it while it runs as the
+        # sandbox uid): `.agent/checks` itself is the symlink.
+        (checkout / ".agent" / "checks").symlink_to(outside, target_is_directory=True)
+
+        adapter.protect_suite(workdir, readonly=False)   # the widening pass
+        check("a symlinked .agent/checks is never followed",
+              stat.S_IMODE(worker_file.stat().st_mode) == 0o600,
+              oct(stat.S_IMODE(worker_file.stat().st_mode)))
+
+        # A real suite must still be protected: the guard must skip symlinks
+        # without disabling the protection it exists for.
+        (checkout / ".agent" / "checks").unlink()
+        real_suite = checkout / ".agent" / "checks"
+        real_suite.mkdir()
+        real_script = real_suite / "check_x.py"
+        real_script.write_text("#\n", encoding="utf-8")
+        adapter.protect_suite(workdir, readonly=True)
+        check("a real suite directory is still locked read-only",
+              stat.S_IMODE(real_suite.stat().st_mode) == 0o555
+              and stat.S_IMODE(real_script.stat().st_mode) == 0o444,
+              f"{oct(stat.S_IMODE(real_suite.stat().st_mode))}/"
+              f"{oct(stat.S_IMODE(real_script.stat().st_mode))}")
+        adapter.protect_suite(workdir, readonly=False)
+        check("the widening pass still restores a real suite",
+              stat.S_IMODE(real_suite.stat().st_mode) == 0o755
+              and stat.S_IMODE(real_script.stat().st_mode) == 0o644,
+              f"{oct(stat.S_IMODE(real_suite.stat().st_mode))}/"
+              f"{oct(stat.S_IMODE(real_script.stat().st_mode))}")
+
+        # protect_paths takes repository-controlled relative paths.
+        planted = checkout / "planted.py"
+        planted.symlink_to(worker_file)
+        secret = outside / "protected.py"
+        secret.write_text("#\n", encoding="utf-8")
+        secret.chmod(0o600)
+        (checkout / "real.py").write_text("#\n", encoding="utf-8")
+        adapter.protect_paths(workdir, ["planted.py"], readonly=True)
+        check("protect_paths skips a symlinked final component",
+              stat.S_IMODE(worker_file.stat().st_mode) == 0o600,
+              oct(stat.S_IMODE(worker_file.stat().st_mode)))
+        adapter.protect_paths(workdir, ["../protected.py", "real.py"], readonly=True)
+        check("protect_paths refuses a path that escapes the checkout",
+              stat.S_IMODE(secret.stat().st_mode) == 0o600,
+              oct(stat.S_IMODE(secret.stat().st_mode)))
+        check("protect_paths still locks a real repo file",
+              stat.S_IMODE((checkout / "real.py").stat().st_mode) == 0o444,
+              oct(stat.S_IMODE((checkout / "real.py").stat().st_mode)))
+
+    runner = _source(REPO_ROOT / "services" / "agent_runner.py")
+    suite_body = _function_source(
+        REPO_ROOT / "services" / "agent_runner.py", "protect_suite",
+        class_name="SubprocessRunnerAdapter",
+    )
+    paths_body = _function_source(
+        REPO_ROOT / "services" / "agent_runner.py", "protect_paths",
+        class_name="SubprocessRunnerAdapter",
+    )
+    check("protect_suite walks without following symlinked directories",
+          "followlinks=False" in suite_body, suite_body[:120])
+    check("protect_suite never chmods through rglob",
+          ".rglob(" not in suite_body, suite_body[:120])
+    check("protect_paths re-anchors the parent and lstats the final component",
+          "realpath" in paths_body and "_no_follow_lstat" in paths_body,
+          paths_body[:120])
+    check("protect_paths never chmods through is_file/is_dir",
+          ".is_file()" not in paths_body and ".is_dir()" not in paths_body,
+          paths_body[:120])
+    check("the no-follow guard uses lstat", "os.lstat" in runner)
+
+
 # ── 3. work-tree contract ────────────────────────────────────────────
 
 def check_work_tree() -> None:
@@ -550,6 +652,7 @@ def main() -> int:
         check_identity_resolution,
         check_spawn_contract,
         check_symlink_refusal,
+        check_protect_no_follow,
         check_work_tree,
         check_source_wiring,
         check_runner_image,

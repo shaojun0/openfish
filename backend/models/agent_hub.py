@@ -1006,30 +1006,39 @@ class GitIdentity(Base):
 # ── webhook_deliveries ───────────────────────────────────────────────
 
 class WebhookDelivery(Base):
-    """One accepted Forgejo webhook delivery, so a replay is a no-op.
+    """One accepted webhook body, so a replay of that body is a no-op.
 
     The HMAC proves *who* signed a payload, not that it is arriving for the
     first time: Forgejo retries a delivery it did not get a 2xx for, and anyone
     holding the shared secret can replay a captured body.  The queue's
     ``dedup_key`` only suppresses a *still active* task, so a replay after the
     task finished used to run the whole review (and pay for the model) again.
-    Recording the forge's delivery id makes the second attempt answer without
-    side effects.
+
+    The key stored here is the SHA-256 of the raw request body — the material
+    the HMAC actually covers — **not** the forge's ``X-Forgejo-Delivery``
+    header.  That header sits outside the signature, so keying on it let a
+    replay drop or rewrite it and look like a fresh delivery.  See
+    :func:`routes.repo_webhook.delivery_key`.
     """
 
     __tablename__ = "webhook_deliveries"
 
     id: Mapped[int] = Column(Integer, primary_key=True, autoincrement=True)
-    #: The forge's delivery id (``X-Forgejo-Delivery`` and friends).  Unique, so
-    #: a racing duplicate is rejected by the database rather than by a check.
-    delivery_id: Mapped[str] = Column(String(128), nullable=False, unique=True, index=True)
+    #: Authenticated idempotency key: the SHA-256 of the signed raw body.
+    #: Unique, so a racing duplicate is rejected by the database rather than by
+    #: a check-then-act sequence.  The physical column keeps its historical name
+    #: ``delivery_id`` so an existing deployment needs no destructive migration;
+    #: only its meaning changed (a body digest, not the forge's header).
+    delivery_key: Mapped[str] = Column(
+        "delivery_id", String(128), nullable=False, unique=True, index=True,
+    )
     #: What the delivery was about, for triage only.
     repo_id: Mapped[int | None] = Column(Integer, nullable=True)
     event: Mapped[str | None] = Column(String(32), nullable=True)
     received_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"<WebhookDelivery {self.delivery_id!r}>"
+        return f"<WebhookDelivery {self.delivery_key!r}>"
 
 
 # ── finding_evidence ─────────────────────────────────────────────────

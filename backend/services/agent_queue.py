@@ -69,9 +69,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import create_engine, event, func, select, update
+from sqlalchemy import and_, create_engine, event, func, select, update
 from sqlalchemy.engine import Engine, make_url
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from models.agent_hub import TASK_KIND, TASK_STATUS, AgentTask, RepoRunner
 
@@ -98,6 +98,18 @@ DEFAULT_SQLITE_PATH = "data/cpypiserver.db"
 #: Statuses that count as "this work is still pending".  Producer-side dedup and
 #: the per-repo in-flight ceiling both look at exactly this set.
 ACTIVE_TASK_STATUSES: tuple[str, ...] = ("queued", "leased", "running")
+
+#: Statuses that occupy an *execution* slot: the queue has handed out a lease
+#: (``leased``) or the worker has begun (``running``).  This is the set the
+#: claim-time ceiling counts, whereas ``enqueue`` counts
+#: :data:`ACTIVE_TASK_STATUSES` (``queued`` included) as a more conservative
+#: producer-side throttle.  ``queued`` cannot be counted at claim time: the
+#: candidate row is itself ``queued``, so a ceiling of 1 would make every task
+#: unclaimable the moment two were waiting.  A row that has been leased but
+#: whose worker died still occupies its slot until
+#: :meth:`AgentQueue.reclaim_expired` frees it — the ceiling bounds *claimed*
+#: work, which is what ``max_concurrency`` means.
+RUNNING_TASK_STATUSES: tuple[str, ...] = ("leased", "running")
 
 #: Environment knob for :meth:`AgentQueue.enqueue`'s per-repo ceiling.  ``0``
 #: (the library default) means unlimited; a deployment sets a small number so one
@@ -133,6 +145,56 @@ def _runner_runnable():
         )
         .exists()
     )
+
+
+def _runner_ceiling_available():
+    """SQL predicate: the task's repository is below its runner's ceiling.
+
+    Correlated on ``repo_id`` against the repository's runner row, exactly like
+    :func:`_runner_runnable`.  A repository with no runner row contributes no
+    predicate, so legacy ``runner_id IS NULL`` tasks stay claimable; a runner
+    with ``max_concurrency = 0`` means *inherit* and likewise adds nothing —
+    the environment ceiling ``AGENT_MAX_IN_FLIGHT_PER_REPO`` is deliberately
+    **not** re-checked here.  It stays a producer-side throttle
+    (:meth:`AgentQueue.enqueue`) because a hard claim-time check on a value that
+    is not stored on the task would strand rows that were legitimately admitted
+    earlier (before the knob was lowered, or through an explicit
+    ``max_in_flight_per_repo`` override) and could stall the repository forever.
+
+    The count is over :data:`RUNNING_TASK_STATUSES` (``leased`` / ``running``),
+    i.e. tasks that already hold an execution slot; see that constant for why
+    ``queued`` is excluded.  Written as ``NOT (bounded AND inflight >= ceiling)``
+    so a missing runner row (``ceiling`` NULL → ``coalesce`` 0) and a
+    ``max_concurrency`` of 0 both fall through to claimable.
+
+    Atomicity: the predicate is part of the claim's own SELECT, so it is
+    evaluated in the transaction that writes the lease.  What makes the bound
+    hold *across replicas* is the repository lock :meth:`AgentQueue.claim` takes
+    in the preceding statement: on PostgreSQL a competing claimant for the same
+    repository blocks on that row lock until the winner commits, and because
+    READ COMMITTED gives every statement a fresh snapshot, the loser's count
+    then sees that committed lease instead of the pre-commit count.  On SQLite
+    :meth:`AgentQueue._serialise_writes` already holds ``BEGIN IMMEDIATE``, so
+    claim transactions are serialised outright.  The lock's placement, order
+    and cost are documented on :meth:`AgentQueue.claim`.
+    """
+    running = aliased(AgentTask)
+    inflight = (
+        select(func.count())
+        .select_from(running)
+        .where(
+            running.repo_id == AgentTask.repo_id,
+            running.status.in_(RUNNING_TASK_STATUSES),
+        )
+        .scalar_subquery()
+    )
+    ceiling = (
+        select(RepoRunner.max_concurrency)
+        .where(RepoRunner.repo_id == AgentTask.repo_id)
+        .scalar_subquery()
+    )
+    bounded = func.coalesce(ceiling, 0)
+    return ~and_(bounded > 0, inflight >= bounded)
 
 
 # ── Values exchanged with callers ────────────────────────────────────
@@ -413,6 +475,18 @@ class AgentQueue:
         The task is bound to the repository's runner row when one exists, so a
         worker can honour that runner's configuration.
 
+        This check is a **producer-side throttle, not the enforcement point**:
+        it counts :data:`ACTIVE_TASK_STATUSES` (``queued`` included) and, being
+        an ordinary non-atomic read, two racing producers can still both insert.
+        The bound that execution actually respects is the claim-time guard in
+        :func:`_runner_ceiling_available` (runner ``max_concurrency > 0`` only),
+        evaluated inside :meth:`claim`'s transaction.  Both are deliberate:
+        the throttle stops one noisy repository from filling the global queue,
+        while the claim-time guard makes the runner's ceiling hold for rows that
+        arrive by any other path — a retry, a reclaim, a race, or an explicit
+        ``max_in_flight_per_repo`` override.  Returning ``0`` is therefore a
+        statement about the throttle, never a promise about the whole queue.
+
         *dedup_key* is the producer's idempotency token (a push sha, an issue
         number).  The check is not a unique constraint: two workers racing can
         still both insert, which is the same at-least-once posture as the rest of
@@ -500,6 +574,32 @@ class AgentQueue:
         Returns ``None`` when there is nothing to do, which is the worker's
         signal to sleep, not an error.
 
+        The repository's runner ``max_concurrency`` is also a ceiling here, not
+        only in :meth:`enqueue`: a candidate is skipped while the repository
+        already holds that many tasks in :data:`RUNNING_TASK_STATUSES`
+        (``leased`` / ``running``), so a retry, a reclaim, or a producer race
+        cannot push a repository past the bound at execution time.  A runner
+        with ``max_concurrency = 0`` means *inherit* and adds no claim-time
+        predicate; ``AGENT_MAX_IN_FLIGHT_PER_REPO`` remains producer-side only.
+        The full semantics live on :func:`_runner_ceiling_available`.
+
+        Atomicity, stated plainly: the runner rows of every *bounded*
+        repository are locked ``FOR UPDATE`` in a preceding statement (see the
+        code below).  On PostgreSQL a competing claimant for the same repository
+        blocks on that row lock until this claim commits, then re-counts in a
+        fresh READ COMMITTED snapshot that includes the committed lease, so it
+        cannot lease the (N+1)th slot; on SQLite ``BEGIN IMMEDIATE``
+        (:meth:`_serialise_writes`) serialises the whole claim instead, and the
+        extra statement degrades to an ordinary read.  The lock rows are taken
+        in one global order (``repo_runners.repo_id`` ascending), so two
+        claimants can never deadlock.  Cost, stated honestly: the lock spans all
+        bounded runner rows, so concurrent claims for *different* bounded
+        repositories serialise on this statement for the length of one claim
+        transaction.  That is acceptable because a claim is a short count plus
+        one UPDATE, repositories with no runner row or ``max_concurrency = 0``
+        lock nothing, and the queue's contract is correctness rather than claim
+        throughput.
+
         Callers should prefer :meth:`lease`, which also starts the heartbeat.
         """
         lease_for = float(lease_seconds if lease_seconds is not None else self.lease_seconds)
@@ -508,9 +608,34 @@ class AgentQueue:
         # Portable on both backends: a NOT EXISTS against the repository's own
         # runner row, so no dialect-specific raw SQL is needed.
         runner_runnable = _runner_runnable()
+        # The execution-slot ceiling, evaluated in the same statement as the
+        # lease so the count and the write share one transaction.  On SQLite
+        # that is airtight; on PostgreSQL the preceding repo lock (below) is
+        # what makes the count see a competing claimant's committed lease.
+        runner_ceiling = _runner_ceiling_available()
 
         with self.session() as session:
             self._serialise_writes(session)
+            # Take the repository-scoped lock BEFORE the ceiling-leading claim
+            # SELECT, and on both backends.  PostgreSQL needs it: the claim's
+            # count would otherwise read the statement-start snapshot, letting
+            # two replicas each observe the pre-commit count and lease two rows
+            # for a repo at its ceiling.  Blocking here means the loser's next
+            # statement (the claim SELECT) runs with a fresh snapshot and sees
+            # the winner's committed lease.  Locking every bounded runner row in
+            # one global order (repo_id ascending) prevents deadlock; it does
+            # briefly serialise claims for different bounded repositories, which
+            # is the accepted cost of an exact bound.  Repositories with no
+            # runner row or ``max_concurrency = 0`` have no ceiling and are not
+            # locked; SQLite renders no FOR UPDATE (unsupported) and already
+            # holds the write lock from ``BEGIN IMMEDIATE``, so there it is only
+            # a harmless read.
+            session.execute(
+                select(RepoRunner.repo_id)
+                .where(RepoRunner.max_concurrency > 0)
+                .order_by(RepoRunner.repo_id.asc())
+                .with_for_update()
+            ).all()
             if self.engine.dialect.name == "postgresql":
                 statement = (
                     select(AgentTask)
@@ -518,6 +643,7 @@ class AgentQueue:
                         AgentTask.status == "queued",
                         (AgentTask.scheduled_at.is_(None)) | (AgentTask.scheduled_at <= now),
                         runner_runnable,
+                        runner_ceiling,
                     )
                     .order_by(AgentTask.priority.desc(), AgentTask.created_at.asc())
                     .limit(1)
@@ -530,6 +656,7 @@ class AgentQueue:
                         AgentTask.status == "queued",
                         (AgentTask.scheduled_at.is_(None)) | (AgentTask.scheduled_at <= now),
                         runner_runnable,
+                        runner_ceiling,
                     )
                     .order_by(AgentTask.priority.desc(), AgentTask.created_at.asc())
                     .limit(1)

@@ -54,7 +54,7 @@
 | # | 目标 | 验收信号 |
 |---|---|---|
 | G1 | 每个仓库有且只有一行执行配置 | `repo_runners.repo_id` 唯一；`ensure()` 幂等且不覆盖既有设置 |
-| G2 | 任务领取受仓库级开关与配额约束 | 禁用 runner 的任务不被 `claim`；超出 `max_concurrency` 的入队返回 0（抑制） |
+| G2 | 任务领取受仓库级开关与配额约束 | 禁用 runner 的任务不被 `claim`；超出 `max_concurrency` 的入队返回 0（生产者侧抑制），**且** `claim` 侧对 `max_concurrency > 0` 的仓库再判一次已占槽数（`leased` / `running`），重试/回收/并发生产者都不能越过上限 |
 | G3 | 凭据按仓库解析，且只以密文落库 | `credential()` 优先返回 repo 密文解密结果，否则共享 token；解密失败抛错不回退 |
 | G4 | 工作区不越界 | `safe_workspace_subdir()` 拒绝绝对路径 / `..` / 反斜杠 / 控制字符 / 非法字符集 |
 | G5 | 出网策略有唯一存放处且语义诚实 | `egress_policy ∈ {inherit, internal, allowlist}`，文档明确「平台只持久化」 |
@@ -392,9 +392,19 @@ worker 自己的 `git status` / `git add` / `git push` 在不可信代码之后�
 | `repo_runners.max_concurrency > 0` | 该仓库的硬上限 |
 | `AGENT_MAX_IN_FLIGHT_PER_REPO = 0` / 未设 | 无上限 |
 
-判定口径：统计该 `repo_id` 下状态属于 `ACTIVE_TASK_STATUSES`
+判定口径：**入队侧**统计该 `repo_id` 下状态属于 `ACTIVE_TASK_STATUSES`
 （`queued` / `leased` / `running`）的任务数；达到上限则 `enqueue` 返回 `0`。
-上限是**生产者侧**的抑制，不改变消费侧的领取逻辑（§4.3 的禁用判定独立成立）。
+这是**生产者侧**的抑制（非原子，两个并发生产者仍可能同时通过），不是执行上界。
+
+真正的执行上界在**消费侧**：`services/agent_queue.claim()` 对
+`repo_runners.max_concurrency > 0` 的仓库再加一条上限判定，统计口径是
+`RUNNING_TASK_STATUSES`（`leased` / `running`，即已占住执行槽的任务；
+`queued` 不计，否则候选行自己会把上限占满）。因此 `retry` / `reclaim_expired` /
+并发生产者造成的超额行在领取时被挡住。SQLite 由 `BEGIN IMMEDIATE` 串行化保证严格；
+PostgreSQL 在计数前先对 `max_concurrency > 0` 的 runner 行取
+`SELECT … FOR UPDATE` 仓库级锁（按 `repo_id` 固定顺序，避免死锁），使计数能看到
+对手已提交的租约，从而同样严格。`AGENT_MAX_IN_FLIGHT_PER_REPO` 仍只在入队侧生效。
+§4.3 的禁用判定独立成立且不受影响。
 
 设计取舍：用「抑制入队」而不是「入队后排队」是为了防止单个吵仓库把全局队列塞满、
 饿死其它仓库；代价是被抑制的任务需要生产者在下一轮再试（或由 webhook 重投），

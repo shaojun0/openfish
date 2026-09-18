@@ -42,6 +42,7 @@ from flask import Blueprint, current_app, jsonify, request
 
 from models.agent_hub import TASK_KIND
 from openapi import api_operation, errors, json_body, ok
+from services.digest import sha256_text
 from services.repo_import import ImportConfig, read_policy_auto_review
 from services.review_policy import (
     CURATOR_AUTO,
@@ -63,8 +64,10 @@ SIGNATURE_HEADERS = ("X-Forgejo-Signature", "X-Gitea-Signature", "X-Hub-Signatur
 #: ``issues`` opened from ``issues`` labeled.
 EVENT_HEADERS = ("X-Forgejo-Event", "X-Gitea-Event", "X-GitHub-Event")
 
-#: Delivery header.  It names one delivery *attempt*, which is what makes a
-#: replay distinguishable from a genuine second push of the same commit.
+#: Delivery header.  This is **not** covered by the HMAC, so it is never trusted
+#: for a decision: :func:`delivery_id` reads it for triage/logging only, and the
+#: replay key is derived from the signed body instead (a header an attacker can
+#: strip or rewrite cannot be an idempotency key).
 DELIVERY_HEADERS = ("X-Forgejo-Delivery", "X-Gitea-Delivery", "X-GitHub-Delivery")
 
 #: Label that turns an issue into a fix task.
@@ -123,9 +126,17 @@ def verify_signature(
     if not candidate or len(candidate) != 64:
         return False
     expected = compute_signature(secret, body)
+    candidate = candidate.lower()
+    # A signature is hex, so anything non-ASCII is already a mismatch.  Rejecting
+    # it here keeps the promise above: ``hmac.compare_digest`` on two *str* raises
+    # ``TypeError`` when either side is non-ASCII, which used to escape as a 500
+    # for a 64-character header full of non-ASCII.  Comparing encoded bytes is
+    # also the only form that is constant-time for every input.
+    if not candidate.isascii():
+        return False
     # compare_digest, not ==: a byte-by-byte comparison leaks the length of the
     # matching prefix, which is enough to forge a digest one nibble at a time.
-    return hmac.compare_digest(expected, candidate.lower())
+    return hmac.compare_digest(expected.encode("ascii"), candidate.encode("ascii"))
 
 
 def signature_header(headers: Mapping[str, str]) -> str | None:
@@ -755,10 +766,42 @@ def _session():
     return Session
 
 
+def _duplicate_response(event: WebhookEvent):
+    """The ``200`` body for a delivery whose authenticated key is already known.
+
+    A duplicate is not an error: the forge resends after a 2xx it did not see,
+    and a ``4xx`` would make it retry forever.
+    """
+    return jsonify({
+        "ok": True,
+        "event": event.kind,
+        "action": event.action,
+        "repo": event.forgejo_repo or event.repo_slug,
+        "slug": None,
+        "handled": False,
+        "queued": [],
+        "findings_updated": 0,
+        "duplicate": True,
+        "note": "重复投递：该请求体已处理过，未重复入队",
+    })
+
+
 # ── Delivery idempotency ─────────────────────────────────────────────
+# The HMAC proves *who* signed a payload, not that it is new: Forgejo retries a
+# delivery it did not get a 2xx for, and anyone holding the shared secret can
+# replay a captured body.  The queue's own ``dedup_key`` only collapses a *still
+# active* task, so a replay after the first task finished would pay for the
+# review again.  Replay detection therefore lives here, keyed on the one piece
+# of the request the signature actually covers — the raw body.
 
 def delivery_id() -> str:
-    """The delivery id from the request headers, or ``""`` when the forge sent none."""
+    """The forge's delivery header, or ``""`` when it sent none.
+
+    **Unauthenticated hint only.**  ``X-Forgejo-Delivery`` and its siblings sit
+    outside the HMAC, so a replay can drop or rewrite them at will; this value
+    is never used to decide whether a delivery is new (see
+    :func:`delivery_key`), only logged for triage.
+    """
     for name in DELIVERY_HEADERS:
         value = (request.headers.get(name) or "").strip()
         if value:
@@ -766,43 +809,103 @@ def delivery_id() -> str:
     return ""
 
 
-def delivery_seen(session: Any, delivery: str) -> bool:
-    """Whether *delivery* was already accepted.
+def delivery_key(body: bytes) -> str:
+    """The authenticated idempotency key for one webhook body.
 
-    Fail-open on a database that predates the ``webhook_deliveries`` table (or
-    any lookup error): idempotency is defence in depth, and it must never turn a
-    webhook into a 500 and make Forgejo retry forever.
+    A SHA-256 of the raw request body — the exact bytes the HMAC is computed
+    over — so a captured body presents the same key however the delivery
+    headers are edited.  The event header is deliberately *not* mixed in: it is
+    unauthenticated too, and folding it into the key would hand back the same
+    replay bypass.  The body already carries the event identity (a push and an
+    issues payload cannot be byte-identical and still mean different events).
+
+    The body is forge-published JSON, so decoding is exact; a body that does not
+    decode is rejected with ``400`` before this is reached.
+    :func:`services.digest.sha256_text` is this project's one SHA-256
+    implementation.
     """
-    if not delivery:
+    return sha256_text(body.decode("utf-8"))
+
+
+def delivery_seen(session: Any, key: str) -> bool:
+    """Whether *key* (an authenticated body digest) was already accepted.
+
+    This is the cheap pre-check; :func:`claim_delivery` is the authoritative one
+    and closes the check-then-act race.  Fail-open on a database that predates
+    the ``webhook_deliveries`` table (or any lookup error): idempotency is
+    defence in depth, and it must never turn a webhook into a 500 and make
+    Forgejo retry forever.  The rollback matters — without it a failed lookup
+    leaves the session unusable and every later query 500s on exactly that
+    legacy database.
+    """
+    if not key:
         return False
     try:
         from models.agent_hub import WebhookDelivery
 
         return (
-            session.query(WebhookDelivery).filter_by(delivery_id=delivery).first()
+            session.query(WebhookDelivery).filter_by(delivery_key=key).first()
             is not None
         )
     except Exception as exc:  # noqa: BLE001 - never 500 a webhook
-        logger.warning("could not check webhook delivery %s: %s", delivery, exc)
+        session.rollback()
+        logger.warning("could not check webhook delivery key %s: %s", key[:16], exc)
         return False
 
 
-def remember_delivery(session: Any, delivery: str, *, repo_id: int, event: str) -> None:
-    """Record an accepted delivery; a later replay then becomes a no-op.
+def claim_delivery(
+    session: Any,
+    key: str,
+    *,
+    repo_id: int | None,
+    event: str,
+) -> bool:
+    """Reserve *key* as accepted, before any side effect; ``False`` = duplicate.
 
-    Written **after** the side effects on purpose: a crash before this commit
-    leaves the delivery unrecorded, so Forgejo's retry can still complete it.
+    The row is inserted and **committed first**, and the unique constraint on the
+    key is what makes concurrent duplicates safe: two in-flight copies of the
+    same signed body both reach this insert, the database lets exactly one
+    commit, and the loser sees ``IntegrityError`` and is answered as a replay
+    without queueing anything.  The old check-then-remember-afterwards pair could
+    not offer that — both requests passed the check before either recorded.
+
+    Crash semantics are deliberately **at-most-once**: the delivery is considered
+    processed the moment the row commits, so a crash between the commit and the
+    side effects means Forgejo's retry is answered as a duplicate and those side
+    effects do not run.  That is the right trade here because the side effects
+    are not transactional with this table (``AgentQueue`` writes through its own
+    engine) and a duplicate *paid* review / fix PR is the damage this guard
+    exists to prevent.  A queue fault is already logged and answered ``200`` by
+    :func:`enqueue_task`, so a retry never re-ran it anyway.
+
+    Fail-open for a database that predates the table or an unreachable database:
+    anything other than an integrity violation is logged and treated as "not
+    seen", so a legacy deployment keeps answering ``200`` instead of ``500``.  A
+    genuine integrity violation is *not* fail-open — the request proceeds to no
+    side effects.
     """
-    if not delivery:
-        return
+    if not key:
+        return True
+    from sqlalchemy.exc import IntegrityError  # noqa: PLC0415 - one dialect seam
+
     try:
         from models.agent_hub import WebhookDelivery
 
-        session.add(WebhookDelivery(delivery_id=delivery, repo_id=repo_id, event=event))
+        session.add(WebhookDelivery(delivery_key=key, repo_id=repo_id, event=event))
         session.commit()
+        return True
+    except IntegrityError:
+        # The unique key lost the race: a duplicate, handled deliberately rather
+        # than swallowed.  This is the *expected* path for a replay.
+        session.rollback()
+        logger.info(
+            "webhook delivery key %s already recorded; ignoring replay", key[:16],
+        )
+        return False
     except Exception as exc:  # noqa: BLE001 - never 500 a webhook
         session.rollback()
-        logger.warning("could not record webhook delivery %s: %s", delivery, exc)
+        logger.warning("could not record webhook delivery key %s: %s", key[:16], exc)
+        return True
 
 
 @repo_webhook_bp.route("/api/v1/repos/webhook", methods=["POST"])
@@ -866,25 +969,20 @@ def forgejo_webhook():
         "",
     )
     event = parse_event(event_name, payload, body=body)
-    delivery = delivery_id()
+    key = delivery_key(body)
+    hint = delivery_id()
     session = _session()
-    if delivery_seen(session, delivery):
+    if delivery_seen(session, key):
         # The HMAC proves who signed it, not that it is new: a replay (or a
         # Forgejo retry after a 2xx we failed to return) must not enqueue a
-        # second review.  Answer 200 so the forge stops retrying either way.
-        logger.info("webhook delivery %s already accepted; ignoring replay", delivery)
-        return jsonify({
-            "ok": True,
-            "event": event.kind,
-            "action": event.action,
-            "repo": event.forgejo_repo or event.repo_slug,
-            "slug": None,
-            "handled": False,
-            "queued": [],
-            "findings_updated": 0,
-            "duplicate": True,
-            "note": "重复投递：该 delivery 已处理过，未重复入队",
-        })
+        # second review.  The key is the signed body's digest, so stripping the
+        # (unsigned) delivery header does not make the replay look new.  Answer
+        # 200 so the forge stops retrying either way.
+        logger.info(
+            "webhook delivery body %s already accepted (header hint %r); ignoring replay",
+            key[:16], hint,
+        )
+        return _duplicate_response(event)
     repo = resolve_repo(session, event)
     if repo is None:
         # 200, not 404: an unimported repository is a permanent condition, and a
@@ -906,6 +1004,17 @@ def forgejo_webhook():
                 "先用 POST /api/v1/repos/import 导入（返回 200 以免 Forgejo 反复重试）"
             ),
         })
+
+    # Claim the delivery *before* the side effects.  The check above can race
+    # (two in-flight copies both pass it); this insert's unique constraint is
+    # what actually serialises them.  If it loses, answer as a duplicate instead
+    # of queueing a second paid task.
+    if not claim_delivery(session, key, repo_id=repo.id, event=event.kind):
+        logger.info(
+            "webhook delivery body %s claimed concurrently (header hint %r); ignoring replay",
+            key[:16], hint,
+        )
+        return _duplicate_response(event)
 
     curator_mode, curator_interval = _repo_curator_policy(repo)
     if event.kind == "push" and event.is_default_branch:
@@ -944,9 +1053,9 @@ def forgejo_webhook():
             session, repo.id, event.pr_number or 0, event.pr_url,
         )
 
-    # Record only once the side effects are done: a crash before this commit
-    # leaves the delivery unrecorded so a retry can still complete it.
-    remember_delivery(session, delivery, repo_id=repo.id, event=event.kind)
+    # The delivery was claimed before these side effects (see claim_delivery):
+    # a crash here leaves it recorded, so a Forgejo retry is a no-op rather than
+    # a second paid task.  That at-most-once choice is documented there.
 
     handled = bool(queued) or (event.kind == "pull_request" and event.merged)
     note = None
@@ -981,14 +1090,15 @@ __all__ = [
     "QueuedAction",
     "WebhookEvent",
     "backfill_pr_url",
+    "claim_delivery",
     "compute_signature",
     "curator_enqueue_allowed",
     "delivery_id",
+    "delivery_key",
     "delivery_seen",
     "enqueue_task",
     "parse_event",
     "plan_actions",
-    "remember_delivery",
     "repo_webhook_bp",
     "resolve_repo",
     "signature_header",

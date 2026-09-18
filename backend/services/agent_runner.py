@@ -45,6 +45,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import tempfile
 import time
 from dataclasses import dataclass
@@ -381,6 +382,30 @@ def checkout_root(workdir: str | Path) -> Path:
     """
     nested = Path(workdir) / "repo"
     return nested if nested.is_dir() else Path(workdir)
+
+
+def _no_follow_lstat(path: Path) -> os.stat_result | None:
+    """``os.lstat`` *path*, or ``None`` when it is a symlink or unreadable.
+
+    The checkout is group-writable by the sandbox uid, so repository code can
+    replace any entry with a symlink; a worker ``chmod`` that followed one would
+    hand the sandbox write access to a worker-owned file outside the checkout
+    (the invariant stated in :mod:`services.sandbox_identity`).  ``lstat`` never
+    follows the final component, so a link is skipped — not followed and not a
+    failure — and an unreadable entry is a debug log, never a raised error.
+    Linux ``os.chmod`` has no ``follow_symlinks`` support (it raises
+    ``NotImplementedError``), so this ``lstat`` is the guard, exactly as in
+    :func:`services.sandbox_identity._relax`.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        logger.debug("cannot lstat %s: %s", path, exc)
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        logger.debug("skipping symlink %s: refusing to chmod through it", path)
+        return None
+    return st
 
 
 def mark_finished(workdir: str | Path) -> Path:
@@ -1379,19 +1404,43 @@ class SubprocessRunnerAdapter:
         The authoritative guard is :func:`services.check_suite.fix_guard_violations`
         applied to :meth:`changed_paths`, which works even when the sandbox runs
         as root; this just makes an opportunistic write fail early.
+
+        Symlinks are never followed.  The checkout is group-writable by the
+        sandbox uid, so repository code can replace any entry with a link —
+        ``.agent/checks`` itself included, which is why that directory is
+        ``os.lstat``-ed and refused when it is a link — and a worker ``chmod``
+        following one would hand the sandbox write access to a worker-owned file
+        outside the checkout (the invariant stated in
+        :mod:`services.sandbox_identity`).  ``os.walk(..., followlinks=False)``
+        mirrors :func:`services.sandbox_identity._relax_tree`: a symlinked
+        directory is listed but never descended into, and
+        :func:`_no_follow_lstat` also skips it as a chmod target.
         """
         directory = checkout_root(workdir) / CHECK_DIR_RELPATH
-        if not directory.is_dir():
+        directory_stat = _no_follow_lstat(directory)
+        if directory_stat is None or not stat.S_ISDIR(directory_stat.st_mode):
             return
         mode = 0o555 if readonly else 0o755
         file_mode = 0o444 if readonly else 0o644
-        for path in sorted(directory.rglob("*"), reverse=True):
-            try:
-                path.chmod(mode if path.is_dir() else file_mode)
-            except OSError as exc:
-                logger.debug("cannot chmod %s: %s", path, exc)
+        # ``topdown=False`` yields children before their directory, matching the
+        # deepest-first order of the old ``sorted(rglob("*"), reverse=True)``.
+        for dirpath, dirnames, filenames in os.walk(
+            directory, topdown=False, followlinks=False,
+            onerror=lambda exc: logger.debug("cannot walk %s: %s", directory, exc),
+        ):
+            parent = Path(dirpath)
+            for name in (*dirnames, *filenames):
+                path = parent / name
+                entry = _no_follow_lstat(path)
+                if entry is None:
+                    continue
+                target_mode = mode if stat.S_ISDIR(entry.st_mode) else file_mode
+                try:
+                    os.chmod(path, target_mode)
+                except OSError as exc:
+                    logger.debug("cannot chmod %s: %s", path, exc)
         try:
-            directory.chmod(mode)
+            os.chmod(directory, mode)
         except OSError as exc:
             logger.debug("cannot chmod %s: %s", directory, exc)
 
@@ -1405,18 +1454,38 @@ class SubprocessRunnerAdapter:
         """Best-effort ``chmod`` of specific repo-relative files.
 
         The authoritative guard is :func:`services.check_suite.fix_guard_violations`
-        with the resolved suite; this locks the suite's *base-revision* entry
+        the resolved suite; this locks the suite's *base-revision* entry
         scripts and declaration files for the duration of a fix, so an
         opportunistic write fails early instead of relying on the post-hoc guard.
+
+        Symlinks are never followed.  *paths* is repository-controlled, so each
+        ``root / relative`` is re-anchored under its resolved parent — a link or
+        ``..`` in any directory component therefore cannot escape the checkout —
+        and its final component is ``lstat``-ed: a repository-planted link is
+        skipped rather than chmod'ed, so the worker never hands the sandbox write
+        access to a file outside the checkout (the invariant stated in
+        :mod:`services.sandbox_identity`).
         """
         root = checkout_root(workdir)
+        root_real = Path(os.path.realpath(root))
         file_mode = 0o444 if readonly else 0o644
         for relative in paths:
-            path = root / relative
-            if not path.is_file():
+            if not relative or Path(relative).is_absolute():
+                logger.debug("skipping non-relative protected path %r", relative)
+                continue
+            path = root_real / relative
+            # Resolve the *parent* only: the final component must stay
+            # un-followed for ``_no_follow_lstat``.
+            parent_real = Path(os.path.realpath(path.parent))
+            if parent_real != root_real and root_real not in parent_real.parents:
+                logger.debug("skipping %s: parent resolves outside %s", path, root_real)
+                continue
+            path = parent_real / path.name
+            entry = _no_follow_lstat(path)
+            if entry is None or not stat.S_ISREG(entry.st_mode):
                 continue
             try:
-                path.chmod(file_mode)
+                os.chmod(path, file_mode)
             except OSError as exc:
                 logger.debug("cannot chmod %s: %s", path, exc)
 
@@ -2288,6 +2357,9 @@ def _protect_suite(adapter: RunnerAdapter, workdir: Path, *, readonly: bool) -> 
 
     Optional on purpose: an adapter that cannot chmod still gets the real
     enforcement, and a failure here must never fail an otherwise valid task.
+    The adapter implementation is expected to skip symlinks rather than follow
+    them (see :meth:`SubprocessRunnerAdapter.protect_suite`): the checkout is
+    sandbox-writable, so a followed link would chmod outside it.
     """
     protect = getattr(adapter, "protect_suite", None)
     if protect is None:
@@ -2309,7 +2381,10 @@ def _protect_paths(
 
     Complements :func:`_protect_suite`: the AI suite directory is protected
     there, the *user* suite's base-revision entry scripts and declaration files
-    are protected here.
+    are protected here.  The adapter implementation is expected to skip symlinks
+    rather than follow them (see
+    :meth:`SubprocessRunnerAdapter.protect_paths`): the paths are
+    repository-controlled, so a followed link would chmod outside the checkout.
     """
     locked = tuple(paths)
     protect = getattr(adapter, "protect_paths", None)

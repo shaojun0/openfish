@@ -49,7 +49,12 @@ REPO_READ = "repo:read"
 #: Import a repository, trigger a sync, change its configuration — admin.
 REPO_WRITE = "repo:write"
 #: clone/push over the git protocol (the API side mints the credential); every
-#: signed-in user, subject to branch protection (invariant I4).
+#: signed-in user.  The point is **global** — it is not checked per repository —
+#: and the minted Forgejo ticket is account-wide (``read:repository`` /
+#: ``write:repository``), not bound to the requested repo.  Per-repository
+#: enforcement is a Forgejo-side ACL / branch-protection *deployment* concern,
+#: not a platform check.  The ``agent/*``-only rule (invariant I4) constrains
+#: the platform's own agent runner, not a human's ticket.
 REPO_PUSH = "repo:push"
 #: View findings and the debt board — every signed-in user.
 FINDING_READ = "finding:read"
@@ -80,7 +85,13 @@ AGENT_HUB_PERMISSIONS: tuple[str, ...] = (
 BUILTIN_AGENT_HUB: dict[str, tuple[str, str]] = {
     REPO_READ: ("浏览仓库", "列出/查看仓库及其镜像的 issue 与提交历史"),
     REPO_WRITE: ("管理仓库", "导入仓库、触发增量同步、修改仓库配置（仅管理员）"),
-    REPO_PUSH: ("推送仓库", "通过 git 协议 clone/push（受保护分支约束，agent 不得直推 main）"),
+    REPO_PUSH: (
+        "推送仓库",
+        "通过 git 协议 clone/push：权限点为全局（所有登录用户），签发的 Forgejo "
+        "token 为账号级（read:repository / write:repository），不绑定具体仓库；能否"
+        "推送由 Forgejo 侧仓库 ACL 与分支保护决定，属部署时的手工步骤，平台不代管；"
+        "agent/* 限制（I4）只约束平台自带的 agent runner，不约束人类用户的票据",
+    ),
     FINDING_READ: ("浏览发现", "查看 finding 与债务看板"),
     FINDING_DECIDE: ("处置发现", "acknowledge / wontfix / 驳回 finding（需要 owner 与 due）"),
     AGENT_RUN: ("触发智能体任务", "触发一次 review / fix 任务（受配额约束）"),

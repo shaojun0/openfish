@@ -16,10 +16,15 @@ properties that makes ``--scale runner=N`` true, all offline:
    per-replica limits, and still shares one database with the backend.
 2. **A worker identity is unique per process.**  ``worker_id()`` folds host,
    pid and a random suffix together, so N replicas cannot claim as one another.
-3. **The claim path is backend-correct.**  PostgreSQL locks the candidate row
-   with ``FOR UPDATE SKIP LOCKED``; SQLite takes ``BEGIN IMMEDIATE`` before the
-   claim's SELECT.  Both are asserted by *running* the real methods against a
-   fake engine/session and compiling the statement each produced.
+3. **The claim path is backend-correct.**  Every claim first takes a
+   repository-scoped ``FOR UPDATE`` lock on the bounded ``repo_runners`` rows
+   (one global ``repo_id`` order, so two claimants cannot deadlock), then runs
+   the ceiling-leading claim SELECT.  On PostgreSQL that preceding lock is what
+   lets the *following* statement's count see a competing claimant's committed
+   lease; the claim itself still locks the candidate row with ``FOR UPDATE SKIP
+   LOCKED``.  SQLite takes ``BEGIN IMMEDIATE`` before the claim's SELECT and
+   renders no ``FOR UPDATE`` at all.  Both are asserted by *running* the real
+   methods against a fake engine/session and compiling each statement produced.
 
 It also checks that ``workdir_for()`` is per task (so N replicas sharing the
 ``/work`` bind mount cannot land in one directory) and that neither the queue
@@ -32,7 +37,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -75,6 +80,13 @@ class _NoRow:
         return None
 
 
+class _NoRows:
+    """Result of the repo-lock statement: no rows are read, only the lock."""
+
+    def all(self) -> list[Any]:
+        return []
+
+
 class _DriverRecorder:
     """Records raw DBAPI statements — where ``BEGIN IMMEDIATE`` is issued."""
 
@@ -85,16 +97,33 @@ class _DriverRecorder:
         self.statements.append(str(statement))
 
 
-class _CaptureSession:
-    """A session shim that captures the statement the claim built.
+class _Captured(NamedTuple):
+    """Everything one ``claim`` call built, so each statement can be judged.
 
-    ``AgentQueue.claim`` only needs ``scalars(...).first()``, ``commit`` and
-    ``rollback``; ``_serialise_writes`` additionally walks
-    ``connection().connection.driver_connection``.  Both are provided so the
+    ``claim`` deliberately runs **two** SQLAlchemy statements: the
+    repository-scoped lock through ``session.execute`` (``locks``) and the
+    ceiling-leading claim SELECT through ``session.scalars`` (``claims``).
+    ``order`` records which came first so the gate can assert the lock really
+    precedes the claim, rather than only counting statements.
+    """
+
+    claims: list[Any]
+    locks: list[Any]
+    order: list[str]
+    driver: list[str]
+
+
+class _CaptureSession:
+    """A session shim that captures the statements the claim built.
+
+    ``AgentQueue.claim`` needs ``execute(...).all()`` for the repo lock,
+    ``scalars(...).first()`` for the claim, plus ``commit`` and ``rollback``;
+    ``_serialise_writes`` additionally walks
+    ``connection().connection.driver_connection``.  All are provided so the
     production code path — not a reimplementation — is what gets asserted.
     """
 
-    def __init__(self, captured: list[Any], driver: _DriverRecorder | None = None) -> None:
+    def __init__(self, captured: _Captured, driver: _DriverRecorder | None = None) -> None:
         self._captured = captured
         self._driver = driver
 
@@ -105,8 +134,14 @@ class _CaptureSession:
         return False
 
     def scalars(self, statement: Any) -> _NoRow:
-        self._captured.append(statement)
+        self._captured.claims.append(statement)
+        self._captured.order.append("claim")
         return _NoRow()
+
+    def execute(self, statement: Any, *args: Any, **kwargs: Any) -> _NoRows:
+        self._captured.locks.append(statement)
+        self._captured.order.append("lock")
+        return _NoRows()
 
     def connection(self) -> Any:
         return SimpleNamespace(
@@ -120,8 +155,8 @@ class _CaptureSession:
         pass
 
 
-def _capture_claim(dialect: str) -> tuple[list[Any], list[str]]:
-    captured: list[Any] = []
+def _capture_claim(dialect: str) -> _Captured:
+    captured = _Captured(claims=[], locks=[], order=[], driver=[])
     driver = _DriverRecorder()
     queue = AgentQueue(_FakeEngine(dialect))
     # Swap only the session factory: ``claim``/``_serialise_writes`` themselves
@@ -129,7 +164,8 @@ def _capture_claim(dialect: str) -> tuple[list[Any], list[str]]:
     queue.session = lambda: _CaptureSession(captured, driver)  # type: ignore[method-assign]
     claimed = queue.claim(worker="gate-scaling")
     assert claimed is None, f"a fake session must report no task, got {claimed!r}"
-    return captured, driver.statements
+    captured.driver.extend(driver.statements)
+    return captured
 
 
 # ── 1. compose: the runner service can be scaled ─────────────────────
@@ -219,12 +255,25 @@ def check_worker_identity() -> None:
 # ── 3. the claim path is correct on both backends ────────────────────
 
 def check_claim_path() -> None:
-    print("\n── claim 路径：PG / SQLite 各自正确 ───────────────────────")
-    pg_captured, _ = _capture_claim("postgresql")
-    check("PostgreSQL claim 真的构造了 SELECT", len(pg_captured) == 1,
-          f"captured={len(pg_captured)}")
-    if pg_captured:
-        pg_sql = str(pg_captured[0].compile(dialect=postgresql.dialect()))
+    print("\n── claim 路径：仓库锁 + PG / SQLite 各自正确 ───────────────")
+    pg = _capture_claim("postgresql")
+    check("PostgreSQL claim 先取仓库锁、再跑 claim：恰好两条语句且顺序固定",
+          pg.order == ["lock", "claim"] and len(pg.locks) == 1 and len(pg.claims) == 1,
+          f"order={pg.order} locks={len(pg.locks)} claims={len(pg.claims)}")
+    if pg.locks:
+        lock_sql = str(pg.locks[0].compile(dialect=postgresql.dialect()))
+        check("仓库锁是 repo_runners 上的 FOR UPDATE"
+              "（输家阻塞到赢家提交，下一条语句按新快照重算，看不到旧计数）",
+              "FOR UPDATE" in lock_sql and "FROM repo_runners" in lock_sql, lock_sql)
+        check("仓库锁只覆盖 max_concurrency > 0 的 runner（0 = 继承 / 无 runner 不加锁）",
+              "repo_runners.max_concurrency >" in lock_sql, lock_sql)
+        check("仓库锁按 repo_runners.repo_id 升序"
+              "（全局稳定加锁顺序，两个 claimant 不会互相死锁）",
+              "ORDER BY repo_runners.repo_id ASC" in lock_sql, lock_sql)
+    else:
+        check("仓库锁是 repo_runners 上的 FOR UPDATE", False, "no lock statement")
+    if pg.claims:
+        pg_sql = str(pg.claims[0].compile(dialect=postgresql.dialect()))
         check("PostgreSQL claim 使用 FOR UPDATE SKIP LOCKED",
               "FOR UPDATE SKIP LOCKED" in pg_sql, pg_sql)
         check("PostgreSQL claim 按 priority DESC, created_at ASC 取一条",
@@ -234,21 +283,30 @@ def check_claim_path() -> None:
               pg_sql)
     else:
         check("PostgreSQL claim 使用 FOR UPDATE SKIP LOCKED", False, "no statement")
+    check("PG 路径没有绕过 SQLAlchemy 的裸驱动写（仓库锁走 session.execute）",
+          not pg.driver, repr(pg.driver))
 
-    sqlite_captured, sqlite_driver = _capture_claim("sqlite")
+    lite = _capture_claim("sqlite")
     check("SQLite claim 先取写锁：执行了 BEGIN IMMEDIATE",
-          any("BEGIN IMMEDIATE" in statement for statement in sqlite_driver),
-          repr(sqlite_driver))
-    if sqlite_captured:
-        sqlite_sql = str(sqlite_captured[0].compile(dialect=sqlite.dialect()))
+          any("BEGIN IMMEDIATE" in statement for statement in lite.driver),
+          repr(lite.driver))
+    check("SQLite 的 claim 路径仍恰好一条 claim SELECT"
+          "（仓库锁退化为同事务里的普通读，不加锁语句）",
+          len(lite.claims) == 1, f"claims={len(lite.claims)}")
+    check("SQLite 与 PG 走同一条生产 claim 代码（同样的 lock→claim 顺序）",
+          lite.order == ["lock", "claim"], f"order={lite.order}")
+    if lite.locks:
+        sqlite_lock_sql = str(lite.locks[0].compile(dialect=sqlite.dialect()))
+        check("SQLite 仓库锁不发 FOR UPDATE（方言不支持；BEGIN IMMEDIATE 已串行化）",
+              "FOR UPDATE" not in sqlite_lock_sql, sqlite_lock_sql)
+    else:
+        check("SQLite 仓库锁不发 FOR UPDATE", False, "no lock statement")
+    if lite.claims:
+        sqlite_sql = str(lite.claims[0].compile(dialect=sqlite.dialect()))
         check("SQLite claim 不带 FOR UPDATE（方言不支持）",
               "FOR UPDATE" not in sqlite_sql, sqlite_sql)
     else:
         check("SQLite claim 不带 FOR UPDATE（方言不支持）", False, "no statement")
-
-    check("claim 的写锁只在 SQLite 分支加（PG 由 SKIP LOCKED 保证）",
-          not _capture_claim("postgresql")[1],
-          repr(_capture_claim("postgresql")[1]))
 
 
 # ── 4. per-task work directories, and no broker dependency ───────────

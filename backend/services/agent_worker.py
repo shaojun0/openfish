@@ -67,7 +67,12 @@ from services.agent_runner import (
     resolve_model_env,
 )
 from services.git_auth import git_host_of
-from services.repo_runner import RepoRunnerService, RunnerCredential, shared_runner_token
+from services.repo_runner import (
+    RepoRunnerService,
+    RunnerCredential,
+    require_real_directory,
+    shared_runner_token,
+)
 from services.review_policy import (
     SOURCE_FILE,
     builtin_default,
@@ -143,7 +148,9 @@ class _LoadedTask:
     repo-scoped token nor a shared ``FORGEJO_RUNNER_TOKEN``; the fix/push path
     then fails loudly on the git call, while a review-only task still runs.
     ``workspace_root`` is the repository's own logical runner directory, so two
-    repos claimed by the same pooled worker never share a checkout root.
+    repos claimed by the same pooled worker never share a checkout root.  It is
+    guaranteed to be a real directory (never a symlink) under ``AGENT_WORK_ROOT``
+    and is re-checked immediately before it is handed to the runner.
     """
 
     task: TaskRequest
@@ -160,7 +167,10 @@ def _load_task(claimed: ClaimedTask, sessions: Callable[[], SASession]) -> _Load
     resolved here: a disabled runner refuses the task, ``last_task_at`` is
     stamped, the (possibly shared) credential is read — ``None`` when neither a
     repo-scoped nor a shared token exists — and the workspace root is derived
-    from the runner's ``workspace_subdir`` under ``AGENT_WORK_ROOT``.
+    from the runner's ``workspace_subdir`` under ``AGENT_WORK_ROOT``.  That root
+    is created as a chain of real directories by the service and then re-checked
+    with ``lstat`` here, so a symlink planted in the group-writable work root is
+    refused rather than followed into another repository's checkout.
     """
     if claimed.kind not in SUPPORTED_KINDS:
         raise AgentRunnerError(
@@ -195,6 +205,12 @@ def _load_task(claimed: ClaimedTask, sessions: Callable[[], SASession]) -> _Load
     runners.record_task(repo_id)
     credential = runners.credential(repo_id)
     workspace_root = runners.workspace_root(repo_id, configured_work_root())
+    # Cheap second guard at the consumer seam.  ``workspace_root`` already opened
+    # every component with ``O_NOFOLLOW``, but the work root is group-writable by
+    # the untrusted sandbox uid, so re-verify the returned path with ``lstat``
+    # immediately before it reaches the runner: a component swapped for a symlink
+    # in the meantime is refused instead of followed into another repo's root.
+    require_real_directory(workspace_root, what="runner 工作区根")
 
     # Every write task gets its own `agent/*` branch and its own work directory,
     # both keyed by the attempt number: a queue retry must never collide with the

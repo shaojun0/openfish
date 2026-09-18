@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -95,6 +96,10 @@ _CREDENTIAL_USERNAME = "x-access-token"
 #: outside this set is ever accepted.
 _SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
+#: How every workspace component is opened: a directory, never the target of a
+#: final symlink (``ELOOP``) and never a regular file (``ENOTDIR``).
+_OPEN_REAL_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
 
 # ── Errors ───────────────────────────────────────────────────────────
 
@@ -138,6 +143,82 @@ def safe_workspace_subdir(value: str | None, *, runner_id: int | None = None) ->
         if not _SEGMENT_RE.match(segment):
             raise RepoRunnerError(f"workspace_subdir 含非法字符：{value!r}")
     return raw
+
+
+def require_real_directory(path: str | Path, *, what: str = "工作区根") -> None:
+    """Fail closed unless *path* is a real directory, not a symlink.
+
+    ``os.lstat`` (never ``stat``/``Path.is_dir``) is what distinguishes a link
+    from the directory it points at.  Everything under ``AGENT_WORK_ROOT`` is
+    group-writable by the untrusted sandbox uid, so any component can be replaced
+    by a symlink; a consumer that trusted the unresolved string would follow that
+    link into another repository's workspace.  Raises :class:`RepoRunnerError`
+    for a symlink, a non-directory or an unreadable path — the path is never
+    silently rewritten into a safe-looking one.
+    """
+    target = Path(path)
+    try:
+        info = os.lstat(target)
+    except OSError as exc:
+        raise RepoRunnerError(f"{what} {target} 不可用：{exc}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise RepoRunnerError(
+            f"{what} {target} 不是真实目录（lstat 结果为符号链接或特殊文件）；"
+            "拒绝顺着符号链接使用工作区"
+        )
+
+
+def _create_workspace_root(base: Path, subdir: str) -> Path:
+    """Create and return ``base/subdir`` as a chain of **real** directories.
+
+    ``subdir`` is already validated by :func:`safe_workspace_subdir`, but the
+    directories under *base* are group-writable by the sandbox uid, so a
+    pre-existing entry may have been replaced by a symlink — including a link to
+    a sibling runner's root, which stays inside *base* and would pass a
+    ``resolve().is_relative_to(base)`` test.  Each component from *base* down to
+    the leaf is therefore opened with ``O_DIRECTORY|O_NOFOLLOW`` (a symlink fails
+    with ``ELOOP``, a non-directory with ``ENOTDIR``) and a missing one is
+    created relative to the already-verified parent fd via
+    ``os.mkdir(..., dir_fd=...)``.
+
+    The result is never a symlink and each ancestor is pinned before the next
+    component is resolved against it, so no separate ``resolve()`` check exists
+    for a concurrent rename to invalidate between check and use.  *base* itself
+    is created ``0700`` when absent and must be a real directory.  Any offending
+    component raises :class:`RepoRunnerError` (fail closed) instead of being
+    rewritten.
+    """
+    try:
+        base.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(base, _OPEN_REAL_DIR)
+    except OSError as exc:
+        raise RepoRunnerError(
+            f"工作根 {base} 不是真实目录（或不可创建）：{exc}；拒绝在其上创建工作区"
+        ) from exc
+    try:
+        for segment in subdir.split("/"):
+            if not segment:
+                continue
+            try:
+                os.mkdir(segment, 0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise RepoRunnerError(
+                    f"无法在工作区路径中创建 {segment!r}（工作根 {base}）：{exc}"
+                ) from exc
+            try:
+                child = os.open(segment, _OPEN_REAL_DIR, dir_fd=fd)
+            except OSError as exc:
+                raise RepoRunnerError(
+                    f"工作区路径段 {segment!r} 不是真实目录（lstat 结果为符号链接"
+                    f"或非目录，工作根 {base}）；拒绝跟随"
+                ) from exc
+            os.close(fd)
+            fd = child
+    finally:
+        os.close(fd)
+    return base / subdir
 
 
 # ── Shared-token reader ──────────────────────────────────────────────
@@ -455,22 +536,24 @@ class RepoRunnerService:
 
         Creates the runner row on first use (via :meth:`ensure`), because the
         default path is id-derived and therefore meaningless without the row.
-        The joined path is resolved and must stay under *base*, so a symlink in
-        a pre-existing component cannot redirect the checkout outside
-        ``AGENT_WORK_ROOT``; the directory is then created ``0700`` before it is
-        returned.
+
+        Every component from *base* down to the returned directory is verified —
+        and, when missing, created — as a **real** directory with
+        ``O_DIRECTORY|O_NOFOLLOW``/``dir_fd`` semantics, so a symlink planted in
+        the group-writable work root is refused with :class:`RepoRunnerError`
+        rather than followed.  The returned path is therefore never a symlink.
+        The old code checked only ``root.resolve()`` and then returned the
+        *unresolved* ``root``: ``resolve()`` proves merely that the link points
+        somewhere inside *base* at that instant, and a sibling
+        ``runners/<B>`` is inside *base*, so the check passed while the worker
+        followed the link into another repository's workspace (or the link was
+        swapped in after the check).  Nested ``workspace_subdir`` values are
+        created one verified segment at a time; each created directory is
+        ``0700``.
         """
         row = self.ensure(repo_id)
         subdir = safe_workspace_subdir(row.workspace_subdir, runner_id=row.id)
-        base_path = Path(base)
-        root = base_path / subdir
-        resolved = root.resolve()
-        if not resolved.is_relative_to(base_path.resolve()):
-            raise RepoRunnerError(
-                f"workspace_subdir 解析后越出工作根 {base_path}：{root}"
-            )
-        resolved.mkdir(parents=True, exist_ok=True, mode=0o700)
-        return root
+        return _create_workspace_root(Path(base), subdir)
 
     def record_task(self, repo_id: int) -> None:
         """Stamp ``last_task_at`` — the per-repo "recently active" signal."""
@@ -685,6 +768,7 @@ __all__ = [
     "RepoRunnerError",
     "RepoRunnerService",
     "RunnerCredential",
+    "require_real_directory",
     "safe_workspace_subdir",
     "shared_runner_token",
 ]

@@ -90,7 +90,10 @@ _SLUG_NOTE = (
 #: The git credential document (§5.2).  Shaped so it can be pasted into a git
 #: credential helper or a CI variable without transformation.  ``password`` is a
 #: **Forgejo** access token, not an openfish API key: the platform brokers it
-#: through its Forgejo admin token (see ``services/git_identity.py``).
+#: through its Forgejo admin token (see ``services/git_identity.py``).  The
+#: token is **account-wide** — Forgejo's ``read:``/``write:repository`` scopes
+#: are not per-repository, so repository-level reach is whatever ACL that
+#: Forgejo account has.
 _GIT_CREDENTIAL_SCHEMA = {
     "type": "object",
     "properties": {
@@ -120,8 +123,10 @@ _GIT_CREDENTIAL_SCHEMA = {
         "read_only": {
             "type": "boolean",
             "description": (
-                "True for an upstream mirror: the token was minted with "
-                "`read:repository` only, so it cannot push anywhere"
+                "True when `kind` is `upstream`: the ticket was minted with "
+                "`read:repository` only, so it cannot push anywhere. Derived "
+                "from the repository kind, not from a per-repository caller "
+                "grant — either way the minted token is account-wide"
             ),
         },
         "kind": {
@@ -1199,15 +1204,20 @@ def get_import(job_id: int):
 @repo_bp.route("/api/v1/repos/<path:slug>/git-credential")
 @require_permission(REPO_PUSH)
 @api_operation(
-    summary="Mint a git credential for this repository",
+    summary="Mint an account-wide git credential for this repository's git plane",
     description=(
         "Implements §5.2's credential hand-off. The platform does not own the "
         "git wire protocol (Forgejo does), and it is **Forgejo** that checks "
         "the HTTP Basic credential on `git-receive-pack` — so this endpoint "
         "hands back a **Forgejo** token, not one of this platform's API keys.\n\n"
         "Authentication of the *caller* is unchanged: the platform credential "
-        "(`Bearer` API key or session) must carry `repo:push`. That is the "
-        "first gate; what the caller receives is brokered from it:\n\n"
+        "(`Bearer` API key or session) must carry `repo:push`. That check is a "
+        "**global permission point** (`require_permission`, not a per-resource "
+        "check): it asks only \"is this caller signed in and does it hold "
+        "`repo:push`?\", and on a fresh deployment every signed-in user holds "
+        "it. The `<slug>` in the path selects the clone URL and drives the "
+        "`404`, but it does **not** narrow the credential that is issued. "
+        "What the caller receives is brokered from the platform identity:\n\n"
         "1. the platform user is mapped to a dedicated Forgejo account "
         "(`git_identities`, created lazily and idempotently) whose login is "
         "derived from the account id — `of-<user_id>-<sha256(external_id)[:10]>`;\n"
@@ -1215,10 +1225,18 @@ def get_import(job_id: int):
         "access token for that account (reused while unexpired, then rotated);\n"
         "3. the response is `{username, password}` for HTTP Basic, with "
         "`username` the Forgejo login and `password` its token.\n\n"
-        "`kind: upstream` (a read-only mirror) is **allowed** and receives a "
-        "`read:repository` ticket — `read_only: true` says so; a `workspace` "
-        "gets `write:repository`. Branch protection still holds independently: "
-        "only `agent/*` may ever be pushed (I4).\n\n"
+        "The ticket is **account-wide, not repository-scoped**. `kind: upstream` "
+        "(a read-only mirror) receives a `read:repository` ticket — "
+        "`read_only: true` says so; a `workspace` gets `write:repository`. "
+        "Forgejo access-token scopes are not tied to one repository, so that "
+        "write ticket can write **every repository the `of-…` account can "
+        "reach**. Whether a push actually succeeds is therefore decided by "
+        "that account's **Forgejo repository ACL** (org team / collaborator / "
+        "member) — access this platform does **not** provision today. "
+        "Similarly, the `agent/*`-only push rule (invariant I4) constrains the "
+        "platform's own agent runner (`services/agent_runner.assert_pushable`), "
+        "**not** a human's minted ticket, which carries no branch restriction "
+        "of its own.\n\n"
         "```bash\n"
         "git clone \"$(curl -fsS -H \"Authorization: Bearer $KEY\" \\\n"
         "    <base>/api/v1/repos/<slug>/git-credential | jq -r .clone_url)\"\n"
@@ -1227,8 +1245,14 @@ def get_import(job_id: int):
         "`FORGEJO_PUBLIC_BASE_URL` and a `GIT_IDENTITY_KEY` (Fernet material "
         "for encrypted token storage). With `GIT_IDENTITY_KEY` unset this "
         "endpoint answers **503** — it never falls back to storing a token in "
-        "clear. See `docs/agent-hub/integration/S6.md` for the exact scopes "
-        "(`write:admin` on the platform token) and configuration."
+        "clear. Repository access and branch protection are **manual "
+        "Forgejo-side steps**: grant the derived `of-<user_id>-<hash>` account "
+        "(or an org/team it belongs to) the repository role a push requires, "
+        "and enable branch protection wherever direct pushes must be refused, "
+        "or a human push will not work as intended. See "
+        "`docker/forgejo/README.md` §9 and `docs/agent-hub/integration/S6.md` "
+        "for the exact scopes (`write:admin` on the platform token) and "
+        "configuration."
     ),
     tags=["Repositories"],
     parameters=[_SLUG_PARAM],
@@ -1242,7 +1266,10 @@ def git_credential(slug: str):
     kind = getattr(repo, "kind", "workspace")
     # §8.1: an upstream mirror is read-only, so it gets a read-only ticket
     # (`read:repository`) rather than a refusal — clone/fetch is a legitimate
-    # use of the endpoint, and Forgejo enforces the mirror on its own side too.
+    # use of the endpoint.  `read_only` reflects the repository *kind*, not a
+    # caller-specific grant: the global `repo:push` point already admitted the
+    # caller, and whether the ticket can push is a Forgejo-side ACL question
+    # this platform does not provision.
     read_only = kind == "upstream"
 
     user_id = current_user_id()

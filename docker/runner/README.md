@@ -112,7 +112,7 @@ worker 按任务所属仓库解析一行 `repo_runners`（逻辑 runner），用
 | --- | --- | --- |
 | 凭据 | 仓库专属 `RUNNER_CREDENTIAL_KEY` Fernet 密文；无则 `FORGEJO_RUNNER_TOKEN` | worker 用专用密钥在容器内解封；密文解不开即**失败，不回退**共享 token（fail-closed） |
 | 工作区 | 默认 `AGENT_WORK_ROOT/runners/<runner_id>` | 与 `/work/<task_id>` 叠加，仓库与任务两级都不撞车 |
-| 并发 | `repo_runners.max_concurrency`；`0` = `AGENT_MAX_IN_FLIGHT_PER_REPO` | 生产者在**入队**侧抑制超额任务（返回 `0`） |
+| 并发 | `repo_runners.max_concurrency`；`0` = `AGENT_MAX_IN_FLIGHT_PER_REPO` | 入队侧抑制超额任务（返回 `0`），**并且**领取侧对 `max_concurrency > 0` 的仓库再判一次已占槽数（`leased` / `running`），因此重试/回收/并发生产者都不能把仓库顶过上限；环境变量那一档仍只在入队侧 |
 | 出网策略 | `egress_policy`（`inherit` / `internal` / `allowlist`） | **只是声明**：平台持久化策略，真正的网络分段仍由部署侧执行（§4） |
 
 > 路径写法：本文其余章节为简洁仍写 `/work/<task_id>`；启用逻辑 runner 后，任务目录
