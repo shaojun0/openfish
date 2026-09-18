@@ -8,8 +8,9 @@
  *     并由本插件自动收下（无需复制粘贴），随后自动启用模式。
  *  2. **自动接入模型路由的默认模型。** 用 key 调用
  *     `GET /api/v1/models/resolved` 拿到路由表（含各上游 api_key），为每条启用的
- *     路由注册一个 `llm-pi-ai` provider，并把 `agent-default-model` 指向
- *     `aliases` 含 `default` 的那条路由。
+ *     **对话 / 补全**路由（`kind` 为 `chat` / `completion`）注册一个 `llm-pi-ai`
+ *     provider，并把 `agent-default-model` 指向 `aliases` 含 `default` 的那条路由。
+ *     向量化 / 重排序 / OCR / 语音等路由不是 LLM，只在面板里展示。
  *  3. **包源切换。** 把 pip / npm / docker / debian 指向平台的内网镜像。
  *  4. **git 仓库凭据。** 生成一个 git credential helper（`/etc/gitconfig` 指向
  *     它），对 `https://<平台>/git/<owner>/<name>.git` 用平台 key 换一张短期
@@ -76,6 +77,30 @@ const GIT_HELPER_PATH = '/usr/local/bin/openfish-git-credential'
 const API_BY_PROVIDER = {
   openai: 'openai-completions',
   anthropic: 'anthropic-messages',
+}
+
+/**
+ * 路由的功能分类 → 它能不能当 LLM provider。
+ *
+ * openfish 用 `kind`（功能）与 `provider`（协议）两个正交维度描述路由。DSH 的
+ * LLM provider 只吃对话 / 补全，所以这里按 `kind` 过滤，而不是像早先那样只看
+ * `provider` —— 否则一个 `provider=openai, kind=embedding` 的向量化端点会被注册
+ * 成对话模型，出现在模型下拉框里并且必然调用失败。
+ */
+const LLM_KINDS = new Set(['chat', 'completion'])
+
+/** `kind` 缺省时的协议默认值，与平台 `services/model_routes.DEFAULT_KINDS` 一致。 */
+const KIND_BY_PROVIDER = {
+  openai: 'chat',
+  anthropic: 'chat',
+  mineru: 'ocr',
+}
+
+/** 一条路由的功能分类；平台没给（旧版本）时按协议兜底。 */
+function kindOf(route) {
+  const kind = String((route && route.kind) || '').trim().toLowerCase()
+  if (kind) return kind
+  return KIND_BY_PROVIDER[(route && route.provider) || ''] || 'chat'
 }
 
 const JSON_HEADERS = {
@@ -508,8 +533,10 @@ export function apply(ctx, config) {
     const stored = []
     for (const route of routes) {
       if (!route || route.enabled === false) continue
+      // 先看功能，再看协议：向量化 / OCR / 语音等路由不是对话模型。
+      if (!LLM_KINDS.has(kindOf(route))) continue
       const api = API_BY_PROVIDER[route.provider]
-      if (!api) continue // mineru 等非对话模型只在面板里展示，不注册成 LLM provider
+      if (!api) continue // mineru 等非对话协议不注册成 LLM provider
       const routeKey = `${'intranet-'}${slugify(route.name)}`
       const modelId = route.model || route.name
       const profile = {
@@ -551,7 +578,9 @@ export function apply(ctx, config) {
 
   function pickDefaultRoute(routes) {
     const alias = String(configNow().defaultAlias || 'default').toLowerCase()
-    const enabled = routes.filter((r) => r && r.enabled !== false && API_BY_PROVIDER[r.provider])
+    const enabled = routes.filter(
+      (r) => r && r.enabled !== false && API_BY_PROVIDER[r.provider] && LLM_KINDS.has(kindOf(r)),
+    )
     if (!enabled.length) return null
     const byAlias = enabled.find((r) =>
       Array.isArray(r.aliases) && r.aliases.some((a) => String(a).toLowerCase() === alias),
@@ -865,7 +894,7 @@ main().catch((err) => fail(String((err && err.message) || err)))
     const { providers, keysStored } = await registerProviders(routes)
     const defaultRoute = pickDefaultRoute(routes)
     if (!defaultRoute) {
-      const err = new Error('模型路由表里没有可用的对话模型（provider 需为 openai / anthropic 且 enabled）。')
+      const err = new Error('模型路由表里没有可用的对话模型（kind 需为 chat / completion，provider 需为 openai / anthropic，且 enabled）。')
       err.code = 'NO_ROUTE'
       throw err
     }
@@ -911,6 +940,7 @@ main().catch((err) => fail(String((err && err.message) || err)))
       routes: routes.map((r) => ({
         name: r.name,
         provider: r.provider,
+        kind: kindOf(r),
         base_url: r.base_url,
         model: r.model,
         aliases: r.aliases,
@@ -989,6 +1019,7 @@ main().catch((err) => fail(String((err && err.message) || err)))
           routes = fresh.map((r) => ({
             name: r.name,
             provider: r.provider,
+            kind: kindOf(r),
             base_url: r.base_url,
             model: r.model,
             aliases: r.aliases,

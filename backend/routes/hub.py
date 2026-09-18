@@ -10,7 +10,9 @@ this module keeps the two remaining halves.
 * **Model routing** — a small JSON document (``MODELS_FILE``) that a downstream
   intranet DSH reads. This server publishes the table and lets an administrator
   edit it in the browser (``model:write``); it does not proxy inference. The
-  document itself is owned by :mod:`services.model_routes`.
+  document itself is owned by :mod:`services.model_routes`. Each route is
+  classified by ``provider`` (wire format) and ``kind`` (model function —
+  chat / completion / embedding / rerank / ocr / asr / tts).
 
 Endpoints
 ---------
@@ -119,6 +121,18 @@ _MODEL_ROUTE_SCHEMA = {
             "type": "string",
             "description": "Wire format: " + " / ".join(model_routes.PROVIDERS),
         },
+        "kind": {
+            "type": "string",
+            "description": (
+                "Model function, orthogonal to the wire format: "
+                + " / ".join(model_routes.KINDS)
+                + ". Absent in the document it defaults by provider ("
+                + ", ".join(
+                    f"{name} → {kind}" for name, kind in model_routes.DEFAULT_KINDS.items()
+                )
+                + ")."
+            ),
+        },
         "base_url": {"type": "string"},
         "api_key": {
             "type": ["string", "null"],
@@ -152,7 +166,6 @@ _MODEL_ROUTE_SCHEMA = {
         "path": {"type": "string"},
         "enabled": {"type": "boolean"},
         "description": {"type": ["string", "null"]},
-        "tags": {"type": "array", "items": {"type": "string"}},
         "health": {
             "anyOf": [_HEALTH_SCHEMA, {"type": "null"}],
             "description": "The last connectivity probe, when one has run",
@@ -171,6 +184,11 @@ _MODELS_SCHEMA = {
             "type": "array",
             "items": {"type": "string"},
             "description": "The wire formats an administrator may choose",
+        },
+        "kinds": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "The model functions an administrator may choose",
         },
         "default_paths": {
             "type": "object",
@@ -216,6 +234,14 @@ _ROUTE_WRITE_BODY = {
                 "properties": {
                     "name": {"type": "string", "description": "Required, unique"},
                     "provider": {"type": "string", "enum": list(model_routes.PROVIDERS)},
+                    "kind": {
+                        "type": "string",
+                        "enum": list(model_routes.KINDS),
+                        "description": (
+                            "Model function. Omitted or empty means the protocol "
+                            "default (`chat`, or `ocr` for `mineru`)."
+                        ),
+                    },
                     "base_url": {"type": "string", "description": "Required http(s) URL"},
                     "api_key": {
                         "type": ["string", "null"],
@@ -440,6 +466,12 @@ def upload_tool():
         "read from `MODELS_FILE`. A missing file yields `exists: false` and an "
         "empty list rather than an error, so the panel renders on a fresh "
         "install.\n\n"
+        "Every route is classified on two independent axes: `provider` is the "
+        "wire format (`openai` / `mineru` / `anthropic`) and `kind` is the model "
+        "function (`chat` / `completion` / `embedding` / `rerank` / `ocr` / "
+        "`asr` / `tts`). A route that names no `kind` falls back to its "
+        "protocol default, so the table classifies correctly even for a "
+        "document written before the field existed.\n\n"
         "The raw API key of a route is **never** returned; `has_api_key` and "
         "`api_key_hint` say whether one is stored. Each route may carry the "
         "result of the last connectivity probe under `health` (see "
@@ -468,7 +500,10 @@ def model_routes_index():
         "The same table as `GET /api/v1/models`, except each route carries its "
         "**real** `api_key` and a pre-joined `endpoint_url`. This is what the "
         "DSH `enterprise-intranet` plugin reads to register a provider and adopt "
-        "the route whose aliases include `default` as the agent default model.\n\n"
+        "the route whose aliases include `default` as the agent default model. "
+        "The plugin selects by `kind` — only `chat` and `completion` routes "
+        "become LLM providers, while `embedding`, `rerank`, `ocr`, `asr` and "
+        "`tts` stay registry entries for other consumers.\n\n"
         "Deliberately a separate endpoint from the browsing view: the console "
         "must never round-trip a secret, while a downstream client cannot do "
         "anything with a masked one. Guarded by `model:resolve`, which the "
@@ -541,7 +576,9 @@ def _remember(route: dict, *, previous_name: str | None = None) -> dict:
     description=(
         "Validates one route, appends it to `MODELS_FILE` and immediately "
         "probes its URL for reachability. `name` and `description` are "
-        "mandatory; `api_key` may be empty. The response carries the stored "
+        "mandatory; `api_key` may be empty. `provider` names the wire format "
+        "and `kind` the model function (defaulting by protocol when omitted). "
+        "The response carries the stored "
         "route (without the key) plus the probe result. Requires `model:write`, "
         "which by default only the built-in admin role holds."
     ),
@@ -577,7 +614,8 @@ def create_model_route():
         "Replaces one route in `MODELS_FILE` and re-probes it. The route is "
         "addressed by its current name, so a body with a different `name` "
         "renames it. An omitted or null `api_key` keeps the stored key; an "
-        "empty string clears it. Requires `model:write`."
+        "empty string clears it. An omitted `kind` keeps the stored one and an "
+        "omitted `provider` keeps its default kind. Requires `model:write`."
     ),
     tags=["Hub"],
     parameters=[_ROUTE_PARAM],

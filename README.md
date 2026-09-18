@@ -649,12 +649,21 @@ browser**; it does not proxy inference. Reading needs `model:read` (held by the
 `authenticated` role), while adding, editing, deleting or re-probing a route
 needs `model:write` (admin only).
 
-Each route names a wire format — `openai`, `mineru` or `anthropic` — a
-`base_url`, an optional `api_key`, a `path` (defaulted per provider:
-`/v1/chat/completions`, `/file_parse`, `/v1/messages`), an optional `model` id
-and display `aliases`. `name` and `description` are mandatory; the API key may
-be empty. The raw key is **never returned by the API** — the SPA sees
-`has_api_key` and a last-four hint, and an edit that leaves the field blank
+Each route is classified on two independent axes:
+
+* **`provider` — the wire format**: `openai`, `mineru` or `anthropic`. It decides
+  the request shape and the default `path` (`/v1/chat/completions`,
+  `/file_parse`, `/v1/messages`).
+* **`kind` — the model function**: `chat`, `completion`, `embedding`, `rerank`,
+  `ocr`, `asr` or `tts`. It is what a downstream client switches on; a route
+  that omits it falls back to its protocol default (`openai` / `anthropic` →
+  `chat`, `mineru` → `ocr`), so a document written before the field existed
+  still classifies correctly.
+
+A route also carries a `base_url`, an optional `api_key`, a `path`, an optional
+`model` id and display `aliases`. `name` and `description` are mandatory; the
+API key may be empty. The raw key is **never returned by the API** — the SPA
+sees `has_api_key` and a last-four hint, and an edit that leaves the field blank
 keeps the stored key (an empty value clears it).
 
 **Keep the document secret-free: prefer `api_key_env`.** A route may name an
@@ -984,8 +993,9 @@ is why `integrations/` is in `.dockerignore`). Once installed it:
 * redeems the minted key from the polling half automatically, with no
   copy-and-paste;
 * reads `GET /api/v1/models/resolved` and registers one `llm-pi-ai` provider per
-  enabled route, pointing `agent-default-model` at the route whose aliases
-  contain `default`;
+  enabled **chat/completion** route (`kind`), pointing `agent-default-model` at
+  the route whose aliases contain `default` — embedding, rerank, OCR and speech
+  routes are registry entries, not LLM providers;
 * points pip / npm / apt / docker / nvm at this server's mirrors;
 * surfaces `/api/v1/tools` and `/api/v1/docs` in its panel.
 

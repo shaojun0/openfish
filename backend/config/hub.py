@@ -280,7 +280,10 @@ class HubConfig(BaseSettings):
             "JSON file describing the model routes for downstream DSH. Read by "
             "everyone holding `model:read`; written by administrators holding "
             "`model:write` through the routing panel, so the file (and the "
-            "directory holding it) must be writable by the server process."
+            "directory holding it) must be writable by the server process. "
+            "Each route is classified by `provider` (wire format) and `kind` "
+            "(model function — chat / completion / embedding / rerank / ocr / "
+            "asr / tts)."
         ),
     )
     model_health_file: str = Field(

@@ -18,10 +18,23 @@ Layout::
     config/model_routes.json      # what downstream DSH reads (route + api_key)
     data/model_health.json        # last probe per route name (not published)
 
-Every route carries a ``provider`` naming the wire format — ``openai``,
-``mineru`` or ``anthropic`` — plus the ``base_url``, an optional ``api_key``,
-the endpoint ``path``, an optional ``model`` id and display ``aliases``.  A
-route's ``name`` and ``description`` are mandatory; the API key may be empty.
+Every route is classified on two independent axes:
+
+* ``provider`` — the **wire format** (``openai`` / ``mineru`` / ``anthropic``).
+  It decides the request shape and the default endpoint ``path``.
+* ``kind`` — the **purpose** (``chat`` / ``completion`` / ``embedding`` /
+  ``rerank`` / ``ocr`` / ``asr`` / ``tts``).  It is what a downstream client
+  consults to decide whether a route may back an LLM provider, an embedding
+  index or a document-parse step.
+
+A route is one endpoint, so it carries exactly one kind; a server that answers
+both ``/v1/chat/completions`` and ``/v1/embeddings`` is two routes.  Both axes
+default from each other where that is obvious (see :data:`DEFAULT_KINDS`), so a
+file written before ``kind`` existed still classifies correctly.
+
+Alongside those, a route carries the ``base_url``, an optional ``api_key``, the
+endpoint ``path``, an optional ``model`` id and display ``aliases``.  A route's
+``name`` and ``description`` are mandatory; the API key may be empty.
 """
 
 from __future__ import annotations
@@ -46,6 +59,31 @@ logger = logging.getLogger("cpypiserver.model_routes")
 #: Wire formats a route may speak.  The values are the canonical spellings the
 #: UI select offers and the JSON document stores.
 PROVIDERS: tuple[str, ...] = ("openai", "mineru", "anthropic")
+
+#: What a route is *for*.  Orthogonal to :data:`PROVIDERS`: the wire format says
+#: how to speak to an endpoint, the kind says what the answer means.  The set is
+#: closed so the panel can offer a select, the API can publish the enum and a
+#: downstream client can switch on it without guessing free-text tags.
+KINDS: tuple[str, ...] = (
+    "chat",        # 对话
+    "completion",  # 文本补全（/v1/completions 一类的续写端点）
+    "embedding",   # 向量化
+    "rerank",      # 重排序
+    "ocr",         # 文档解析 / OCR
+    "asr",         # 语音转文字
+    "tts",         # 文字转语音
+)
+
+#: The kind a route falls back to when it does not name one, keyed by protocol.
+#: Each protocol has one dominant purpose — an ``openai``- or ``anthropic``-shaped
+#: endpoint is a chat model unless it says otherwise, and ``mineru`` *is* a
+#: document-parse (OCR) protocol — so a file written before ``kind`` existed, or
+#: a row whose kind was never filled in, still classifies the same way.
+DEFAULT_KINDS: dict[str, str] = {
+    "openai": "chat",
+    "anthropic": "chat",
+    "mineru": "ocr",
+}
 
 #: Spellings seen in hand-edited files that map onto a canonical provider.
 PROVIDER_ALIASES: dict[str, str] = {
@@ -120,6 +158,40 @@ def normalize_provider(value: Any) -> str:
         choices = " / ".join(PROVIDERS)
         raise ValueError(f"不支持的格式 {str(value or '').strip()!r}，可选：{choices}")
     return provider
+
+
+def default_kind(provider: Any) -> str:
+    """The kind a route of this protocol gets when it does not name one."""
+    return DEFAULT_KINDS.get(canonical_provider(provider), DEFAULT_KINDS["openai"])
+
+
+def normalize_kind(value: Any, provider: Any) -> str:
+    """Validate a route's kind for storage, raising :class:`ValueError`.
+
+    A blank value means "the default for this protocol" (``chat``, or ``ocr``
+    for ``mineru``), which is what keeps hand-edited files and rows created
+    before this field existed working.
+    """
+    text = str(value or "").strip().lower()
+    if not text:
+        return default_kind(provider)
+    if text not in KINDS:
+        choices = " / ".join(KINDS)
+        raise ValueError(f"不支持的功能 {str(value or '').strip()!r}，可选：{choices}")
+    return text
+
+
+def effective_kind(route: Mapping[str, Any]) -> str:
+    """A route's kind **for publication**; never raises.
+
+    Unlike :func:`normalize_kind` this is the read path, so a value that is
+    missing or unrecognised (a hand-edited file, an older document) degrades to
+    the protocol default instead of failing the whole table.
+    """
+    text = str(route.get("kind") or "").strip().lower()
+    if text in KINDS:
+        return text
+    return default_kind(route.get("provider"))
 
 
 def normalize_name(value: Any) -> str:
@@ -270,6 +342,7 @@ def build_route(
     route: dict[str, Any] = {
         "name": normalize_name(payload["name"] if "name" in payload else existing.get("name")),
         "provider": provider,
+        "kind": normalize_kind(payload.get("kind", existing.get("kind")), provider),
         "base_url": normalize_base_url(payload.get("base_url", existing.get("base_url"))),
         "api_key": resolve_api_key(payload, existing),
         "api_key_env": resolve_api_key_env(payload, existing),
@@ -281,9 +354,6 @@ def build_route(
             payload.get("description", existing.get("description"))
         ),
     }
-    tags = payload.get("tags", existing.get("tags"))
-    if tags:
-        route["tags"] = normalize_aliases(tags)
     return route
 
 
@@ -299,6 +369,7 @@ def public_route(item: Mapping[str, Any], *, health: Mapping[str, Any] | None = 
     return {
         "name": item.get("name") or item.get("model") or "unnamed",
         "provider": canonical_provider(item.get("provider")),
+        "kind": effective_kind(item),
         "base_url": item.get("base_url") or item.get("baseUrl") or "",
         "api_key": None,
         "has_api_key": bool(api_key),
@@ -310,7 +381,6 @@ def public_route(item: Mapping[str, Any], *, health: Mapping[str, Any] | None = 
         "path": item.get("path") or normalize_path("", canonical_provider(item.get("provider"))),
         "enabled": item.get("enabled", True) is not False,
         "description": item.get("description"),
-        "tags": normalize_aliases(item.get("tags")),
         "health": dict(health) if health else None,
     }
 
@@ -422,6 +492,7 @@ def load(path: str | Path, *, health_path: str | Path | None = None) -> dict[str
             "exists": False,
             "error": None,
             "providers": list(PROVIDERS),
+            "kinds": list(KINDS),
             "default_paths": dict(DEFAULT_PATHS),
             "routes": [],
         }
@@ -435,6 +506,7 @@ def load(path: str | Path, *, health_path: str | Path | None = None) -> dict[str
             "exists": True,
             "error": str(exc),
             "providers": list(PROVIDERS),
+            "kinds": list(KINDS),
             "default_paths": dict(DEFAULT_PATHS),
             "routes": [],
         }
@@ -455,6 +527,7 @@ def load(path: str | Path, *, health_path: str | Path | None = None) -> dict[str
         "error": None,
         "version": data.get("version") if isinstance(data, dict) else None,
         "providers": list(PROVIDERS),
+        "kinds": list(KINDS),
         "default_paths": dict(DEFAULT_PATHS),
         "routes": routes,
     }
@@ -492,6 +565,7 @@ def resolve(path: str | Path, *, health_path: str | Path | None = None) -> dict[
             "exists": False,
             "error": None,
             "providers": list(PROVIDERS),
+            "kinds": list(KINDS),
             "default_paths": dict(DEFAULT_PATHS),
             "routes": [],
         }
@@ -505,6 +579,7 @@ def resolve(path: str | Path, *, health_path: str | Path | None = None) -> dict[
             "exists": True,
             "error": str(exc),
             "providers": list(PROVIDERS),
+            "kinds": list(KINDS),
             "default_paths": dict(DEFAULT_PATHS),
             "routes": [],
         }
@@ -520,6 +595,7 @@ def resolve(path: str | Path, *, health_path: str | Path | None = None) -> dict[
             route = dict(item)
             route["name"] = name
             route["provider"] = canonical_provider(item.get("provider"))
+            route["kind"] = effective_kind(item)
             # The value may be stored inline OR injected via the environment;
             # the client only cares that it authenticates, so hand it the
             # resolved value and a non-secret label saying where it came from.
@@ -545,6 +621,7 @@ def resolve(path: str | Path, *, health_path: str | Path | None = None) -> dict[
         "error": None,
         "version": data.get("version") if isinstance(data, dict) else None,
         "providers": list(PROVIDERS),
+        "kinds": list(KINDS),
         "default_paths": dict(DEFAULT_PATHS),
         "routes": routes,
     }
@@ -717,6 +794,8 @@ def probe_and_record(
 
 __all__ = [
     "PROVIDERS",
+    "KINDS",
+    "DEFAULT_KINDS",
     "DEFAULT_PATHS",
     "RESERVED_NAMES",
     "ModelRouteError",
@@ -724,6 +803,9 @@ __all__ = [
     "DuplicateRouteError",
     "canonical_provider",
     "normalize_provider",
+    "default_kind",
+    "normalize_kind",
+    "effective_kind",
     "normalize_name",
     "normalize_description",
     "normalize_base_url",

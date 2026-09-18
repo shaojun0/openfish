@@ -200,7 +200,11 @@
           var defaultish = (r.aliases || []).indexOf(state.default_alias) >= 0
           v.appendChild(pill(r.enabled ? (defaultish ? '默认' : '启用') : '停用',
             r.enabled ? (defaultish ? 'ok' : '') : 'warn'))
-          row(r.provider + ' · ' + r.model, v)
+          // LLM 路由（对话 / 补全）会注册成 provider，其余只在面板里展示。
+          var kind = r.kind || '未分类'
+          var llm = kind === 'chat' || kind === 'completion'
+          if (!llm) v.appendChild(pill(kind, 'warn'))
+          row(r.provider + ' · ' + kind + ' · ' + r.model, v)
         })
       }
       if (state.routes_error) msg('路由读取失败：' + state.routes_error, 'err')

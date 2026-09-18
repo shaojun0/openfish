@@ -13,8 +13,9 @@ DSH（DeepSeek Harness）的**企业内网模式**插件。它让 DSH：
    而是把用户送到平台的设备授权页登录，**登录成功后平台签发的 key 由插件自动
    收下**，不需要复制粘贴。
 2. **自动接入模型路由的默认模型**：读 `GET /api/v1/models/resolved`，为每条启用
-   的路由注册一个 `llm-ai` provider，并把 `agent-default-model` 指向 `aliases`
-   含 `default` 的那条。
+   的**对话 / 补全**路由（`kind` 为 `chat` / `completion`）注册一个 `llm-ai`
+   provider，并把 `agent-default-model` 指向 `aliases` 含 `default` 的那条。其余
+   功能（embedding / rerank / ocr / asr / tts）只在面板里展示。
 3. **切换内网包源**：pip / npm / apt / docker / nvm 的配置一次写好。
 4. **接上工具与文档目录**：面板里列出 `/api/v1/tools`、`/api/v1/docs`。
 

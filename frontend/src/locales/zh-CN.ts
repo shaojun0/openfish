@@ -491,7 +491,7 @@ export default {
 
   models: {
     title: '模型路由',
-    description: '供下游内网 DSH 读取的模型端点表，来自 MODELS_FILE。',
+    description: '供下游内网 DSH 读取的模型端点表，来自 MODELS_FILE；每条路由按调用协议与模型功能分类。',
     scaffoldTitle: '管理员可在线维护路由表',
     scaffoldDesc:
       'openfish 只负责集中登记、展示与连通性检测，不代理推理请求；DSH 读取后自行决定 upstream 与鉴权方式。持有 model:write 的管理员可在本页新增、修改、删除路由。',
@@ -499,6 +499,7 @@ export default {
     total: '共 {count} 条',
     name: '名称',
     provider: '格式',
+    kind: '功能',
     endpoint: '地址',
     model: '模型 ID',
     apiKey: 'API Key',
@@ -513,6 +514,13 @@ export default {
     providerMineru: 'MinerU 格式',
     providerAnthropic: 'Anthropic 格式',
     providerUnknown: '未知格式',
+    kindChat: '对话',
+    kindCompletion: '文本补全',
+    kindEmbedding: '向量化',
+    kindRerank: '重排序',
+    kindOcr: 'OCR / 文档解析',
+    kindAsr: '语音转文字',
+    kindTts: '文字转语音',
     add: '新增路由',
     probe: '检测',
     probeAll: '检测全部',
@@ -548,10 +556,12 @@ export default {
     deleteFailed: '删除模型路由失败',
     errName: '名称不能为空',
     errDescription: '描述不能为空',
+    errKind: '功能不能为空',
     errUrl: 'URL 不能为空',
     errUrlScheme: 'URL 必须以 http:// 或 https:// 开头',
     snippetTitle: 'DSH 侧配置片段',
-    snippetDesc: '按别名展开的模型映射，可直接粘贴到 DSH 配置中（仅含已启用条目）。',
+    snippetDesc:
+      '按别名展开的模型映射，可直接粘贴到 DSH 配置中（仅含已启用、且功能为对话或文本补全的路由）。',
     loadFailed: '加载模型路由失败',
   },
 

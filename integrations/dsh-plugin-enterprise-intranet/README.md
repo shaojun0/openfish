@@ -8,7 +8,7 @@ DSH（DeepSeek Harness）的**企业内网模式**插件。把 DSH 接到企业�
 | 问题 | 做法 |
 |---|---|
 | 企业平台的 **api-key 是必选项**，没有就跑不起来 | 没有 key 时**不会**启用企业内网模式；面板把用户送到平台的设备授权页登录，登录成功后平台签发的 key **由插件自动收下**，无需复制粘贴 |
-| 模型路由表里哪条是默认模型 | 用 key 读 `GET /api/v1/models/resolved`，为每条启用的路由注册一个 `llm-pi-ai` provider，并把 `agent-default-model` 指向 `aliases` 含 `default` 的那条 |
+| 模型路由表里哪条是默认模型 | 用 key 读 `GET /api/v1/models/resolved`，为每条启用的**对话 / 补全**路由（`kind` 为 `chat` / `completion`）注册一个 `llm-pi-ai` provider，并把 `agent-default-model` 指向 `aliases` 含 `default` 的那条；向量化 / OCR / 语音等路由只在面板里展示 |
 | 内网包源要一个个手配 | 自动写 pip / npm / apt / docker / nvm 的镜像配置 |
 | git 仓库的 push 凭据 | 生成 git credential helper（`/usr/local/bin/openfish-git-credential`，`700`）+ `/etc/gitconfig`：clone/push 时用平台 key 向平台换一张**短期 Forgejo 票**（Forgejo 只认自己的 token，平台 key 本身推不上去） |
 | 工具与文档入口 | 面板列出平台的 `/api/v1/tools`、`/api/v1/docs` 与各生态页面 |

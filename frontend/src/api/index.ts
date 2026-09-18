@@ -234,6 +234,12 @@ export interface ModelRoute {
   name: string
   /** Wire format: `openai` | `mineru` | `anthropic`. */
   provider: string
+  /**
+   * Model function, orthogonal to the wire format: `chat` | `completion` |
+   * `embedding` | `rerank` | `ocr` | `asr` | `tts`. The server fills in the
+   * protocol default (`chat`, or `ocr` for `mineru`) when a route omits it.
+   */
+  kind: string
   base_url: string
   /** Always null — the stored API key is never returned. */
   api_key: null
@@ -245,7 +251,6 @@ export interface ModelRoute {
   path: string
   enabled: boolean
   description: string | null
-  tags: string[]
   /** The last probe, when one has run. */
   health: ModelRouteHealth | null
 }
@@ -257,6 +262,8 @@ export interface ModelRoutes {
   version?: number | null
   /** The wire formats an administrator may choose. */
   providers: string[]
+  /** The model functions an administrator may choose. */
+  kinds: string[]
   /** Provider -> endpoint path used when a route omits one. */
   default_paths: Record<string, string>
   routes: ModelRoute[]
@@ -266,6 +273,8 @@ export interface ModelRoutes {
 export interface ModelRoutePayload {
   name: string
   provider: string
+  /** Omit to keep the stored kind (or take the protocol default on create). */
+  kind?: string
   base_url: string
   description: string
   /** Omit (or null) to keep the stored key on update; `''` clears it. */

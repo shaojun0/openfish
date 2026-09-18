@@ -31,6 +31,11 @@ import { formatDate } from '@/utils/format'
  * side, rewrites `MODELS_FILE` atomically and probes the URL, and the
  * connectivity column shows whether the endpoint answers.  Everyone with
  * `model:read` may look; changing anything needs `model:write` (admin).
+ *
+ * A route is classified on two independent axes: `provider` is the wire format
+ * and `kind` is the model function.  The editor keeps the kind in step with the
+ * protocol's default (`mineru` → OCR) until the administrator picks one
+ * explicitly.
  */
 const { t } = useI18n()
 const session = useSessionStore()
@@ -42,9 +47,28 @@ const canWrite = computed(() => session.can('model:write'))
 const allRoutes = computed<ModelRoute[]>(() => routes.value?.routes ?? [])
 const enabledCount = computed(() => allRoutes.value.filter((route) => route.enabled).length)
 
+/** The answer shape this panel can consume: only these back an LLM provider. */
+const LLM_KINDS: readonly string[] = ['chat', 'completion']
+
 const providerOptions = computed<string[]>(() => {
   const fromServer = routes.value?.providers ?? []
   return fromServer.length ? fromServer : ['openai', 'mineru', 'anthropic']
+})
+
+const kindOptions = computed<string[]>(() => {
+  const fromServer = routes.value?.kinds ?? []
+  return fromServer.length ? fromServer : ['chat', 'completion', 'embedding', 'rerank', 'ocr', 'asr', 'tts']
+})
+
+/** Per-kind counts for the summary row — the table's classification at a glance. */
+const kindCounts = computed<Array<{ kind: string; count: number }>>(() => {
+  const counts = new Map<string, number>()
+  for (const route of allRoutes.value) {
+    counts.set(route.kind, (counts.get(route.kind) ?? 0) + 1)
+  }
+  return kindOptions.value
+    .filter((kind) => counts.has(kind))
+    .map((kind) => ({ kind, count: counts.get(kind) ?? 0 }))
 })
 
 // ── The inline editor row ────────────────────────────────────────────
@@ -58,6 +82,7 @@ type TableRow = ModelRoute | EditorRow
 interface EditorForm {
   name: string
   provider: string
+  kind: string
   base_url: string
   path: string
   model: string
@@ -72,6 +97,8 @@ const editorMode = ref<'create' | 'edit' | null>(null)
 const editorOriginalName = ref<string | null>(null)
 const editorHealth = ref<ModelRouteHealth | null>(null)
 const apiKeyTouched = ref(false)
+/** Once the administrator picks a kind, changing the protocol leaves it alone. */
+const kindTouched = ref(false)
 const saving = ref(false)
 const probing = ref(false)
 const checkingAll = ref(false)
@@ -80,6 +107,7 @@ const checkingName = ref<string | null>(null)
 const editor = reactive<EditorForm>({
   name: '',
   provider: 'openai',
+  kind: 'chat',
   base_url: '',
   path: '',
   model: '',
@@ -113,11 +141,15 @@ const pathPlaceholder = computed(
   () => routes.value?.default_paths?.[editor.provider] ?? t('models.pathPlaceholder'),
 )
 
-/** A ready-to-paste mapping for the DSH side, built from enabled routes. */
+/**
+ * A ready-to-paste mapping for the DSH side, built from enabled **chat /
+ * completion** routes.  An embedding or OCR endpoint is not an LLM, so listing
+ * it here would hand DSH an alias it cannot chat with.
+ */
 const dshSnippet = computed(() => {
   const models: Record<string, { base_url: string; model: string; path: string }> = {}
   for (const route of allRoutes.value) {
-    if (!route.enabled) continue
+    if (!route.enabled || !LLM_KINDS.includes(route.kind)) continue
     for (const alias of route.aliases.length ? route.aliases : [route.name]) {
       models[alias] = {
         base_url: route.base_url,
@@ -161,6 +193,41 @@ function providerLabel(provider: string): string {
     default:
       return provider
   }
+}
+
+function kindLabel(kind: string): string {
+  switch (kind) {
+    case 'chat':
+      return t('models.kindChat')
+    case 'completion':
+      return t('models.kindCompletion')
+    case 'embedding':
+      return t('models.kindEmbedding')
+    case 'rerank':
+      return t('models.kindRerank')
+    case 'ocr':
+      return t('models.kindOcr')
+    case 'asr':
+      return t('models.kindAsr')
+    case 'tts':
+      return t('models.kindTts')
+    default:
+      return kind
+  }
+}
+
+/** The kind a protocol implies when the administrator has not chosen one. */
+function defaultKindFor(provider: string): string {
+  return provider === 'mineru' ? 'ocr' : 'chat'
+}
+
+function onProviderChange(provider: string): void {
+  if (!kindTouched.value) editor.kind = defaultKindFor(provider)
+}
+
+/** Picking a kind by hand pins it: a later protocol change will not overwrite it. */
+function onKindChange(): void {
+  kindTouched.value = true
 }
 
 function healthType(health: ModelRouteHealth | null): 'success' | 'warning' | 'danger' | 'info' {
@@ -239,6 +306,7 @@ function focusEditor(): void {
 function resetEditor(): void {
   editor.name = ''
   editor.provider = providerOptions.value[0] ?? 'openai'
+  editor.kind = defaultKindFor(editor.provider)
   editor.base_url = ''
   editor.path = ''
   editor.model = ''
@@ -248,6 +316,7 @@ function resetEditor(): void {
   editor.description = ''
   editor.enabled = true
   apiKeyTouched.value = false
+  kindTouched.value = false
   editorHealth.value = null
 }
 
@@ -263,12 +332,16 @@ function startEdit(route: ModelRoute): void {
   resetEditor()
   editor.name = route.name
   editor.provider = route.provider
+  editor.kind = route.kind || defaultKindFor(route.provider)
   editor.base_url = route.base_url
   editor.path = route.path
   editor.model = route.model
   editor.aliases = route.aliases.join(', ')
   editor.description = route.description ?? ''
   editor.enabled = route.enabled
+  // An existing route carries an explicit classification: keep it even if the
+  // administrator then switches the protocol.
+  kindTouched.value = true
   editorHealth.value = route.health
   editorMode.value = 'edit'
   editorOriginalName.value = route.name
@@ -287,6 +360,7 @@ function cancelEdit(): void {
 function validate(): string | null {
   if (!editor.name.trim()) return t('models.errName')
   if (!editor.description.trim()) return t('models.errDescription')
+  if (!editor.kind.trim()) return t('models.errKind')
   if (!editor.base_url.trim()) return t('models.errUrl')
   if (!/^https?:\/\/\S+$/i.test(editor.base_url.trim())) return t('models.errUrlScheme')
   return null
@@ -305,6 +379,7 @@ function buildPayload(): ModelRoutePayload {
   const payload: ModelRoutePayload = {
     name: editor.name.trim(),
     provider: editor.provider,
+    kind: editor.kind.trim() || defaultKindFor(editor.provider),
     base_url: editor.base_url.trim(),
     description: editor.description.trim(),
     model: editor.model.trim(),
@@ -469,6 +544,15 @@ onMounted(() => load())
       <el-tag type="info" effect="plain">
         {{ t('models.total', { count: allRoutes.length }) }}
       </el-tag>
+      <el-tag
+        v-for="item in kindCounts"
+        :key="item.kind"
+        size="small"
+        type="info"
+        effect="plain"
+      >
+        {{ kindLabel(item.kind) }} {{ item.count }}
+      </el-tag>
       <el-tag v-if="routes?.source" class="mono" type="warning" effect="plain">
         {{ routes.source }}
       </el-tag>
@@ -533,6 +617,7 @@ onMounted(() => load())
               v-model="editor.provider"
               size="small"
               class="full-width"
+              @change="onProviderChange"
             >
               <el-option
                 v-for="provider in providerOptions"
@@ -543,6 +628,33 @@ onMounted(() => load())
             </el-select>
             <el-tag v-else size="small" type="info" effect="plain">
               {{ providerLabel(row.provider) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column :label="t('models.kind')" width="140">
+          <template #default="{ row }">
+            <el-select
+              v-if="isEditor(row)"
+              v-model="editor.kind"
+              size="small"
+              class="full-width"
+              @change="onKindChange"
+            >
+              <el-option
+                v-for="kind in kindOptions"
+                :key="kind"
+                :label="kindLabel(kind)"
+                :value="kind"
+              />
+            </el-select>
+            <el-tag
+              v-else
+              size="small"
+              :type="LLM_KINDS.includes(row.kind) ? 'success' : 'info'"
+              effect="plain"
+            >
+              {{ kindLabel(row.kind) }}
             </el-tag>
           </template>
         </el-table-column>

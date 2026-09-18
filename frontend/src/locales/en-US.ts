@@ -503,7 +503,8 @@ export default {
 
   models: {
     title: 'Model routing',
-    description: 'Model endpoints for downstream intranet DSH, read from MODELS_FILE.',
+    description:
+      'Model endpoints for downstream intranet DSH, read from MODELS_FILE; every route is classified by wire format and model function.',
     scaffoldTitle: 'Administrators maintain this table in the browser',
     scaffoldDesc:
       'openfish registers, displays and connectivity-checks routes; it does not proxy inference. DSH reads this table and decides its own upstream and credentials. An administrator holding model:write can add, edit and delete routes right here.',
@@ -511,6 +512,7 @@ export default {
     total: '{count} total',
     name: 'Name',
     provider: 'Format',
+    kind: 'Function',
     endpoint: 'Endpoint',
     model: 'Model ID',
     apiKey: 'API key',
@@ -526,6 +528,13 @@ export default {
     providerMineru: 'MinerU format',
     providerAnthropic: 'Anthropic format',
     providerUnknown: 'Unknown format',
+    kindChat: 'Chat',
+    kindCompletion: 'Completion',
+    kindEmbedding: 'Embedding',
+    kindRerank: 'Rerank',
+    kindOcr: 'OCR / document parsing',
+    kindAsr: 'Speech to text',
+    kindTts: 'Text to speech',
     add: 'Add route',
     probe: 'Test',
     probeAll: 'Test all',
@@ -561,11 +570,12 @@ export default {
     deleteFailed: 'Failed to delete the model route',
     errName: 'Name cannot be empty',
     errDescription: 'Description cannot be empty',
+    errKind: 'Function cannot be empty',
     errUrl: 'URL cannot be empty',
     errUrlScheme: 'URL must start with http:// or https://',
     snippetTitle: 'DSH-side snippet',
     snippetDesc:
-      'Alias-expanded model map, ready to paste into a DSH config (enabled routes only).',
+      'Alias-expanded model map, ready to paste into a DSH config (enabled chat/completion routes only).',
     loadFailed: 'Failed to load model routes',
   },
 
