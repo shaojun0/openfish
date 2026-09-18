@@ -150,24 +150,29 @@ def cmd_show(args, authz: AuthzService) -> int:
     return 0
 
 
-def _revoke_git_identity(user_id: int, *, delete_forgejo_user: bool = False) -> bool:
-    """Revoke the Forgejo credential minted for *user_id* (best effort).
+def _revoke_git_identity(user_id: int, *, delete_forgejo_user: bool = False) -> str:
+    """Revoke the Forgejo credential minted for *user_id*.
 
-    The import is local so ``cli.py --help`` stays cheap, and a failure here is a
-    warning rather than an error: the account is already deactivated, and the
-    operator must not be left with a half-applied command.  Git-identity
-    revocation itself needs no ``GIT_IDENTITY_KEY`` (it deletes by the
-    deterministic username), so a missing key does not block it.
+    Returns ``"revoked"`` (the remote token is gone), ``"none"`` (this account
+    never had one) or ``"failed"``.  A failure is **not** reported as success: the
+    Forgejo token has no TTL, so a swallowed error would leave a deactivated
+    account able to push.  The account is already deactivated either way, so the
+    warning goes to stderr rather than aborting the command.
+
+    The import is local so ``cli.py --help`` stays cheap.  Git-identity
+    revocation needs no ``GIT_IDENTITY_KEY`` (it deletes by the deterministic
+    username), so a missing key does not block it.
     """
     from services.git_identity import GitIdentityError, GitIdentityService
 
     try:
-        return GitIdentityService(Session).revoke(
+        revoked = GitIdentityService(Session).revoke(
             user_id, delete_forgejo_user=delete_forgejo_user,
         )
     except GitIdentityError as exc:
         print(f"warning: git identity not revoked: {exc}", file=sys.stderr)
-        return False
+        return "failed"
+    return "revoked" if revoked else "none"
 
 
 def cmd_disable_user(args, authz: AuthzService) -> int:
@@ -184,16 +189,23 @@ def cmd_disable_user(args, authz: AuthzService) -> int:
         print(f"{args.identity} is already inactive — nothing to do.")
         return 0
     authz.set_active(user.id, False)
-    revoked = _revoke_git_identity(
+    git_status = _revoke_git_identity(
         user.id, delete_forgejo_user=args.delete_forgejo_user,
     )
     print(f"Deactivated {_describe(authz, user)}")
     print("  Every login path checks is_active, so the account can no longer authenticate.")
-    if revoked:
+    if git_status == "revoked":
         suffix = " (Forgejo account deleted)" if args.delete_forgejo_user else ""
         print(f"  git identity: revoked{suffix}")
-    else:
+    elif git_status == "none":
         print("  git identity: none on record")
+    else:
+        print(
+            "  git identity: NOT revoked — the Forgejo token is still valid; "
+            "retry once Forgejo is reachable",
+            file=sys.stderr,
+        )
+        return 1
     print("  Re-enable with: cli.py enable-user " + args.identity)
     return 0
 

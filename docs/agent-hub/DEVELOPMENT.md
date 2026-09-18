@@ -530,7 +530,8 @@ escalation:
 - 导入的 issue/PR 正文与评论一律视为**不可信数据**：注入 prompt 时用明确的
   分隔标签包裹（如 `<untrusted-issue>`），并在系统提示词中声明其非指令性。
 - agent 不得因 issue 正文里的请求而改变 policy、改权限、访问仓库外资源。
-- 沙箱无网络出口（除模型端点与内网镜像），从机制上兜底。
+- 沙箱的网络出口**尚未**从机制上兜底（见 §9.2 的「待补」）；导入内容仍按不可信
+  数据处理，但不得据此宣称出网已被隔离。
 
 ---
 
@@ -564,8 +565,13 @@ docker compose --profile runner up -d runner
   任何平台密钥。runner 只用一枚可单独吊销的
   `FORGEJO_RUNNER_TOKEN`（git credential helper + 开 PR），未设置时 fix 任务
   在 push/PR 处**明确失败**，不回落去用 admin 权限。
-- **待补的网络隔离**：runner 目前仍在 `openfish` bridge 上，`network: internal`
-  + 出口白名单是后续切片；在那之前，隔离只覆盖凭据与文件系统，不覆盖出网。
+- **待补的隔离（两处）**：
+  1. *网络*：runner 仍在 `openfish` bridge 上，`network: internal` + 出口白名单是
+     后续切片。
+  2. *文件系统/控制面*：runner 以可写方式挂载 `./data:/app/data`（平台 SQLite 库
+     所在），而它同时执行仓库自带的 `check_*.py`。环境白名单挡不住文件系统，
+     因此"隔离覆盖文件系统"目前**不成立**；拆分方式待定（窄队列接口或独立库）。
+  在两者补齐前，凭据边界（上一条）是唯一已落地的隔离。
 
 ### 9.3 agent 的任务协议（`AGENTS.md` 契约）
 

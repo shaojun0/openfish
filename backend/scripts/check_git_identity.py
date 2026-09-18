@@ -60,12 +60,13 @@ from services.git_identity import (  # noqa: E402
     SCOPE_REPOSITORY_WRITE,
     ForgejoIdentityClient,
     GitIdentityConfigError,
+    GitIdentityError,
     GitIdentityService,
     TokenCipher,
     derive_username,
     synthetic_email,
 )
-from services.repo_import import ImportConfig  # noqa: E402
+from services.repo_import import ForgejoError, ImportConfig  # noqa: E402
 
 #: Counters for the summary line at the end.
 CHECKS = 0
@@ -473,8 +474,10 @@ def scenario_missing_key(harness: Harness) -> None:
     # ``revoke`` must still work without the key: it deletes by username.
     check("revoke does not need the encryption key", service.revoke(user_id) is True)
 
-    # A *misconfigured* client (no FORGEJO_ADMIN_TOKEN) must not block the local
-    # half of a revocation either: the row still has to be marked revoked.
+    # A *misconfigured* client (no FORGEJO_ADMIN_TOKEN) must fail loudly, not
+    # report a revocation it did not perform: the Forgejo token has no TTL, so
+    # the row must stay revoked_at=NULL (and keep its ciphertext) until the
+    # deletion really happens.
     offline_id = harness.user("offline-revoke")
     harness.service().token_for(offline_id, "offline-revoke", read_only=False)
     unconfigured = ForgejoIdentityClient(
@@ -483,9 +486,49 @@ def scenario_missing_key(harness: Harness) -> None:
     offline_service = GitIdentityService(
         harness.Session, client=unconfigured, env={}, now=harness.clock,
     )
-    check("an unconfigured Forgejo client cannot stop a revoke",
-          offline_service.revoke(offline_id) is True
-          and harness.service().find(offline_id).revoked_at is not None)
+    try:
+        offline_service.revoke(offline_id)
+    except GitIdentityError as exc:
+        check("an unreachable Forgejo fails the revoke loudly",
+              "仍然有效" in str(exc), str(exc))
+    except BaseException as exc:  # noqa: BLE001 - anything else is the failure
+        check("an unreachable Forgejo fails the revoke loudly", False,
+              f"{type(exc).__name__}: {exc}")
+    else:
+        check("an unreachable Forgejo fails the revoke loudly", False, "nothing raised")
+    unreached = harness.service().find(offline_id)
+    check("a failed revoke does not mark the row revoked",
+          unreached.revoked_at is None and unreached.token_ciphertext is not None)
+
+    # A remote error (as opposed to missing configuration) fails the same way:
+    # the ciphertext is the only handle on that token, so a retry must still
+    # have it.
+    class _BrokenDelete:
+        configured = True
+
+        def delete_token(self, username: str, *, name: str) -> bool:
+            raise ForgejoError("forgejo is down")
+
+        def delete_user(self, username: str) -> bool:
+            raise ForgejoError("forgejo is down")
+
+    broken_id = harness.user("broken-revoke")
+    harness.service().token_for(broken_id, "broken-revoke", read_only=False)
+    broken_service = GitIdentityService(
+        harness.Session, client=_BrokenDelete(), env={}, now=harness.clock,
+    )
+    try:
+        broken_service.revoke(broken_id)
+    except GitIdentityError:
+        check("a remote delete failure fails the revoke", True)
+    except BaseException as exc:  # noqa: BLE001 - anything else is the failure
+        check("a remote delete failure fails the revoke", False,
+              f"{type(exc).__name__}: {exc}")
+    else:
+        check("a remote delete failure fails the revoke", False, "nothing raised")
+    still_there = harness.service().find(broken_id)
+    check("a remote failure keeps the ciphertext for a retry",
+          still_there.revoked_at is None and still_there.token_ciphertext is not None)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

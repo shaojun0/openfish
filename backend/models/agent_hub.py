@@ -185,6 +185,11 @@ class Repo(Base):
     #: webhook treats as the documented default (review on).  The API host has no
     #: checkout, so caching it here is what lets a repository actually opt out.
     auto_review: Mapped[bool | None] = Column(Boolean, nullable=True)
+    #: The same cache for the curator trigger (``defaults.curator`` and its
+    #: cooling-off window).  One row, one policy source: the webhook must never
+    #: fall back to some *other* repository's checkout on the API host.
+    curator: Mapped[str | None] = Column(String(16), nullable=True)
+    curator_min_interval_seconds: Mapped[int | None] = Column(Integer, nullable=True)
     created_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = Column(
         DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
@@ -621,6 +626,11 @@ class AgentTask(Base):
     # Higher wins: the lease query is ORDER BY priority DESC, created_at ASC.
     priority: Mapped[int] = Column(Integer, nullable=False, default=0)
     result_ref: Mapped[str | None] = Column(String(512), nullable=True)
+    #: The pull request this task opened, when it opened one.  This is the
+    #: PR↔finding link: a merge webhook finds the task by this URL, walks
+    #: ``review_runs.agent_task_id`` to the runs it produced, and stamps only the
+    #: findings those runs saw — instead of every finding in the repository.
+    pr_url: Mapped[str | None] = Column(String(512), nullable=True)
     # Last failure/reclaim explanation — the operator's only clue for a `dead` row
     # besides the worker log (a dead task is an ops-log event, not a finding).
     error: Mapped[str | None] = Column(Text, nullable=True)
@@ -891,6 +901,35 @@ class GitIdentity(Base):
         return f"<GitIdentity user={self.user_id} {self.forgejo_username}>"
 
 
+# ── webhook_deliveries ───────────────────────────────────────────────
+
+class WebhookDelivery(Base):
+    """One accepted Forgejo webhook delivery, so a replay is a no-op.
+
+    The HMAC proves *who* signed a payload, not that it is arriving for the
+    first time: Forgejo retries a delivery it did not get a 2xx for, and anyone
+    holding the shared secret can replay a captured body.  The queue's
+    ``dedup_key`` only suppresses a *still active* task, so a replay after the
+    task finished used to run the whole review (and pay for the model) again.
+    Recording the forge's delivery id makes the second attempt answer without
+    side effects.
+    """
+
+    __tablename__ = "webhook_deliveries"
+
+    id: Mapped[int] = Column(Integer, primary_key=True, autoincrement=True)
+    #: The forge's delivery id (``X-Forgejo-Delivery`` and friends).  Unique, so
+    #: a racing duplicate is rejected by the database rather than by a check.
+    delivery_id: Mapped[str] = Column(String(128), nullable=False, unique=True, index=True)
+    #: What the delivery was about, for triage only.
+    repo_id: Mapped[int | None] = Column(Integer, nullable=True)
+    event: Mapped[str | None] = Column(String(32), nullable=True)
+    received_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<WebhookDelivery {self.delivery_id!r}>"
+
+
 # ── finding_evidence ─────────────────────────────────────────────────
 
 class FindingEvidence(Base):
@@ -986,4 +1025,5 @@ __all__ = [
     "RepoCommit",
     "RepoIssue",
     "ReviewRun",
+    "WebhookDelivery",
 ]

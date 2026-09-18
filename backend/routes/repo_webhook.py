@@ -36,7 +36,6 @@ import hmac
 import json
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from flask import Blueprint, current_app, jsonify, request
@@ -47,6 +46,7 @@ from services.repo_import import ImportConfig, read_policy_auto_review
 from services.review_policy import (
     CURATOR_AUTO,
     CURATOR_BOOTSTRAP,
+    CURATOR_MODES,
     DEFAULT_CURATOR_MIN_INTERVAL_SECONDS,
 )
 
@@ -63,6 +63,10 @@ SIGNATURE_HEADERS = ("X-Forgejo-Signature", "X-Gitea-Signature", "X-Hub-Signatur
 #: ``issues`` opened from ``issues`` labeled.
 EVENT_HEADERS = ("X-Forgejo-Event", "X-Gitea-Event", "X-GitHub-Event")
 
+#: Delivery header.  It names one delivery *attempt*, which is what makes a
+#: replay distinguishable from a genuine second push of the same commit.
+DELIVERY_HEADERS = ("X-Forgejo-Delivery", "X-Gitea-Delivery", "X-GitHub-Delivery")
+
 #: Label that turns an issue into a fix task.
 AGENT_LABEL = "agent"
 
@@ -76,14 +80,6 @@ PRIORITY_DOC = 3
 PRIORITY_CURATOR = 4
 PRIORITY_REVIEW = 5
 PRIORITY_FIX = 8
-
-#: The task kind S0 reserves for a repository-wide history write-back.  No
-#: handler implements it, so the webhook must never enqueue it: a merged PR's
-#: write-back is the synchronous :func:`backfill_pr_url` call in the view.
-DOC_TASK_KIND = "backfill"
-
-#: Actions that make an issue worth acting on.
-ISSUE_ACTIONS = frozenset({"opened", "reopened", "labeled", "created", "edited"})
 
 #: Actions that mean a pull request landed.
 MERGED_ACTIONS = frozenset({"closed", "merged", "merged_and_closed"})
@@ -186,15 +182,6 @@ class WebhookEvent:
             "merged": self.merged,
             "sender": self.sender,
         }
-
-
-def _nested(payload: Mapping[str, Any], *path: str) -> Any:
-    node: Any = payload
-    for key in path:
-        if not isinstance(node, Mapping):
-            return None
-        node = node.get(key)
-    return node
 
 
 def _labels_of(payload: Mapping[str, Any]) -> tuple[str, ...]:
@@ -442,25 +429,21 @@ def enqueue_task(
 
 # ── Policy ───────────────────────────────────────────────────────────
 
-def read_curator_policy(repo_root: str | Path | None = None) -> tuple[str, int]:
-    """``(mode, min_interval_seconds)`` for the curator trigger.
+def _repo_curator_policy(repo: Any) -> tuple[str, int]:
+    """``(mode, min_interval_seconds)`` for the curator trigger, from *repo*.
 
-    Reads the repository's ``.agent/review-policy.yml`` through S3's parser when
-    it is available and degrades to the documented default (``bootstrap``, one
-    hour) on any error: a broken policy must never turn a webhook into a 500,
-    and the default is the conservative one.
+    Same source as :func:`_repo_policy_reader`: the import pipeline reads the
+    repository's ``.agent/review-policy.yml`` once and caches the trigger fields
+    on the row.  The webhook must never read the API host's own checkout — that
+    is a different repository's policy, and it made a repository's
+    ``curator: off`` unreachable.  ``None`` is "not read yet" and yields the
+    documented default (``bootstrap``, one hour).
     """
-    try:
-        from services.review_policy import load as load_policy
-
-        document = load_policy(repo_root)
-        return (
-            str(document.defaults.curator),
-            int(document.defaults.curator_min_interval_seconds),
-        )
-    except Exception as exc:  # noqa: BLE001 - policy trouble never blocks a webhook
-        logger.warning("curator policy lookup failed; using default bootstrap: %s", exc)
-        return CURATOR_BOOTSTRAP, DEFAULT_CURATOR_MIN_INTERVAL_SECONDS
+    mode = str(getattr(repo, "curator", None) or CURATOR_BOOTSTRAP)
+    if mode not in CURATOR_MODES:
+        mode = CURATOR_BOOTSTRAP
+    interval = getattr(repo, "curator_min_interval_seconds", None)
+    return mode, int(interval if interval is not None else DEFAULT_CURATOR_MIN_INTERVAL_SECONDS)
 
 
 def curator_enqueue_allowed(
@@ -637,58 +620,99 @@ def _head_sha(event: WebhookEvent) -> str:
 # ── Repo resolution ──────────────────────────────────────────────────
 
 def resolve_repo(session: Any, event: WebhookEvent) -> Any | None:
-    """Find the ``repos`` row a webhook is about.
+    """Find the one ``repos`` row a webhook is about, or ``None``.
 
-    Prefers ``forgejo_repo`` (the Forgejo-side full name) and falls back to
-    ``slug`` — for a repository created by ``POST /api/v1/repos`` the two differ
-    (Forgejo gets ``owner__name``), and resolving either way is what keeps the
-    webhook useful while the naming policy is still being tuned.
+    ``forgejo_repo`` (the Forgejo-side full name) is preferred, ``slug`` is the
+    fallback — for a repository created by ``POST /api/v1/repos`` the two differ
+    (Forgejo gets ``owner__name``), and resolving either way keeps the webhook
+    useful while the naming policy is still being tuned.
+
+    An ambiguous match is refused, not guessed: writing findings or queueing a
+    task against an arbitrarily-chosen row is worse than dropping the event, and
+    the error log names the conflict so it can be fixed.  ``None`` makes the
+    route answer "unknown repository" (200, no side effects).
     """
     from models.agent_hub import Repo
 
     candidates = [value for value in (event.forgejo_repo, event.repo_slug) if value]
     if not candidates:
         return None
+    found: dict[int, Any] = {}
     for column in ("forgejo_repo", "slug"):
-        if not hasattr(Repo, column):
+        attr = getattr(Repo, column, None)
+        if attr is None:
             continue
-        attr = getattr(Repo, column)
         for value in candidates:
-            # ``first()``, not ``one_or_none()``: two slugs can resolve to the
-            # same Forgejo name while the naming policy is being tuned, and a
-            # webhook must never answer 500 over that.
-            found = session.query(Repo).filter(attr == value).first()
-            if found is not None:
-                return found
-    return None
+            for row in session.query(Repo).filter(attr == value).limit(2).all():
+                found[row.id] = row
+    if not found:
+        return None
+    if len(found) > 1:
+        logger.error(
+            "webhook 的仓库 %r 同时匹配 %d 个 repos 行（%s）；拒绝猜测，事件未处理，"
+            "请先修复命名冲突",
+            candidates, len(found),
+            ", ".join(str(getattr(row, "slug", row.id)) for row in found.values()),
+        )
+        return None
+    return next(iter(found.values()))
 
 
 def backfill_pr_url(session: Any, repo_id: int, number: int, url: str) -> int:
-    """Record ``pr_url`` on this repository's findings that have none yet.
+    """Record ``url`` on the findings the task that opened this PR produced.
 
     S3 owns the finding state machine; this is the one write §5.4 asks the
     webhook to make.  It is defensive on purpose: a schema S3 has not finished
     shipping must not turn a webhook into a 500.
 
-    Scope note: the schema has no PR↔finding link (``review_runs`` carries no PR
-    number), so this is deliberately repository-wide over ``pr_url IS NULL`` and
-    the caller must only invoke it for a **merged** pull request.  Narrowing it
-    further needs S3 to persist the run that opened the PR.
+    The schema has no direct PR↔finding column, so the link is reconstructed:
+    ``agent_tasks.pr_url`` names the task that opened the PR,
+    ``review_runs.agent_task_id`` names the runs that task produced, and a
+    finding belongs to the PR when one of those runs saw it.  A merged PR this
+    platform did not open has no such task, and then **nothing** is written —
+    the repository-wide write over ``pr_url IS NULL`` used to let a single
+    payload stamp every unrelated finding, with no way back.
     """
     if not number or not url:
         return 0
     try:
-        from models.agent_hub import Finding  # noqa: PLC0415 - S3's table
+        from models.agent_hub import AgentTask, Finding, ReviewRun  # noqa: PLC0415
     except ImportError:
-        logger.info("findings table not present yet; skipping pr_url backfill")
+        logger.info("agent-hub tables not present yet; skipping pr_url backfill")
         return 0
     if not hasattr(Finding, "pr_url"):
         return 0
     updated = 0
     try:
+        from sqlalchemy import or_  # noqa: PLC0415 - one query, one dialect
+
+        task = (
+            session.query(AgentTask)
+            .filter(AgentTask.repo_id == repo_id, AgentTask.pr_url == url)
+            .first()
+        )
+        if task is None:
+            logger.info("no agent task records PR %s for repo %s; nothing linked",
+                        url, repo_id)
+            return 0
+        run_ids = [
+            row[0]
+            for row in session.query(ReviewRun.id)
+            .filter(ReviewRun.agent_task_id == task.id)
+            .all()
+        ]
+        if not run_ids:
+            return 0
         rows = (
             session.query(Finding)
-            .filter(Finding.repo_id == repo_id, Finding.pr_url.is_(None))
+            .filter(
+                Finding.repo_id == repo_id,
+                Finding.pr_url.is_(None),
+                or_(
+                    Finding.first_seen_run_id.in_(run_ids),
+                    Finding.last_seen_run_id.in_(run_ids),
+                ),
+            )
             .all()
         )
         for row in rows:
@@ -729,6 +753,56 @@ def _session():
     from extensions.database import Session
 
     return Session
+
+
+# ── Delivery idempotency ─────────────────────────────────────────────
+
+def delivery_id() -> str:
+    """The delivery id from the request headers, or ``""`` when the forge sent none."""
+    for name in DELIVERY_HEADERS:
+        value = (request.headers.get(name) or "").strip()
+        if value:
+            return value[:128]
+    return ""
+
+
+def delivery_seen(session: Any, delivery: str) -> bool:
+    """Whether *delivery* was already accepted.
+
+    Fail-open on a database that predates the ``webhook_deliveries`` table (or
+    any lookup error): idempotency is defence in depth, and it must never turn a
+    webhook into a 500 and make Forgejo retry forever.
+    """
+    if not delivery:
+        return False
+    try:
+        from models.agent_hub import WebhookDelivery
+
+        return (
+            session.query(WebhookDelivery).filter_by(delivery_id=delivery).first()
+            is not None
+        )
+    except Exception as exc:  # noqa: BLE001 - never 500 a webhook
+        logger.warning("could not check webhook delivery %s: %s", delivery, exc)
+        return False
+
+
+def remember_delivery(session: Any, delivery: str, *, repo_id: int, event: str) -> None:
+    """Record an accepted delivery; a later replay then becomes a no-op.
+
+    Written **after** the side effects on purpose: a crash before this commit
+    leaves the delivery unrecorded, so Forgejo's retry can still complete it.
+    """
+    if not delivery:
+        return
+    try:
+        from models.agent_hub import WebhookDelivery
+
+        session.add(WebhookDelivery(delivery_id=delivery, repo_id=repo_id, event=event))
+        session.commit()
+    except Exception as exc:  # noqa: BLE001 - never 500 a webhook
+        session.rollback()
+        logger.warning("could not record webhook delivery %s: %s", delivery, exc)
 
 
 @repo_webhook_bp.route("/api/v1/repos/webhook", methods=["POST"])
@@ -792,7 +866,25 @@ def forgejo_webhook():
         "",
     )
     event = parse_event(event_name, payload, body=body)
+    delivery = delivery_id()
     session = _session()
+    if delivery_seen(session, delivery):
+        # The HMAC proves who signed it, not that it is new: a replay (or a
+        # Forgejo retry after a 2xx we failed to return) must not enqueue a
+        # second review.  Answer 200 so the forge stops retrying either way.
+        logger.info("webhook delivery %s already accepted; ignoring replay", delivery)
+        return jsonify({
+            "ok": True,
+            "event": event.kind,
+            "action": event.action,
+            "repo": event.forgejo_repo or event.repo_slug,
+            "slug": None,
+            "handled": False,
+            "queued": [],
+            "findings_updated": 0,
+            "duplicate": True,
+            "note": "重复投递：该 delivery 已处理过，未重复入队",
+        })
     repo = resolve_repo(session, event)
     if repo is None:
         # 200, not 404: an unimported repository is a permanent condition, and a
@@ -815,7 +907,7 @@ def forgejo_webhook():
             ),
         })
 
-    curator_mode, curator_interval = read_curator_policy()
+    curator_mode, curator_interval = _repo_curator_policy(repo)
     if event.kind == "push" and event.is_default_branch:
         curator_allowed, curator_reason = curator_enqueue_allowed(
             session, repo.id, mode=curator_mode, min_interval_seconds=curator_interval,
@@ -852,6 +944,10 @@ def forgejo_webhook():
             session, repo.id, event.pr_number or 0, event.pr_url,
         )
 
+    # Record only once the side effects are done: a crash before this commit
+    # leaves the delivery unrecorded so a retry can still complete it.
+    remember_delivery(session, delivery, repo_id=repo.id, event=event.kind)
+
     handled = bool(queued) or (event.kind == "pull_request" and event.merged)
     note = None
     if event.kind == "push" and not event.is_default_branch:
@@ -878,6 +974,7 @@ def forgejo_webhook():
 
 __all__ = [
     "AGENT_LABEL",
+    "DELIVERY_HEADERS",
     "EVENT_HEADERS",
     "PRIORITY_CURATOR",
     "SIGNATURE_HEADERS",
@@ -886,10 +983,12 @@ __all__ = [
     "backfill_pr_url",
     "compute_signature",
     "curator_enqueue_allowed",
+    "delivery_id",
+    "delivery_seen",
     "enqueue_task",
     "parse_event",
     "plan_actions",
-    "read_curator_policy",
+    "remember_delivery",
     "repo_webhook_bp",
     "resolve_repo",
     "signature_header",

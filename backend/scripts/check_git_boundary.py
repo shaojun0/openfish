@@ -31,7 +31,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from services.gates import ENV_INHERIT, ENV_SANDBOX, SubprocessGateExecutor  # noqa: E402
-from services.git_auth import GIT_CREDENTIAL_HELPER, GIT_TOKEN_ENV  # noqa: E402
+from services.git_auth import (  # noqa: E402
+    GIT_CREDENTIAL_HELPER,
+    GIT_HOST_ENV,
+    GIT_TOKEN_ENV,
+    credential_args,
+    git_host_of,
+)
 from services.sandbox_env import (  # noqa: E402
     ALLOWED_NAMES,
     ALLOWED_PREFIXES,
@@ -180,6 +186,14 @@ def check_git_auth_single_source() -> None:
           "${" + GIT_TOKEN_ENV + "}" in GIT_CREDENTIAL_HELPER)
     check("the snippet interpolated into git argv carries no token value",
           "OPENFISH" in GIT_CREDENTIAL_HELPER)
+    check("the helper answers only the `get` operation",
+          '[ "$1" = get ]' in GIT_CREDENTIAL_HELPER)
+    check("the helper pins the host from the environment",
+          "${" + GIT_HOST_ENV + "}" in GIT_CREDENTIAL_HELPER)
+    check("credential_args resets the configured helper list first",
+          credential_args()[:2] == ["-c", "credential.helper="])
+    check("git_host_of strips a default port but keeps a real one",
+          git_host_of("https://h:443/x") == "h" and git_host_of("http://h:3000/x") == "h:3000")
 
 
 def check_nginx_git_prefix() -> None:
@@ -255,12 +269,26 @@ def check_no_admin_token_on_agent_path() -> None:
               f"{len(reads)} reference(s)")
 
 
-def check_commit_cannot_run_hooks() -> None:
+def check_publish_cannot_be_hijacked() -> None:
     print()
-    print("── the fix commit ignores repository hooks " + "─" * 15)
+    print("── the checkout cannot hijack commit/push " + "─" * 11)
     runner = (REPO_ROOT / "services" / "agent_runner.py").read_text(encoding="utf-8")
     check("the fix commit passes --no-verify", '"--no-verify"' in runner)
-    check("the fix commit overrides core.hooksPath", "core.hooksPath=" in runner)
+    check("one hooks-off helper serves both commit and push",
+          runner.count("*self._no_hooks_args(root)") >= 2,
+          "a publish step grew without core.hooksPath")
+    check("the hooks-off directory is created fresh, not at a predictable path",
+          'mkdtemp(prefix="openfish-hooks-"' in runner,
+          "a fixed path inside the writable checkout can be symlinked to .git/hooks")
+    check("push targets the pinned repo_url, never the mutable origin",
+          '"push", "--quiet", target' in runner
+          and '"push", "--quiet", "origin"' not in runner)
+    check("push refuses a rewritten .git/config",
+          "_assert_config_untouched" in runner)
+    check("the pristine config is digested right after clone",
+          "self._config_digest = self._config_hash(target)" in runner)
+    check("the runner redacts the adapter's git token",
+          "_adapter_secrets" in runner and "def secrets" in runner)
 
 
 def main() -> int:
@@ -272,7 +300,7 @@ def main() -> int:
     check_nginx_git_prefix()
     check_compose_runner_env()
     check_no_admin_token_on_agent_path()
-    check_commit_cannot_run_hooks()
+    check_publish_cannot_be_hijacked()
 
     print()
     if FAILURES:

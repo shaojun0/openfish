@@ -60,7 +60,7 @@ from urllib.parse import quote, urlparse
 import requests
 
 from services.agent_runner import POLICY_RELPATH, mask_secrets
-from services.git_auth import GIT_CREDENTIAL_HELPER, GIT_TOKEN_ENV, git_env
+from services.git_auth import credential_args, git_env, git_host_of
 
 logger = logging.getLogger("cpypiserver.repo_import")
 
@@ -184,10 +184,6 @@ class ForgejoError(RepoImportError):
     """A Forgejo API call failed, or answered something unusable."""
 
 
-class SourceUnreachableError(RepoImportError):
-    """The source probe could not reach the upstream host."""
-
-
 class RequiresIssuesError(RepoImportError):
     """The repo must be mirrored before issues can be read from it."""
 
@@ -195,8 +191,9 @@ class RequiresIssuesError(RepoImportError):
 # ── Source URL parsing ───────────────────────────────────────────────
 
 #: Hosts whose web URL carries no extra path segment before ``owner/name``.
-#: GitLab (and self-hosted clones of it) prefix projects with ``/-/`` groups;
-#: the generic branch below handles those by taking the last two segments.
+#: GitLab (and self-hosted clones of it) nest projects under subgroups
+#: (``group/subgroup/project``), so the whole path — not just its last two
+#: segments — is the repository's identity.
 _KNOWN_HOSTS = {
     "github.com": "github",
     "gitee.com": "gitee",
@@ -209,36 +206,49 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 @dataclass(frozen=True)
 class RepoSource:
-    """One parsed ``owner/name`` pair plus where it came from."""
+    """One parsed repository URL: the full namespace plus where it came from."""
 
     host: str
+    #: The last two path segments — what a human calls the owner and the name.
     owner: str
     name: str
     clone_url: str
+    #: The **full** namespace path (``group/subgroup/project``).  Identity and
+    #: every generated URL use this, so two repositories that differ only above
+    #: the last segment cannot collide or be confused for each other.
+    path: str = ""
     kind: str = "git"  # github | gitee | gitlab | git
 
     @property
     def slug(self) -> str:
-        """The canonical ``repos.slug`` value — ``"<owner>/<name>"`` (§4.2)."""
-        return f"{self.owner}/{self.name}"
+        """The canonical ``repos.slug`` value — the full namespace (§4.2)."""
+        return self.path or f"{self.owner}/{self.name}"
 
     @property
     def web_url(self) -> str:
         if not self.host:
             return self.clone_url
-        return f"https://{self.host}/{self.owner}/{self.name}"
+        return f"https://{self.host}/{self.slug}"
 
 
-def _split_owner_name(path: str) -> tuple[str, str]:
+def _split_namespace(path: str) -> tuple[str, str, str]:
+    """``(full path, owner, name)`` for a repository URL path.
+
+    ``owner``/``name`` stay the last two segments (display, Forgejo naming), but
+    the returned full path is what identifies the repository: GitLab nests
+    projects under subgroups, and rebuilding a URL from only the last two
+    segments would clone a different repository — or, worse, a same-named one at
+    the top level.
+    """
     parts = [p for p in path.split("/") if p]
     if len(parts) < 2:
         raise SourceUrlError(f"仓库地址缺少 owner/name：{path!r}")
-    owner, name = parts[-2], parts[-1]
-    if name.endswith(".git"):
-        name = name[: -len(".git")]
-    if not _OWNER_RE.match(owner) or not _NAME_RE.match(name):
-        raise SourceUrlError(f"仓库地址中的 owner/name 非法：{owner!r}/{name!r}")
-    return owner, name
+    if parts[-1].endswith(".git"):
+        parts[-1] = parts[-1][: -len(".git")]
+    if not all(_OWNER_RE.match(segment) for segment in parts[:-1]) \
+            or not _NAME_RE.match(parts[-1]):
+        raise SourceUrlError(f"仓库地址中的路径段非法：{'/'.join(parts)!r}")
+    return "/".join(parts), parts[-2], parts[-1]
 
 
 def parse_source(source_url: str) -> RepoSource:
@@ -255,9 +265,8 @@ def parse_source(source_url: str) -> RepoSource:
         git://git.example.internal/team/project.git
         ssh://git@git.example.internal/team/project.git
 
-    The last two path segments are always the repository, which is what makes
-    a self-hosted GitLab (``…/group/subgroup/project``) work without a special
-    case.
+    The whole path is the repository (GitLab subgroup paths included); the last
+    two segments are only its owner/name label.
     """
     raw = (source_url or "").strip()
     if not raw:
@@ -270,7 +279,7 @@ def parse_source(source_url: str) -> RepoSource:
         # scp-like: git@host:owner/name.git
         user_host, _, path = raw.partition(":")
         host = user_host.split("@", 1)[-1]
-        owner, name = _split_owner_name(path)
+        namespace, owner, name = _split_namespace(path)
         scheme = "https"
     else:
         parsed = urlparse(raw)
@@ -280,12 +289,15 @@ def parse_source(source_url: str) -> RepoSource:
         host = (parsed.hostname or "").lower()
         if not host:
             raise SourceUrlError(f"仓库地址缺少主机名：{raw!r}")
-        owner, name = _split_owner_name(parsed.path)
+        namespace, owner, name = _split_namespace(parsed.path)
 
     kind = _KNOWN_HOSTS.get(host, "git")
     clone_scheme = "https" if scheme in {"http", "https", "ssh"} else scheme
-    clone_url = f"{clone_scheme}://{host}/{owner}/{name}.git"
-    return RepoSource(host=host, owner=owner, name=name, clone_url=clone_url, kind=kind)
+    clone_url = f"{clone_scheme}://{host}/{namespace}.git"
+    return RepoSource(
+        host=host, owner=owner, name=name, clone_url=clone_url,
+        path=namespace, kind=kind,
+    )
 
 
 def default_slug(source: RepoSource) -> str:
@@ -301,11 +313,11 @@ def probe_url(source: RepoSource, *, token: str = "") -> str:
     way; a bare git URL is validated by the migration itself.
     """
     if source.kind == "github":
-        return f"https://api.github.com/repos/{source.owner}/{source.name}"
+        return f"https://api.github.com/repos/{source.slug}"
     if source.kind == "gitee":
-        return f"https://gitee.com/api/v5/repos/{source.owner}/{source.name}"
+        return f"https://gitee.com/api/v5/repos/{source.slug}"
     if source.kind == "gitlab":
-        project = quote(f"{source.owner}/{source.name}", safe="")
+        project = quote(source.slug, safe="")
         return f"https://gitlab.com/api/v4/projects/{project}"
     return ""
 
@@ -968,13 +980,6 @@ class ForgejoClient:
 _GIT_SEP = "\x1f"
 _GIT_FORMAT = f"%H{_GIT_SEP}%an{_GIT_SEP}%aI{_GIT_SEP}%s"
 
-#: git credentials are built in one place — ``services.git_auth`` — so the
-#: mirror and the agent runner cannot drift into two different mechanisms.
-#: ``_GIT_TOKEN_ENV``/``_GIT_CREDENTIAL_HELPER`` remain as module aliases for
-#: compatibility with existing callers and gates.
-_GIT_TOKEN_ENV = GIT_TOKEN_ENV
-_GIT_CREDENTIAL_HELPER = GIT_CREDENTIAL_HELPER
-
 
 class GitCommitReader:
     """Read commit metadata out of a shallow bare clone (read-only)."""
@@ -989,7 +994,6 @@ class GitCommitReader:
         self.config = config or ImportConfig.from_env()
         self.git = git_binary
         self._run = runner or subprocess.run
-        self._ready: set[str] = set()
 
     # -- clone/fetch --------------------------------------------------
 
@@ -1016,15 +1020,16 @@ class GitCommitReader:
         the credential protocol itself.
         """
         token = (self.config.admin_token or "").strip()
+        base = (self.config.git_base_url or self.config.base_url).rstrip("/")
         env = {"GIT_TERMINAL_PROMPT": "0"}
-        env.update(git_env(token))
+        env.update(git_env(token, git_host_of(base)))
         return env
 
     def _git_auth_args(self) -> list[str]:
         """``-c credential.helper=…`` for a token, or nothing when unset."""
         if not (self.config.admin_token or "").strip():
             return []
-        return ["-c", f"credential.helper={_GIT_CREDENTIAL_HELPER}"]
+        return credential_args()
 
     def _fetch_mirror(self, destination: Path) -> None:
         """Refresh an existing mirror, un-shallowing a legacy depth-1 copy."""
@@ -1058,7 +1063,6 @@ class GitCommitReader:
             # that short-circuits here would never see a new commit again.
             if refresh:
                 self._fetch_mirror(destination)
-            self._ready.add(forgejo_repo)
             return destination
 
         self._git(
@@ -1068,7 +1072,6 @@ class GitCommitReader:
             ],
             extra_env=self._git_env(),
         )
-        self._ready.add(forgejo_repo)
         return destination
 
     def _git(
@@ -1503,39 +1506,63 @@ class RepoImportService:
         return True
 
     def _refresh_repo_policy(self, repo: Any, forgejo_repo: str) -> None:
-        """Cache ``.agent/review-policy.yml``'s ``auto_review`` on the repo row.
+        """Cache the repository's review-policy trigger fields on the repo row.
 
-        The webhook runs on the API host, which has no checkout, so it cannot read
-        the file itself — and ``read_policy_auto_review(repo_root=None)`` used to
-        fall through to ``True``, making a repository's ``auto_review: false``
-        impossible to honour.  Reading it here (once per job) is what makes the
-        per-repo opt-out real.  A missing or unparsable file means the documented
-        default: review on.
+        The webhook runs on the API host, which has no checkout, so it cannot
+        read ``.agent/review-policy.yml`` itself.  Reading it once per job and
+        caching the fields that drive enqueueing — ``auto_review``, ``curator``
+        and the curator cooling-off window — is what makes a per-repo policy
+        real, and it keeps every reader on one source.
+
+        Trust boundary (I6): the file is repository **content**.  For a
+        ``workspace`` — a platform-owned repository users push to — honouring it
+        is the documented feature.  An ``upstream`` mirror's copy was written by
+        a third party, so it must not decide what the platform does: those rows
+        are left on the platform defaults.
         """
+        if str(_get(repo, "kind") or "upstream") != "workspace":
+            self._clear_repo_policy(repo)
+            return
+        from services.review_policy import (  # noqa: PLC0415 - optional layer
+            SOURCE_FILE,
+            builtin_default,
+            parse_document,
+            parse_yaml,
+        )
+
+        defaults = builtin_default().defaults
         try:
             text = self.client.read_file(forgejo_repo, str(POLICY_RELPATH).replace("\\", "/"))
         except Exception as exc:  # noqa: BLE001 - policy I/O never fails an import
             logger.warning("could not read the review policy of %s: %s", forgejo_repo, exc)
-            return
-        value = True
+            text = ""
         if text and text.strip():
             try:
-                from services.review_policy import (  # noqa: PLC0415 - optional layer
-                    SOURCE_FILE,
-                    parse_document,
-                    parse_yaml,
-                )
-
-                value = bool(
-                    parse_document(parse_yaml(text), source=SOURCE_FILE).defaults.auto_review
-                )
+                defaults = parse_document(parse_yaml(text), source=SOURCE_FILE).defaults
             except Exception as exc:  # noqa: BLE001
                 logger.warning("ignoring unparsable review policy of %s: %s",
                                forgejo_repo, exc)
-                value = True
-        if _get(repo, "auto_review") != value:
-            _assign(repo, {"auto_review": value, "updated_at": _now()})
-            logger.info("cached auto_review=%s for %s", value, forgejo_repo)
+        values: dict[str, Any] = {
+            "auto_review": bool(defaults.auto_review),
+            "curator": str(defaults.curator),
+            "curator_min_interval_seconds": int(defaults.curator_min_interval_seconds),
+        }
+        if any(_get(repo, name) != value for name, value in values.items()):
+            _assign(repo, {**values, "updated_at": _now()})
+            logger.info("cached review policy %s for %s", values, _get(repo, "slug"))
+
+    def _clear_repo_policy(self, repo: Any) -> None:
+        """Drop a cached policy so the row falls back to the platform defaults.
+
+        Whatever an imported mirror's ``.agent/review-policy.yml`` once said must
+        not survive as a platform decision (I6); ``None`` is the webhook's
+        documented "not read" state.
+        """
+        names = ("auto_review", "curator", "curator_min_interval_seconds")
+        if any(_get(repo, name) is not None for name in names):
+            _assign(repo, {name: None for name in names} | {"updated_at": _now()})
+            logger.info("cleared cached review policy of imported mirror %s",
+                        _get(repo, "slug"))
 
     def _step_mirror_issues(self, job: Any, cursor: Cursor) -> bool:
         if not bool(cursor.extras.get("include_issues", True)):
@@ -1640,11 +1667,21 @@ class RepoImportService:
         if not rows and cursor.extras.get("commit_source") != "git":
             # The API answered (or failed) with nothing.  Try the read-only
             # local copy exactly once, and remember that we did: an empty
-            # repository must not loop the fallback forever.
+            # repository must not loop the fallback forever.  Ask for one more
+            # than there is room for, so an exact hit is how the ceiling is seen.
             source = "git"
             fell_back = True
             cursor.extras["commit_source"] = "git"
-            rows = list(self._git_commits(forgejo_repo, branch, limit=self.config.max_commits))
+            try:
+                rows = list(self.commits.stream(
+                    forgejo_repo, branch=branch, limit=room + 1,
+                ))
+            except RepoImportError as exc:
+                # Both sources failed.  Finishing here would report a repository
+                # with no history as "done"; fail so the job is retried instead.
+                raise RepoImportError(
+                    f"commit API 与 git 回退都无法读取 {forgejo_repo}：{exc}"
+                ) from exc
 
         truncated = len(rows) > room
         if truncated:
@@ -1658,6 +1695,12 @@ class RepoImportService:
         # returned is the whole answer.
         done = (not next_page) or truncated or fell_back \
             or cursor.commits_seen >= self.config.max_commits
+        if done and next_page and not truncated:
+            # The forge says another page exists, so the commit ceiling — not the
+            # end of history — is what ended the walk.  Completing the job here
+            # without ``partial`` would present a truncated history as complete.
+            truncated = True
+            cursor.partial = True
         if done:
             _assign(repo, {
                 "commit_count": cursor.commits_seen,
@@ -1667,19 +1710,15 @@ class RepoImportService:
         self._mirror_state(job, cursor, forgejo_repo=forgejo_repo, done=cursor.commits_seen)
         return True
 
-    def _git_commits(self, forgejo_repo: str, branch: str, *, limit: int) -> Iterator[dict[str, Any]]:
-        try:
-            mirror = self.commits.stream(forgejo_repo, branch=branch, limit=limit)
-        except RepoImportError as exc:
-            logger.warning("git fallback unavailable for %s: %s", forgejo_repo, exc)
-            return iter(())
-        return mirror
-
     # ── persistence helpers ──────────────────────────────────────────
 
     def _forgejo_name(self, source: RepoSource) -> str:
-        """The Forgejo-side repository name (``owner__name`` keeps it unique)."""
-        return f"{source.owner}__{source.name}"
+        """The Forgejo-side repository name: the full namespace, ``__``-joined.
+
+        Built from ``source.slug`` (not ``owner``/``name``) so two GitLab
+        subgroups that share a project name get different Forgejo repositories.
+        """
+        return source.slug.replace("/", "__")
 
     def _slug_of(self, job: Any) -> str:
         repo = self.session.get(self.Repo, _get(job, "repo_id"))
@@ -2092,7 +2131,6 @@ __all__ = [
     "RepoImportService",
     "RepoSource",
     "RequiresIssuesError",
-    "SourceUnreachableError",
     "SourceUrlError",
     "assign_fields",
     "default_slug",

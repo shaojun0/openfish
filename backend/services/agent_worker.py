@@ -62,6 +62,7 @@ from services.agent_runner import (
     mask_secrets,
     resolve_model_env,
 )
+from services.git_auth import git_host_of
 from services.review_policy import (
     SOURCE_FILE,
     builtin_default,
@@ -570,6 +571,35 @@ def _open_review_run(
         session.close()
 
 
+def _record_pr_link(
+    task_id: str, outcome: Any, sessions: Callable[[], SASession],
+) -> None:
+    """Persist the pull request a task opened — the merge webhook's finding link.
+
+    The runner's ``TaskSink`` cannot do this in production: the worker is
+    engine-driven and Flask-free, so the sink's global ``Session`` is unbound,
+    while the queue Worker (not the sink) owns the task row.  Best-effort, like
+    ``record_check_artifacts``: the PR is already open and the run already
+    succeeded, so losing the link must not fail the task.  The cost is that a
+    later merge writes no ``pr_url`` — the backfill fails closed rather than
+    stamping the wrong findings.
+    """
+    pr_url = str(getattr(outcome, "pr_url", None) or "")
+    if not pr_url:
+        return
+    session = sessions()
+    try:
+        task = session.get(AgentTask, int(task_id))
+        if task is not None:
+            task.pr_url = pr_url
+            session.commit()
+    except Exception as exc:  # noqa: BLE001 - a link is not worth a failed task
+        session.rollback()
+        logger.warning("could not record the PR link for task %s: %s", task_id, exc)
+    finally:
+        session.close()
+
+
 def _finish_review_run(run_id: int, outcome: Any, sessions: Callable[[], SASession]) -> None:
     """Record the run's policy hash, gate counts and terminal status."""
     session = sessions()
@@ -740,8 +770,10 @@ def build_handler(
             search_fn=build_search_fn(int(claimed.repo_id), sessions=sessions),
             open_pr_fn=build_open_pr_fn(slug, client=forgejo_client),
             # The single narrow credential for both the clone/push and the PR
-            # API; the compose env hands it in and nothing else.
+            # API; the compose env hands it in and nothing else.  The host pin
+            # means the credential helper only ever answers for this task's repo.
             git_token=runner_token(),
+            git_host=git_host_of(task.repo_url),
         )
         runner = AgentRunner(
             adapter=adapter,
@@ -754,6 +786,7 @@ def build_handler(
         )
         outcome = runner.run(task)
         _finish_review_run(run_id, outcome, sessions)
+        _record_pr_link(str(claimed.id), outcome, sessions)
         record_check_artifacts(
             sessions=sessions,
             repo_id=int(claimed.repo_id),

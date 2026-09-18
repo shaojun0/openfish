@@ -225,7 +225,9 @@ class _FakeAdapter:
             raise RuntimeError("no changes")
         return True
 
-    def push(self, workdir: Path, *, branch: str, commit_sha: str) -> None:
+    def push(
+        self, workdir: Path, *, branch: str, commit_sha: str, repo_url: str = "",
+    ) -> None:
         self.calls.append("push")
         self.pushed.append(branch)
 

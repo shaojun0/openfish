@@ -209,7 +209,9 @@ class FakeAdapter:
         self.emitted = dict(payload)
         return str(Path(workdir) / "result.json")
 
-    def push(self, workdir: Path, *, branch: str, commit_sha: str) -> None:
+    def push(
+        self, workdir: Path, *, branch: str, commit_sha: str, repo_url: str = "",
+    ) -> None:
         self.calls.append("push")
         self.pushed.append(branch)
 

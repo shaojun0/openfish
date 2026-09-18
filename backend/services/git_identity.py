@@ -668,10 +668,17 @@ class GitIdentityService:
     def revoke(self, user_id: int, *, delete_forgejo_user: bool = False) -> bool:
         """Cut a user's git access off; optionally remove the Forgejo account.
 
-        The remote token is always revoked and ``revoked_at`` written.  With
-        ``delete_forgejo_user=True`` the Forgejo account goes too, but the local
-        row stays (the deterministic mapping is worth keeping) — a later
-        :meth:`ensure` revives it under the same name.
+        Access is cut only when the **remote** token is gone.  A Forgejo access
+        token has no server-side TTL, so a swallowed deletion failure would leave
+        a deactivated account able to push forever; a failed deletion therefore
+        raises and leaves the row (and its ciphertext) untouched so the operation
+        can be retried against the same token name.  A ``404`` from Forgejo means
+        the token is already gone and is treated as success.
+
+        With ``delete_forgejo_user=True`` the Forgejo account is removed after a
+        successful token revoke.  That step is best-effort — access is already cut
+        — and the local row stays so a later :meth:`ensure` can revive the mapping
+        under the same name.
         """
         row = self.find(int(user_id))
         if row is None:
@@ -680,10 +687,10 @@ class GitIdentityService:
             try:
                 self.client.delete_token(row.forgejo_username, name=self.token_name)
             except (ForgejoError, GitIdentityError) as exc:
-                logger.warning(
-                    "could not revoke the Forgejo token for %s: %s",
-                    row.forgejo_username, exc,
-                )
+                raise GitIdentityError(
+                    f"无法撤销 {row.forgejo_username} 的 Forgejo token：{exc}；"
+                    "该 token 在 Forgejo 侧仍然有效，本地未标记为已撤销，请重试"
+                ) from exc
         if delete_forgejo_user:
             try:
                 self.client.delete_user(row.forgejo_username)

@@ -44,6 +44,7 @@ from .agent_hub import (
     RepoCommit,
     RepoIssue,
     ReviewRun,
+    WebhookDelivery,
     context_key,
     fingerprint,
 )
@@ -73,6 +74,7 @@ __all__ = [
     "RepoCommit",
     "RepoIssue",
     "ReviewRun",
+    "WebhookDelivery",
     # Agent Hub vocabularies and the fingerprint helper (§4.3 / §4.4)
     "CHECK_AUTHOR",
     "CHECK_RUN_STATE",

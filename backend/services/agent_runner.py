@@ -45,6 +45,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,6 +70,7 @@ from services.check_trust import (
     assess_assurance,
     render_two_suites,
 )
+from services.digest import sha256_text
 from services.fileio import write_json
 from services.format import utc_now_iso
 from services.gates import (
@@ -931,6 +933,9 @@ class DbTaskSink(TaskSink):
         from models.base import utcnow
 
         if not self._manage_status:
+            # Status, result_ref and the PR link all belong to the queue Worker
+            # here: this sink's session may not even be bound in a Flask-free
+            # worker process (see ``agent_worker._record_pr_link``).
             return
         session = self._db()
         task = self._task(task_id)
@@ -938,6 +943,8 @@ class DbTaskSink(TaskSink):
             return
         task.status = "done"
         task.result_ref = result_ref
+        if pr_url:
+            task.pr_url = pr_url
         task.finished_at = utcnow()
         session.commit()
 
@@ -1039,8 +1046,20 @@ class RunnerAdapter(Protocol):
     def emit(self, workdir: Path, *, payload: Mapping[str, Any]) -> str:
         """Write the result document; return its reference."""
 
-    def push(self, workdir: Path, *, branch: str, commit_sha: str) -> None:
-        """Push ``HEAD`` to *branch*.  The runner has already checked I4."""
+    def push(
+        self,
+        workdir: Path,
+        *,
+        branch: str,
+        commit_sha: str,
+        repo_url: str,
+    ) -> None:
+        """Push ``HEAD`` to *branch*, authenticating only against *repo_url*.
+
+        The destination is an explicit argument rather than the checkout's
+        ``origin``: untrusted code runs in the checkout before this step and can
+        rewrite ``remote.origin.url``.  The runner has already checked I4.
+        """
 
     def commit(
         self,
@@ -1091,6 +1110,7 @@ class SubprocessRunnerAdapter:
         open_pr_fn: Callable[..., str] | None = None,
         git_binary: str = "git",
         git_token: str | None = None,
+        git_host: str | None = None,
     ) -> None:
         self._scripts_dir = Path(scripts_dir) if scripts_dir is not None else None
         self._gate_executor = gate_executor
@@ -1103,8 +1123,18 @@ class SubprocessRunnerAdapter:
         #: explicitly (``FORGEJO_RUNNER_TOKEN``) rather than read from the
         #: ambient environment, so it can never silently be the admin token.
         self._git_token = (git_token or "").strip()
+        #: The only host that credential may be presented to (see git_auth).
+        self._git_host = (git_host or "").strip()
+        #: ``.git/config`` digest recorded right after clone; a push refuses to
+        #: run when the checkout has since rewritten it (``url.*.insteadOf``,
+        #: a planted ``credential.helper``, ``http.extraHeader`` …).
+        self._config_digest: str | None = None
 
     # -- credentials ---------------------------------------------------
+
+    def secrets(self) -> tuple[str, ...]:
+        """The credentials this adapter holds, so the runner can redact them."""
+        return (self._git_token,) if self._git_token else ()
 
     def set_model_env(self, env: Mapping[str, str]) -> None:
         self._model_env = {str(k): str(v) for k, v in (env or {}).items()}
@@ -1118,10 +1148,10 @@ class SubprocessRunnerAdapter:
         checkout.  The model credential is deliberately absent too — it belongs
         to the review command (see ``agent_worker.build_review_fn``), and git has
         no use for it.  The one authority git does receive is its own scoped
-        token, under ``OPENFISH_GIT_TOKEN``.
+        token, under ``OPENFISH_GIT_TOKEN``, pinned to its own host.
         """
         extra = {"GIT_TERMINAL_PROMPT": "0"}
-        extra.update(git_env(self._git_token))
+        extra.update(git_env(self._git_token, self._git_host))
         return sandbox_env(extra=extra)
 
     def _run(self, argv: Sequence[str], *, cwd: Path | None = None) -> str:
@@ -1143,7 +1173,7 @@ class SubprocessRunnerAdapter:
         if proc.returncode != 0:
             detail = mask_secrets(
                 (proc.stderr or proc.stdout or "").strip()[:300],
-                self._model_env.values(),
+                (*self._model_env.values(), self._git_token),
             )
             raise AgentRunnerError(
                 f"命令失败（{argv[0]}，exit {proc.returncode}）：{detail}"
@@ -1185,28 +1215,31 @@ class SubprocessRunnerAdapter:
                 self._git_binary, "-C", str(target),
                 "checkout", "--quiet", "--detach", "FETCH_HEAD",
             ])
-            return
-        try:
-            self._run([
-                self._git_binary, "-C", str(target), "fetch", "--quiet",
-                "--depth", "1", "origin", commit_sha,
-            ])
-            self._run([
-                self._git_binary, "-C", str(target),
-                "checkout", "--quiet", "--detach", "FETCH_HEAD",
-            ])
-        except AgentRunnerError:
-            # A forge that refuses to serve an arbitrary SHA (no
-            # ``uploadpack.allowReachableSHA1InWant``) still serves the default
-            # branch tip, which is the commit a push webhook reviews.
-            self._run([
-                self._git_binary, "-C", str(target),
-                "fetch", "--quiet", "--depth", "1", "origin",
-            ])
-            self._run([
-                self._git_binary, "-C", str(target),
-                "checkout", "--quiet", "--detach", commit_sha,
-            ])
+        else:
+            try:
+                self._run([
+                    self._git_binary, "-C", str(target), "fetch", "--quiet",
+                    "--depth", "1", "origin", commit_sha,
+                ])
+                self._run([
+                    self._git_binary, "-C", str(target),
+                    "checkout", "--quiet", "--detach", "FETCH_HEAD",
+                ])
+            except AgentRunnerError:
+                # A forge that refuses to serve an arbitrary SHA (no
+                # ``uploadpack.allowReachableSHA1InWant``) still serves the default
+                # branch tip, which is the commit a push webhook reviews.
+                self._run([
+                    self._git_binary, "-C", str(target),
+                    "fetch", "--quiet", "--depth", "1", "origin",
+                ])
+                self._run([
+                    self._git_binary, "-C", str(target),
+                    "checkout", "--quiet", "--detach", commit_sha,
+                ])
+        # The pristine config is the reference ``push`` checks against: the steps
+        # in between run repository-supplied code inside this checkout.
+        self._config_digest = self._config_hash(target)
 
     def read_context(self, workdir: Path) -> ReadContext:
         root = checkout_root(workdir)
@@ -1422,11 +1455,9 @@ class SubprocessRunnerAdapter:
             # produced by a command that could leave a ``.git/hooks/pre-commit``
             # behind (``git status`` never reports ``.git/**``), and a hook would
             # run *after* the path guard and could rewrite what gets committed.
-            hooks_dir = root / ".git" / "openfish-no-hooks"
-            hooks_dir.mkdir(parents=True, exist_ok=True)
             self._run([
                 self._git_binary, "-C", str(root),
-                "-c", f"core.hooksPath={hooks_dir}",
+                *self._no_hooks_args(root),
                 "-c", "user.name=openfish-agent",
                 "-c", "user.email=agent@openfish.invalid",
                 "commit", "--quiet", "--no-verify", "-m", message,
@@ -1439,20 +1470,79 @@ class SubprocessRunnerAdapter:
             )
         return True
 
-    def _remote_head(self, root: Path, branch: str) -> str:
-        """The remote SHA at ``refs/heads/<branch>``, or ``""`` when absent."""
+    @staticmethod
+    def _no_hooks_args(root: Path) -> list[str]:
+        """``-c core.hooksPath=…`` so a hook planted in the checkout never runs.
+
+        Git discovers hooks only from the working tree's ``.git`` directory, so
+        pointing ``core.hooksPath`` at an empty directory neutralises both
+        ``.git/hooks`` and any ``core.hooksPath`` an earlier step wrote into
+        ``.git/config``.  Every command that could run a repository hook (commit
+        *and* push) must carry this.
+
+        The directory is created **fresh with an unpredictable name** on every
+        call: the checkout is writable by the code that ran before this step, so
+        a fixed path inside it could have been replaced with a symlink to
+        ``.git/hooks`` — which would put the hooks straight back.
+        """
+        hooks_dir = Path(tempfile.mkdtemp(prefix="openfish-hooks-", dir=root.parent))
+        return ["-c", f"core.hooksPath={hooks_dir}"]
+
+    @staticmethod
+    def _config_hash(root: Path) -> str:
+        """Digest of the checkout's ``.git/config`` (``""`` when unreadable)."""
+        try:
+            text = (Path(root) / ".git" / "config").read_text(
+                encoding="utf-8", errors="replace"
+            )
+        except OSError:
+            return ""
+        return sha256_text(text)
+
+    def _assert_config_untouched(self, root: Path) -> None:
+        """Refuse to push when untrusted code rewrote ``.git/config``.
+
+        That file is read from *inside* the checkout, which repository-supplied
+        code runs in before this step.  A rewrite could redirect the push
+        (``url.*.insteadOf``), add an ``http.extraHeader``, or plant a
+        ``credential.helper`` git would hand the token to on ``store``.  Rather
+        than enumerate the dangerous keys, any change from the post-clone
+        digest is a violation.
+        """
+        current = self._config_hash(root)
+        if self._config_digest is None or current != self._config_digest:
+            raise AgentRunnerError(
+                "checkout 的 .git/config 在 clone 之后被改写，拒绝 push"
+                "（可能是 url.*.insteadOf / credential.helper / http.extraHeader 注入）"
+            )
+
+    def _remote_head(self, root: Path, repo_url: str, branch: str) -> str:
+        """The remote SHA at ``refs/heads/<branch>`` on *repo_url*, or ``""``."""
         output = self._run([
             self._git_binary, "-C", str(root),
-            "ls-remote", "--heads", "origin", f"refs/heads/{branch}",
+            "ls-remote", "--heads", repo_url, f"refs/heads/{branch}",
         ])
         parts = output.split()
         return parts[0] if parts else ""
 
-    def push(self, workdir: Path, *, branch: str, commit_sha: str) -> None:
+    def push(
+        self,
+        workdir: Path,
+        *,
+        branch: str,
+        commit_sha: str,
+        repo_url: str,
+    ) -> None:
         assert_pushable(branch)
         root = checkout_root(workdir)
+        # The destination is the task's repository, never the checkout's mutable
+        # ``origin``: untrusted code ran here between clone and push.
+        target = str(repo_url or "").strip()
+        if not target:
+            raise AgentRunnerError("push 缺少仓库地址（repo_url）")
+        self._assert_config_untouched(root)
         head = self._run([self._git_binary, "-C", str(root), "rev-parse", "HEAD"]).strip()
-        remote = self._remote_head(root, branch)
+        remote = self._remote_head(root, target, branch)
         if remote and head and remote == head:
             # The branch is already exactly what this run produced: a retry (or a
             # second replica) reached the publish step twice.  Pushing again would
@@ -1470,7 +1560,8 @@ class SubprocessRunnerAdapter:
         # ``refs/heads/agent/<name>`` ("您提供的目标不是一个完整的引用名称").
         self._run([
             self._git_binary, "-C", str(root),
-            "push", "--quiet", "origin", f"HEAD:refs/heads/{branch}",
+            *self._no_hooks_args(root),
+            "push", "--quiet", target, f"HEAD:refs/heads/{branch}",
         ])
 
     def open_pr(
@@ -1551,7 +1642,17 @@ class AgentRunner:
         self._model_env: dict[str, str] = self._resolve_model_env(
             models_file, model_route=model_route, health_path=health_path, fallback=model_env
         )
-        self._secrets: tuple[str, ...] = secret_values(self._model_env)
+        # The model credential plus whatever the adapter holds (its git token):
+        # the token rides in the git subprocess environment, so it must be in the
+        # same redaction set as the model key — logs, result.json and errors.
+        self._secrets: tuple[str, ...] = secret_values(self._model_env) + self._adapter_secrets()
+
+    def _adapter_secrets(self) -> tuple[str, ...]:
+        """Credentials the adapter holds, when it exposes them."""
+        getter = getattr(self._adapter, "secrets", None)
+        if not callable(getter):
+            return ()
+        return tuple(str(item) for item in getter() if item)
 
     @staticmethod
     def _resolve_model_env(
@@ -1856,7 +1957,12 @@ class AgentRunner:
                     result_ref = adapter.emit(workdir, payload=document)
                     self._sink.record_findings(task.task_id, result)
                     self._publish(branch=branch)
-                    adapter.push(workdir, branch=branch, commit_sha=task.commit_sha)
+                    adapter.push(
+                        workdir,
+                        branch=branch,
+                        commit_sha=task.commit_sha,
+                        repo_url=task.repo_url,
+                    )
                     self._publish(branch=branch)
                     if task.kind == "checks" and curator_report is not None:
                         # A curator proposal is labelled, so a reviewer (or an

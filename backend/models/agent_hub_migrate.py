@@ -56,7 +56,7 @@ from .agent_hub import (
 )
 from .agent_hub import AgentTask, CheckRun, CheckSuiteSnapshot, CheckValidation
 from .agent_hub import Finding, FindingEvent, FindingEvidence, GitIdentity
-from .agent_hub import ImportJob, Repo, RepoCommit, RepoIssue, ReviewRun
+from .agent_hub import ImportJob, Repo, RepoCommit, RepoIssue, ReviewRun, WebhookDelivery
 from .base import Base
 
 logger = logging.getLogger("cpypiserver.models.agent_hub_migrate")
@@ -70,7 +70,7 @@ logger = logging.getLogger("cpypiserver.models.agent_hub_migrate")
 AGENT_HUB_TABLES = (
     Repo, ImportJob, RepoIssue, RepoCommit, ReviewRun, AgentTask,
     CheckSuiteSnapshot, CheckValidation, CheckRun,
-    Finding, FindingEvent, FindingEvidence, GitIdentity,
+    Finding, FindingEvent, FindingEvidence, GitIdentity, WebhookDelivery,
 )
 
 #: ``(table, constraint name, column, required values)`` for CHECK constraints
@@ -113,9 +113,14 @@ _COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("repos", "updated_at", "TIMESTAMP"),
     # Cached per-repo review policy; NULL = "not read yet" (webhook defaults on).
     ("repos", "auto_review", "BOOLEAN"),
+    # Same cache for the curator trigger fields.
+    ("repos", "curator", "VARCHAR(16)"),
+    ("repos", "curator_min_interval_seconds", "INTEGER"),
     # Producer-side idempotency key; NULL on rows written before it existed,
     # which the dedup query treats as "no key" rather than as a match.
     ("agent_tasks", "dedup_key", "VARCHAR(200)"),
+    # The PR a task opened; the merge webhook's finding link.
+    ("agent_tasks", "pr_url", "VARCHAR(512)"),
 )
 
 #: ``(index name, table, column definitions, unique?)``.  ``IF NOT EXISTS`` is

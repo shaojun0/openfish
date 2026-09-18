@@ -123,10 +123,13 @@ def _build_models(*, with_partial: bool) -> tuple[dict[str, Any], MetaData]:
         synced_at = Column(DateTime(timezone=True))
         issue_count = Column(Integer, nullable=False, default=0)
         commit_count = Column(Integer, nullable=False, default=0)
-        # The webhook reads the cached per-repo review policy off this column
-        # (``None`` = "not read yet" → review on), so the substitute table must
-        # carry it or the server-side Repo query selects a missing column.
+        # The webhook reads the cached per-repo review policy off these columns
+        # (``None`` = "not read yet" → the documented default), so the substitute
+        # table must carry them or the server-side Repo query selects a missing
+        # column.
         auto_review = Column(Boolean, nullable=True)
+        curator = Column(String(16), nullable=True)
+        curator_min_interval_seconds = Column(Integer, nullable=True)
         created_at = Column(DateTime(timezone=True))
         updated_at = Column(DateTime(timezone=True))
 
@@ -185,6 +188,16 @@ def _build_models(*, with_partial: bool) -> tuple[dict[str, Any], MetaData]:
         source = Column(String(16))
         created_at = Column(DateTime(timezone=True))
         updated_at = Column(DateTime(timezone=True))
+
+    # The webhook route imports this model itself (it is not part of the S1 model
+    # injection), so the substitute only has to create the matching table.
+    class WebhookDelivery(Base):
+        __tablename__ = "webhook_deliveries"
+        id = Column(Integer, primary_key=True, autoincrement=True)
+        delivery_id = Column(String(128), unique=True, nullable=False, index=True)
+        repo_id = Column(Integer)
+        event = Column(String(32))
+        received_at = Column(DateTime(timezone=True))
 
     return {
         "Repo": Repo,
@@ -339,10 +352,16 @@ class FakeGit:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.limit = 0
+        self.commits: list[dict[str, Any]] = []
+        self.fail = ""
 
     def stream(self, forgejo_repo, *, branch="main", limit=5000):  # noqa: ANN001
         self.calls += 1
-        return iter(())
+        self.limit = int(limit)
+        if self.fail:
+            raise repo_import.RepoImportError(self.fail)
+        return iter(self.commits[: int(limit)])
 
     def close(self) -> None:
         return None
@@ -407,29 +426,39 @@ def scenario_parse() -> None:
     section("1 · source URL parsing (github / gitee / gitlab / bare https)")
     cases = [
         ("https://github.com/vllm-project/vllm", "github.com",
-         "vllm-project", "vllm", "github"),
+         "vllm-project", "vllm", "vllm-project/vllm", "github"),
         ("https://gitee.com/oschina/git-osc.git", "gitee.com",
-         "oschina", "git-osc", "gitee"),
+         "oschina", "git-osc", "oschina/git-osc", "gitee"),
         ("https://gitlab.com/gitlab-org/gitlab", "gitlab.com",
-         "gitlab-org", "gitlab", "gitlab"),
+         "gitlab-org", "gitlab", "gitlab-org/gitlab", "gitlab"),
+        # The full GitLab subgroup path is the identity: rebuilding the URL from
+        # the last two segments would clone a *different* repository.
         ("https://gitlab.com/group/subgroup/project.git#main", "gitlab.com",
-         "subgroup", "project", "gitlab"),
+         "subgroup", "project", "group/subgroup/project", "gitlab"),
         ("https://git.internal.example/team/tool.git", "git.internal.example",
-         "team", "tool", "git"),
+         "team", "tool", "team/tool", "git"),
         ("git@github.com:vllm-project/vllm.git", "github.com",
-         "vllm-project", "vllm", "github"),
+         "vllm-project", "vllm", "vllm-project/vllm", "github"),
     ]
-    for raw, host, owner, name, kind in cases:
+    for raw, host, owner, name, path, kind in cases:
         source = repo_import.parse_source(raw)
         ok = (
             source.host == host
             and source.owner == owner
             and source.name == name
             and source.kind == kind
-            and source.slug == f"{owner}/{name}"
-            and source.clone_url.endswith(f"/{owner}/{name}.git")
+            and source.path == path
+            and source.slug == path
+            and source.clone_url.endswith(f"/{path}.git")
         )
         check(f"{raw} → {source.slug}", ok, f"got {source!r}")
+
+    # Two subgroups with the same project name must not share an identity.
+    first = repo_import.parse_source("https://gitlab.com/group-a/sub/project")
+    second = repo_import.parse_source("https://gitlab.com/group-b/sub/project")
+    check("same-named projects in different subgroups stay distinct",
+          first.slug != second.slug and first.clone_url != second.clone_url,
+          f"{first.slug} vs {second.slug}")
 
     for bad in ("", "   ", "https://github.com/onlyowner", "ftp://host/a/b"):
         try:
@@ -737,6 +766,86 @@ def scenario_partial() -> None:
         harness.close()
 
 
+def scenario_commit_ceiling() -> None:
+    """The commit ceiling must set ``partial`` on both paths.
+
+    ``len(rows) > room`` is only true when the source handed back *more* rows
+    than there was room for; the git fallback used to ask for exactly
+    ``max_commits`` rows, so the comparison could never fire and a 100k-commit
+    repository finished ``done`` with 5 000 commits and ``partial=false``.
+    """
+    section("5b · IMPORT_MAX_COMMITS ⇒ partial=true (API and git fallback)")
+
+    # The API path: the ceiling stops the walk while another page is available.
+    harness = _Harness()
+    try:
+        harness.client.commits = make_commits(120)
+        config = harness.config.__class__(
+            **{**harness.config.__dict__, "max_commits": 50})
+        service = harness.service(config=config)
+        job = service.create_job("https://github.com/vllm-project/vllm")
+        outcome = service.run(job, max_steps=200)
+        session = harness.session()
+        check("an API walk cut at the ceiling ends partial",
+              outcome.status == "partial", outcome.status)
+        check("only the ceiling was stored",
+              session.query(harness.models["RepoCommit"]).count() == 50,
+              str(session.query(harness.models["RepoCommit"]).count()))
+    finally:
+        harness.close()
+
+    # The git fallback: the API has nothing, so the read-only copy answers.
+    harness = _Harness()
+    try:
+        harness.client.commits = []
+        harness.git.commits = make_commits(30)
+        config = harness.config.__class__(
+            **{**harness.config.__dict__, "max_commits": 10})
+        service = harness.service(config=config)
+        job = service.create_job("https://github.com/vllm-project/vllm")
+        outcome = service.run(job, max_steps=200)
+        session = harness.session()
+        check("a truncated git fallback ends partial",
+              outcome.status == "partial", outcome.status)
+        check("the fallback probes one past the ceiling",
+              harness.git.limit == 11, str(harness.git.limit))
+        check("the fallback stored only the ceiling",
+              session.query(harness.models["RepoCommit"]).count() == 10,
+              str(session.query(harness.models["RepoCommit"]).count()))
+    finally:
+        harness.close()
+
+    # An exact fit is complete, not truncated.
+    harness = _Harness()
+    try:
+        harness.client.commits = []
+        harness.git.commits = make_commits(10)
+        config = harness.config.__class__(
+            **{**harness.config.__dict__, "max_commits": 10})
+        service = harness.service(config=config)
+        job = service.create_job("https://github.com/vllm-project/vllm")
+        outcome = service.run(job, max_steps=200)
+        check("an exact fit is done, not partial", outcome.status == "done",
+              outcome.status)
+    finally:
+        harness.close()
+
+    # Both sources failing must fail the job, not report an empty history.
+    harness = _Harness()
+    try:
+        harness.client.commits = []
+        harness.git.fail = "git is down"
+        service = harness.service()
+        job = service.create_job("https://github.com/vllm-project/vllm")
+        outcome = service.run(job, max_steps=200)
+        check("API and git both unavailable fails the job",
+              outcome.status == "failed", outcome.status)
+        check("the failure names the commit source",
+              "git 回退" in str(outcome.error or ""), str(outcome.error))
+    finally:
+        harness.close()
+
+
 # ── 6. webhook HMAC ──────────────────────────────────────────────────
 
 SECRET = "test-webhook-secret"
@@ -912,6 +1021,118 @@ def scenario_webhook() -> None:
     # -- the HTTP route, if Flask can import it here
     check("route declares itself public (HMAC is the guard)",
           _route_is_public(), "security=[] missing")
+
+
+def scenario_repo_resolution() -> None:
+    """An ambiguous webhook→repo match is refused, never guessed."""
+    section("6b · webhook repo resolution: ambiguity is not a coin flip")
+    from routes.repo_webhook import resolve_repo
+
+    harness = _Harness()
+    try:
+        session = harness.session()
+        repo_cls = harness.models["Repo"]
+        event = parse_event("push", _push_payload("main"))
+        unique = repo_cls(slug=event.repo_slug, forgejo_repo=event.forgejo_repo)
+        session.add(unique)
+        session.commit()
+        resolved = resolve_repo(session, event)
+        check("a unique match resolves",
+              getattr(resolved, "id", None) == unique.id,
+              str(getattr(resolved, "slug", None)))
+
+        # A second row that also answers the payload (same forgejo_repo, another
+        # slug) used to be resolved by an arbitrary ``first()``.
+        clash = repo_cls(slug="openfish/other-name", forgejo_repo=event.forgejo_repo)
+        session.add(clash)
+        session.commit()
+        check("two matching rows resolve to None instead of an arbitrary row",
+              resolve_repo(session, event) is None)
+    finally:
+        harness.close()
+
+
+def scenario_pr_link() -> None:
+    """A merge stamps only the findings the PR's own review run produced."""
+    section("6c · merged PR → pr_url only on linked findings")
+    from models.agent_hub import AgentTask, Finding, Repo, ReviewRun
+    from models.agent_hub_migrate import ensure_schema
+    from routes.repo_webhook import backfill_pr_url
+
+    harness = _Harness()
+    try:
+        ensure_schema(harness.engine)
+        session = harness.session()
+        repo = Repo(slug="openfish/linked", kind="workspace")
+        session.add(repo)
+        session.commit()
+
+        url = "https://forgejo.example/openfish/linked/pulls/7"
+        opener = AgentTask(
+            repo_id=repo.id, kind="fix", status="done", payload="{}", pr_url=url,
+        )
+        session.add(opener)
+        session.commit()
+        opened_run = ReviewRun(
+            repo_id=repo.id, agent_task_id=opener.id, commit_sha="a" * 40, status="ok",
+        )
+        session.add(opened_run)
+        session.commit()
+
+        other = AgentTask(repo_id=repo.id, kind="review", status="done", payload="{}")
+        session.add(other)
+        session.commit()
+        other_run = ReviewRun(
+            repo_id=repo.id, agent_task_id=other.id, commit_sha="b" * 40, status="ok",
+        )
+        session.add(other_run)
+        session.commit()
+
+        linked = Finding(
+            repo_id=repo.id, fingerprint="f" * 64, rule_id="r", level="debt",
+            severity="medium", file_path="a.py", symbol="s", title="linked",
+            first_seen_run_id=opened_run.id, last_seen_run_id=opened_run.id,
+        )
+        unrelated = Finding(
+            repo_id=repo.id, fingerprint="e" * 64, rule_id="r", level="debt",
+            severity="medium", file_path="b.py", symbol="s", title="unrelated",
+            first_seen_run_id=other_run.id, last_seen_run_id=other_run.id,
+        )
+        session.add_all([linked, unrelated])
+        session.commit()
+
+        updated = backfill_pr_url(session, repo.id, 7, url)
+        check("only the linked finding is stamped", updated == 1, str(updated))
+        session.expire_all()
+        check("the linked finding carries the PR url",
+              session.get(Finding, linked.id).pr_url == url)
+        check("an unrelated finding is left alone",
+              session.get(Finding, unrelated.id).pr_url is None, "stamped by mistake")
+
+        check("a PR this platform did not open writes nothing",
+              backfill_pr_url(
+                  session, repo.id, 8, "https://forgejo.example/openfish/linked/pulls/8",
+              ) == 0)
+
+        # The producer side: the worker (not the sink) records the link, because
+        # the worker process is Flask-free and its sink session is unbound.
+        from services.agent_worker import _record_pr_link
+
+        worker_opened = AgentTask(
+            repo_id=repo.id, kind="fix", status="done", payload="{}",
+        )
+        session.add(worker_opened)
+        session.commit()
+
+        class _Outcome:
+            pr_url = "https://forgejo.example/openfish/linked/pulls/9"
+
+        _record_pr_link(str(worker_opened.id), _Outcome(), harness.Session)
+        session.expire_all()
+        check("the worker persists the PR link onto the task row",
+              session.get(AgentTask, worker_opened.id).pr_url == _Outcome.pr_url)
+    finally:
+        harness.close()
 
 
 def _route_is_public() -> bool:
@@ -1150,6 +1371,7 @@ def scenario_queue_delivery() -> None:
             headers = {
                 "Content-Type": "application/json",
                 "X-Forgejo-Event": "push",
+                "X-Forgejo-Delivery": "gate-delivery-1",
                 "X-Forgejo-Signature": compute_signature(
                     harness.config.webhook_secret, body_bytes),
             }
@@ -1164,6 +1386,19 @@ def scenario_queue_delivery() -> None:
                   and result.get("queued")
                   and result["queued"][0]["delivered"] is True,
                   json.dumps(result))
+
+            # The HMAC only proves who signed it: the same delivery arriving
+            # twice must not queue a second review (dedup_key alone stops at the
+            # active task, so a replay after the task finishes used to re-run).
+            replay = app.test_client().post(
+                "/api/v1/repos/webhook", data=body_bytes, headers=headers
+            )
+            replay_body = replay.get_json() or {}
+            check("a replayed delivery is not accepted twice",
+                  replay.status_code == 200
+                  and replay_body.get("duplicate") is True
+                  and replay_body.get("handled") is False,
+                  json.dumps(replay_body))
 
             with harness.engine.connect() as conn:
                 rows = conn.execute(text(
@@ -1304,6 +1539,60 @@ def scenario_enqueue_admission() -> None:
     engine.dispose()
 
 
+def scenario_policy_source() -> None:
+    """The repo policy file is honored only where the platform owns the repo.
+
+    I6: ``.agent/review-policy.yml`` is repository *content*, so an imported
+    upstream mirror must not be able to change what the platform does.  A
+    platform-owned ``workspace`` is the documented case where the file governs,
+    and both trigger readers (auto_review, curator) must read the same cached row.
+    """
+    from routes.repo_webhook import _repo_curator_policy, _repo_policy_reader
+    from services.review_policy import CURATOR_BOOTSTRAP, DEFAULT_CURATOR_MIN_INTERVAL_SECONDS
+
+    class _PolicyClient:
+        def read_file(self, forgejo_repo: str, path: str) -> str:
+            return (
+                'defaults:\n  auto_review: false\n  curator: "off"\n'
+                "  curator_min_interval_seconds: 0\n"
+            )
+
+    harness = _Harness()
+    try:
+        service = harness.service()
+        session = service.session
+        repo_cls = harness.models["Repo"]
+        upstream = repo_cls(
+            slug="up/o", kind="upstream", auto_review=True,
+            curator="auto", curator_min_interval_seconds=99,
+        )
+        workspace = repo_cls(slug="up/w", kind="workspace")
+        session.add_all([upstream, workspace])
+        session.commit()
+
+        service.client = _PolicyClient()
+        service._refresh_repo_policy(upstream, "openfish/up__o")
+        service._refresh_repo_policy(workspace, "openfish/up__w")
+        session.commit()
+
+        check("an upstream mirror's policy file cannot change platform policy",
+              upstream.auto_review is None and upstream.curator is None
+              and upstream.curator_min_interval_seconds is None,
+              f"auto_review={upstream.auto_review} curator={upstream.curator}")
+        check("a workspace's own policy file is cached for the webhook",
+              workspace.auto_review is False and workspace.curator == "off"
+              and workspace.curator_min_interval_seconds == 0,
+              f"auto_review={workspace.auto_review} curator={workspace.curator}")
+        check("auto_review and curator come from the same cached row",
+              _repo_policy_reader(workspace)() is False
+              and _repo_curator_policy(workspace) == ("off", 0))
+        check("a row that was never read falls back to the documented defaults",
+              _repo_curator_policy(repo_cls(slug="never-read"))
+              == (CURATOR_BOOTSTRAP, DEFAULT_CURATOR_MIN_INTERVAL_SECONDS))
+    finally:
+        harness.close()
+
+
 def main() -> int:
     print("── Agent Hub · repository slice (S1) offline gate " + "─" * 12)
     print(f"   repo root: {REPO_ROOT}")
@@ -1313,11 +1602,15 @@ def main() -> int:
         scenario_idempotent_upsert,
         scenario_resume,
         scenario_partial,
+        scenario_commit_ceiling,
         scenario_webhook,
+        scenario_repo_resolution,
+        scenario_pr_link,
         scenario_http,
         scenario_queue_delivery,
         scenario_import_phase_vocabulary,
         scenario_enqueue_admission,
+        scenario_policy_source,
     ):
         try:
             scenario()
