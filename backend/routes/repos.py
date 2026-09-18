@@ -15,6 +15,10 @@ Endpoints
 ``GET  /api/v1/repos/<slug>/issues``           mirrored issues — ``repo:read``
 ``GET  /api/v1/repos/<slug>/issues/<number>``  one issue, body + comments — ``repo:read``
 ``POST /api/v1/repos/<slug>/sync``             incremental sync → ImportJob — ``repo:write``
+``GET  /api/v1/repos/<slug>/runner``           the repo's logical runner — ``repo:read``
+``PATCH /api/v1/repos/<slug>/runner``          update runner settings — ``repo:write``
+``PUT  /api/v1/repos/<slug>/runner/credential``  seal a repo-scoped token — ``repo:write``
+``DELETE /api/v1/repos/<slug>/runner/credential`` clear it — ``repo:write``
 ``GET  /api/v1/imports/<job_id>``              progress, for the console to poll — ``repo:read``
 
 Two contract details are load-bearing.
@@ -42,6 +46,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 
 from flask import Blueprint, current_app, jsonify, request
 from sqlalchemy import or_
@@ -51,7 +56,8 @@ from auth.decorators import current_sub, current_user_id, require_permission
 from auth.permissions import REPO_PUSH, REPO_READ, REPO_WRITE
 from errors import BadRequestError, PypiError
 from openapi import api_operation, errors, json_body, ok
-from services import git_identity, repo_import
+from services import git_identity, repo_import, repo_runner
+from services.agent_runner import mask_secrets
 
 logger = logging.getLogger("cpypiserver.routes.repos")
 
@@ -295,6 +301,111 @@ _SYNC_REQUEST = {
     }),
 }
 
+_RUNNER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "id": {
+            "type": ["integer", "null"],
+            "description": "Runner row id; null until a write materialises the row",
+        },
+        "repo_id": {"type": "integer"},
+        "name": {"type": "string"},
+        "enabled": {"type": "boolean"},
+        "max_concurrency": {
+            "type": "integer",
+            "description": "0 = inherit `AGENT_MAX_IN_FLIGHT_PER_REPO`",
+        },
+        "workspace_subdir": {
+            "type": "string",
+            "description": "Relative to `AGENT_WORK_ROOT`; '' = `runners/<id>`",
+        },
+        "egress_policy": {
+            "type": "string",
+            "enum": list(repo_runner.RUNNER_EGRESS_POLICIES),
+        },
+        "egress_allowlist": {
+            "type": ["string", "null"],
+            "description": "Comma-separated hosts; meaningful only for `allowlist`",
+        },
+        "credential_kind": {
+            "type": "string",
+            "enum": list(repo_runner.RUNNER_CREDENTIAL_KINDS),
+            "description": "shared = the deployment token; repo = a sealed per-repo token",
+        },
+        "credential_username": {"type": ["string", "null"]},
+        "has_credential": {
+            "type": "boolean",
+            "description": (
+                "True when a repo-scoped token is sealed. The ciphertext itself "
+                "is never returned."
+            ),
+        },
+        "credential_expires_at": {"type": ["string", "null"]},
+        "credential_rotated_at": {"type": ["string", "null"]},
+        "last_task_at": {"type": ["string", "null"]},
+        "created_at": {"type": ["string", "null"]},
+        "updated_at": {"type": ["string", "null"]},
+    },
+}
+
+_RUNNER_PATCH_REQUEST = {
+    "required": True,
+    "content": json_body({
+        "type": "object",
+        "properties": {
+            "enabled": {"type": "boolean"},
+            "max_concurrency": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "0 = inherit `AGENT_MAX_IN_FLIGHT_PER_REPO`",
+            },
+            "egress_policy": {
+                "type": "string",
+                "enum": list(repo_runner.RUNNER_EGRESS_POLICIES),
+            },
+            "egress_allowlist": {
+                "type": "string",
+                "description": (
+                    "Comma-separated hosts; an empty string clears the allowlist"
+                ),
+            },
+            "workspace_subdir": {
+                "type": "string",
+                "description": (
+                    "Relative path under `AGENT_WORK_ROOT`; an empty string "
+                    "restores the `runners/<id>` default"
+                ),
+            },
+        },
+    }),
+}
+
+_RUNNER_CREDENTIAL_REQUEST = {
+    "required": True,
+    "content": json_body({
+        "type": "object",
+        "properties": {
+            "token": {
+                "type": "string",
+                "description": (
+                    "Forgejo access token. Sealed with Fernet "
+                    "(`GIT_IDENTITY_KEY`); **never** returned, logged or stored "
+                    "in clear."
+                ),
+            },
+            "username": {
+                "type": "string",
+                "description": "Optional; the conventional git username when omitted",
+            },
+            "expires_at": {
+                "type": "string",
+                "description": "Optional ISO-8601 UTC expiry of the token",
+            },
+        },
+        "required": ["token"],
+    }),
+}
+
 _SLUG_PARAM = {
     "name": "slug",
     "in": "path",
@@ -337,6 +448,16 @@ def _service() -> repo_import.RepoImportService:
 
 def _models() -> dict:
     return repo_import.models()
+
+
+def _runner_service() -> repo_runner.RepoRunnerService:
+    """A ``RepoRunnerService`` on the process-wide scoped session.
+
+    ``_session`` is the factory, not an instance, because the service owns its
+    own transaction boundary (create/update/commit) exactly as
+    ``RepoImportService`` does above.
+    """
+    return repo_runner.RepoRunnerService(_session)
 
 
 def _repo_or_404(slug: str):
@@ -485,6 +606,24 @@ def _paging() -> tuple[int, int]:
     per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
     per_page = max(1, min(per_page, MAX_PER_PAGE))
     return page, per_page
+
+
+def _credential_expiry(raw: object) -> datetime | None:
+    """An optional ISO-8601 ``expires_at`` from the credential body.
+
+    ``None`` means "no expiry recorded"; anything present but unparseable is a
+    ``400`` rather than a silently dropped field.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        raise BadRequestError("expires_at 必须是 ISO-8601 时间字符串")
+    try:
+        return datetime.fromisoformat(raw.strip())
+    except ValueError as exc:
+        raise BadRequestError(
+            "expires_at 必须是 ISO-8601 时间（如 2026-01-01T00:00:00+00:00）"
+        ) from exc
 
 
 def _conflict(exc: IntegrityError, slug: str) -> PypiError:
@@ -860,6 +999,174 @@ def sync_repo(slug: str):
     except Exception as exc:  # noqa: BLE001 - domain error → HTTP status
         raise _import_failed(exc) from exc
     return jsonify(repo_import.job_payload(job, repo_slug=repo.slug)), 202
+
+
+# ── Per-repo runners ─────────────────────────────────────────────────
+# One logical runner per repository (``repo_runners``).  These four routes are
+# the console's face on that configuration; ``services.repo_runner`` owns
+# validation, the Fernet sealing and the shared-token fallback, so this module
+# only translates HTTP shape into service calls.  The sealed ciphertext is
+# never rendered: ``RepoRunner.to_dict`` exposes ``has_credential`` instead.
+
+@repo_bp.route("/api/v1/repos/<path:slug>/runner")
+@require_permission(REPO_READ)
+@api_operation(
+    summary="Repository runner configuration",
+    description=(
+        "The logical runner this repository owns: the credential source "
+        "(`shared` = the deployment-wide `FORGEJO_RUNNER_TOKEN`, `repo` = a "
+        "token sealed for this repository), the workspace subdirectory, the "
+        "egress policy and the concurrency limit.\n\n"
+        "Reading is **pure**: a repository nobody configured has no row yet, and "
+        "this returns the platform defaults (`id: null`, `workspace_subdir: \"\"`) "
+        "without creating one. A later `PATCH` (or the first task's workspace "
+        "resolution) materialises the row, and a read never overwrites settings. "
+        "The sealed credential is never returned — `has_credential` says only "
+        "whether one exists."
+    ),
+    tags=["Repositories"],
+    parameters=[_SLUG_PARAM],
+    responses={
+        "200": ok("The repository's runner", _RUNNER_SCHEMA),
+        **errors("401", "403", "404", "500"),
+    },
+)
+def get_runner(slug: str):
+    repo = _repo_or_404(slug)
+    return jsonify(_runner_service().document(repo.id, name=repo.slug))
+
+
+@repo_bp.route("/api/v1/repos/<path:slug>/runner", methods=["PATCH"])
+@require_permission(REPO_WRITE)
+@api_operation(
+    summary="Update repository runner configuration",
+    description=(
+        "Partial update of the runner settings. Every field is optional; an "
+        "omitted field keeps its current value. `max_concurrency: 0` and "
+        "`workspace_subdir: \"\"` mean \"inherit the platform default\" "
+        "(`AGENT_MAX_IN_FLIGHT_PER_REPO` and `runners/<id>`); "
+        "`egress_allowlist: \"\"` clears the allowlist.\n\n"
+        "An unknown `egress_policy`, a negative `max_concurrency`, or a "
+        "`workspace_subdir` that could escape `AGENT_WORK_ROOT` is a `400` and "
+        "changes nothing — validation happens before the write."
+    ),
+    tags=["Repositories"],
+    parameters=[_SLUG_PARAM],
+    request_body=_RUNNER_PATCH_REQUEST,
+    responses={
+        "200": ok("The updated runner", _RUNNER_SCHEMA),
+        **errors("400", "401", "403", "404", "500"),
+    },
+)
+def update_runner(slug: str):
+    repo = _repo_or_404(slug)
+    payload = _json_body()
+
+    changes: dict = {}
+    if "enabled" in payload:
+        if not isinstance(payload["enabled"], bool):
+            raise BadRequestError("enabled 必须是布尔值")
+        changes["enabled"] = payload["enabled"]
+    if "max_concurrency" in payload:
+        value = payload["max_concurrency"]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise BadRequestError("max_concurrency 必须是整数")
+        changes["max_concurrency"] = value
+    if "egress_policy" in payload:
+        if not isinstance(payload["egress_policy"], str):
+            raise BadRequestError("egress_policy 必须是字符串")
+        changes["egress_policy"] = payload["egress_policy"]
+    if "egress_allowlist" in payload:
+        if not isinstance(payload["egress_allowlist"], str):
+            raise BadRequestError("egress_allowlist 必须是字符串（逗号分隔；空串清除）")
+        changes["egress_allowlist"] = payload["egress_allowlist"]
+    if "workspace_subdir" in payload:
+        if not isinstance(payload["workspace_subdir"], str):
+            raise BadRequestError("workspace_subdir 必须是字符串")
+        changes["workspace_subdir"] = payload["workspace_subdir"]
+
+    try:
+        runner = _runner_service().update(repo.id, **changes)
+    except repo_runner.RepoRunnerError as exc:
+        raise BadRequestError(str(exc)) from exc
+    logger.info("runner %s updated for repo %s", runner.id, slug)
+    return jsonify(runner.to_dict())
+
+
+@repo_bp.route("/api/v1/repos/<path:slug>/runner/credential", methods=["PUT"])
+@require_permission(REPO_WRITE)
+@api_operation(
+    summary="Set the repository's runner credential",
+    description=(
+        "Seals a Forgejo token for this repository with Fernet "
+        "(`GIT_IDENTITY_KEY`) and switches the runner to the `repo` credential "
+        "kind. The token is **never** echoed back and never stored in "
+        "clear: the response is the runner document, whose "
+        "`has_credential: true` confirms the write.\n\n"
+        "`expires_at` is an optional ISO-8601 expiry; `username` is optional "
+        "(Forgejo accepts a token as the password with the conventional "
+        "`x-access-token` login). With `GIT_IDENTITY_KEY` unset the endpoint "
+        "answers **503** and stores nothing — it never falls back to a "
+        "plaintext credential."
+    ),
+    tags=["Repositories"],
+    parameters=[_SLUG_PARAM],
+    request_body=_RUNNER_CREDENTIAL_REQUEST,
+    responses={
+        "200": ok("The runner with the sealed credential", _RUNNER_SCHEMA),
+        **errors("400", "401", "403", "404", "503", "500"),
+    },
+)
+def put_runner_credential(slug: str):
+    repo = _repo_or_404(slug)
+    payload = _json_body()
+
+    token = payload.get("token")
+    if not isinstance(token, str) or not token.strip():
+        raise BadRequestError("token 不能为空")
+    username = payload.get("username")
+    if username is None:
+        username = ""
+    if not isinstance(username, str):
+        raise BadRequestError("username 必须是字符串")
+    expires_at = _credential_expiry(payload.get("expires_at"))
+
+    try:
+        runner = _runner_service().set_credential(
+            repo.id, token=token, username=username, expires_at=expires_at,
+        )
+    except repo_runner.RepoRunnerError as exc:
+        # A missing GIT_IDENTITY_KEY (or unusable key material) is a deployment
+        # gap: 503, and this module never falls back to a plaintext write.  Mask
+        # the token in case a future service message ever quotes it.
+        detail = mask_secrets(str(exc), [token])
+        raise PypiError(f"runner 凭据未写入：{detail}", status_code=503) from exc
+    logger.info("runner credential stored for repo %s", slug)
+    return jsonify(runner.to_dict())
+
+
+@repo_bp.route("/api/v1/repos/<path:slug>/runner/credential", methods=["DELETE"])
+@require_permission(REPO_WRITE)
+@api_operation(
+    summary="Clear the repository's runner credential",
+    description=(
+        "Drops the sealed repo-scoped token and falls back to the "
+        "deployment-wide `FORGEJO_RUNNER_TOKEN` (the `shared` credential "
+        "kind). Idempotent: clearing a repository that never had its own "
+        "credential is a `200`, not a `404`."
+    ),
+    tags=["Repositories"],
+    parameters=[_SLUG_PARAM],
+    responses={
+        "200": ok("The runner back on the shared credential", _RUNNER_SCHEMA),
+        **errors("401", "403", "404", "500"),
+    },
+)
+def delete_runner_credential(slug: str):
+    repo = _repo_or_404(slug)
+    runner = _runner_service().clear_credential(repo.id)
+    logger.info("runner credential cleared for repo %s", slug)
+    return jsonify(runner.to_dict())
 
 
 # ── Imports ──────────────────────────────────────────────────────────

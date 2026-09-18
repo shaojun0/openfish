@@ -73,7 +73,7 @@ from sqlalchemy import create_engine, event, func, select, update
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
 
-from models.agent_hub import TASK_KIND, TASK_STATUS, AgentTask
+from models.agent_hub import TASK_KIND, TASK_STATUS, AgentTask, RepoRunner
 
 logger = logging.getLogger("cpypiserver.agent_queue")
 
@@ -101,7 +101,8 @@ ACTIVE_TASK_STATUSES: tuple[str, ...] = ("queued", "leased", "running")
 
 #: Environment knob for :meth:`AgentQueue.enqueue`'s per-repo ceiling.  ``0``
 #: (the library default) means unlimited; a deployment sets a small number so one
-#: noisy repository cannot fill the single global queue and starve the rest.
+#: noisy repository cannot fill the single global queue and starve the rest.  A
+#: repository whose runner sets ``max_concurrency > 0`` overrides this value.
 ENV_MAX_IN_FLIGHT_PER_REPO = "AGENT_MAX_IN_FLIGHT_PER_REPO"
 
 
@@ -112,6 +113,26 @@ def configured_max_in_flight_per_repo() -> int:
     except ValueError:
         return 0
     return max(0, value)
+
+
+def _runner_runnable():
+    """SQL predicate: the task's repository has no *disabled* runner row.
+
+    Correlated on ``repo_id`` (the repository's **current** configuration), not
+    on the task's snapshotted ``runner_id``.  Disabling a runner is therefore
+    immediate for every queued task — including legacy rows written before the
+    runner row existed (``runner_id IS NULL``) — and a repo with no runner row
+    at all has no disabled row, so its tasks stay claimable.  Shared by
+    :meth:`AgentQueue.claim` and :meth:`AgentQueue.stats` so the two cannot drift.
+    """
+    return ~(
+        select(RepoRunner.id)
+        .where(
+            RepoRunner.repo_id == AgentTask.repo_id,
+            RepoRunner.enabled.is_(False),
+        )
+        .exists()
+    )
 
 
 # ── Values exchanged with callers ────────────────────────────────────
@@ -145,12 +166,16 @@ class ClaimedTask:
     max_attempts: int
     priority: int
     lease: Lease
+    #: The repository's logical runner row, or ``None`` for a legacy task that
+    #: was queued before runners existed (``agent_tasks.runner_id IS NULL``).
+    runner_id: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready view (payload already parsed) for the worker and the API."""
         return {
             "id": self.id,
             "repo_id": self.repo_id,
+            "runner_id": self.runner_id,
             "kind": self.kind,
             "payload": self.payload,
             "attempts": self.attempts,
@@ -381,6 +406,13 @@ class AgentQueue:
         already at its in-flight ceiling.  Callers distinguish "queued (id > 0)"
         from "suppressed (0)" instead of mistaking a storm for success.
 
+        The ceiling is, in order of precedence: an explicit
+        *max_in_flight_per_repo* argument, the repository's runner
+        ``max_concurrency`` when it is greater than 0, then
+        ``AGENT_MAX_IN_FLIGHT_PER_REPO`` (``configured_max_in_flight_per_repo``).
+        The task is bound to the repository's runner row when one exists, so a
+        worker can honour that runner's configuration.
+
         *dedup_key* is the producer's idempotency token (a push sha, an issue
         number).  The check is not a unique constraint: two workers racing can
         still both insert, which is the same at-least-once posture as the rest of
@@ -391,10 +423,8 @@ class AgentQueue:
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
         key = str(dedup_key or "").strip()
-        ceiling = (
-            int(max_in_flight_per_repo)
-            if max_in_flight_per_repo is not None
-            else configured_max_in_flight_per_repo()
+        explicit_ceiling = (
+            int(max_in_flight_per_repo) if max_in_flight_per_repo is not None else None
         )
         with self.session() as session:
             if key:
@@ -412,6 +442,17 @@ class AgentQueue:
                         "active task %s)", kind, repo_id, key, duplicate[0],
                     )
                     return 0
+            # The logical runner owns this repo's settings (0 = inherit); it is
+            # resolved before the ceiling check and stamped onto the task.
+            runner = session.execute(
+                select(RepoRunner).where(RepoRunner.repo_id == int(repo_id))
+            ).scalar_one_or_none()
+            if explicit_ceiling is not None:
+                ceiling = explicit_ceiling
+            elif runner is not None and int(runner.max_concurrency) > 0:
+                ceiling = int(runner.max_concurrency)
+            else:
+                ceiling = configured_max_in_flight_per_repo()
             if ceiling > 0:
                 active = session.execute(
                     select(func.count()).select_from(AgentTask).where(
@@ -427,6 +468,7 @@ class AgentQueue:
                     return 0
             task = AgentTask(
                 repo_id=repo_id,
+                runner_id=int(runner.id) if runner is not None else None,
                 kind=kind,
                 status="queued",
                 payload=_json(payload),
@@ -450,14 +492,22 @@ class AgentQueue:
 
         "Best" is ``priority DESC, created_at ASC`` among the rows whose
         ``scheduled_at`` has arrived — served by
-        ``index(status, priority, created_at)``.  Returns ``None`` when there is
-        nothing to do, which is the worker's signal to sleep, not an error.
+        ``index(status, priority, created_at)``.  A task whose repository's
+        runner is disabled is skipped entirely (a disabled runner must not
+        execute), decided from the repository's *current* row rather than the
+        task's snapshot, so disabling is immediate for legacy ``runner_id IS
+        NULL`` tasks too; a repository with no runner row stays claimable.
+        Returns ``None`` when there is nothing to do, which is the worker's
+        signal to sleep, not an error.
 
         Callers should prefer :meth:`lease`, which also starts the heartbeat.
         """
         lease_for = float(lease_seconds if lease_seconds is not None else self.lease_seconds)
         now = _now()
         expires = now + timedelta(seconds=lease_for)
+        # Portable on both backends: a NOT EXISTS against the repository's own
+        # runner row, so no dialect-specific raw SQL is needed.
+        runner_runnable = _runner_runnable()
 
         with self.session() as session:
             self._serialise_writes(session)
@@ -467,6 +517,7 @@ class AgentQueue:
                     .where(
                         AgentTask.status == "queued",
                         (AgentTask.scheduled_at.is_(None)) | (AgentTask.scheduled_at <= now),
+                        runner_runnable,
                     )
                     .order_by(AgentTask.priority.desc(), AgentTask.created_at.asc())
                     .limit(1)
@@ -478,6 +529,7 @@ class AgentQueue:
                     .where(
                         AgentTask.status == "queued",
                         (AgentTask.scheduled_at.is_(None)) | (AgentTask.scheduled_at <= now),
+                        runner_runnable,
                     )
                     .order_by(AgentTask.priority.desc(), AgentTask.created_at.asc())
                     .limit(1)
@@ -494,6 +546,7 @@ class AgentQueue:
             claimed = ClaimedTask(
                 id=int(task.id),
                 repo_id=int(task.repo_id),
+                runner_id=int(task.runner_id) if task.runner_id is not None else None,
                 kind=task.kind,
                 payload=task.payload_dict(),
                 attempts=int(task.attempts),
@@ -784,7 +837,12 @@ class AgentQueue:
             return task.to_dict() if task is not None else None
 
     def stats(self, *, now: datetime | None = None) -> QueueStats:
-        """Counts by status, plus how many are claimable and how many expired."""
+        """Counts by status, plus how many are claimable and how many expired.
+
+        ``ready`` applies the same disabled-runner predicate as :meth:`claim`,
+        so a task skipped because its repository's runner is off is not counted
+        as claimable.
+        """
         moment = _now() if now is None else _as_utc(now)
         with self.session() as session:
             rows = session.execute(
@@ -795,6 +853,7 @@ class AgentQueue:
                 select(func.count()).select_from(AgentTask).where(
                     AgentTask.status == "queued",
                     (AgentTask.scheduled_at.is_(None)) | (AgentTask.scheduled_at <= moment),
+                    _runner_runnable(),
                 )
             )
             expired = session.scalar(

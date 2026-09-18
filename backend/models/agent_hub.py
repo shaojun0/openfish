@@ -216,6 +216,103 @@ class Repo(Base):
         return f"<Repo {self.slug}>"
 
 
+# ── repo_runners ─────────────────────────────────────────────────────
+
+class RepoRunner(Base):
+    """The logical runner one repository gets: credential, workspace, limits.
+
+    The process pool is still shared (no docker socket, no per-repo daemon);
+    what is per-repo is the *configuration* a pooled worker resolves when it
+    picks up a task for this repository.  Exactly one row per repository —
+    ``repo_id`` is unique — so there are no two answers to "which credential
+    does repo X use?".
+
+    The credential is the load-bearing half.  ``credential_kind`` is ``shared``
+    by default, meaning "use the deployment-wide ``FORGEJO_RUNNER_TOKEN``"; a
+    repository that needs its own identity gets a Fernet-sealed
+    ``credential_ciphertext`` (``services.repo_runner`` is the only writer, via
+    :class:`services.git_identity.TokenCipher`) and ``credential_kind='repo'``.
+    As with :class:`GitIdentity`, **no plaintext token may ever reach this
+    table** and the ciphertext is deliberately absent from :meth:`to_dict`.
+
+    ``max_concurrency=0`` and ``workspace_subdir=""`` are the documented
+    "inherit the platform default" values — 0 falls back to
+    ``AGENT_MAX_IN_FLIGHT_PER_REPO`` and the empty subdir resolves to
+    ``runners/<id>`` under ``AGENT_WORK_ROOT``.
+    """
+
+    __tablename__ = "repo_runners"
+    __table_args__ = (
+        CheckConstraint(
+            "credential_kind IN ('shared', 'repo')",
+            name="ck_repo_runners_credential_kind",
+        ),
+        CheckConstraint(
+            "egress_policy IN ('inherit', 'internal', 'allowlist')",
+            name="ck_repo_runners_egress_policy",
+        ),
+    )
+
+    id: Mapped[int] = Column(Integer, primary_key=True, autoincrement=True)
+    repo_id: Mapped[int] = Column(
+        Integer,
+        ForeignKey("repos.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    name: Mapped[str] = Column(String(128), nullable=False, default="")
+    enabled: Mapped[bool] = Column(Boolean, nullable=False, default=True)
+    #: 0 = fall back to AGENT_MAX_IN_FLIGHT_PER_REPO.
+    max_concurrency: Mapped[int] = Column(Integer, nullable=False, default=0)
+    #: "" = "runners/<id>"; a relative path under AGENT_WORK_ROOT.
+    workspace_subdir: Mapped[str] = Column(String(128), nullable=False, default="")
+    #: inherit | internal | allowlist
+    egress_policy: Mapped[str] = Column(String(16), nullable=False, default="inherit")
+    #: comma-separated hosts, only meaningful when egress_policy == "allowlist"
+    egress_allowlist: Mapped[str | None] = Column(Text, nullable=True)
+    #: shared | repo
+    credential_kind: Mapped[str] = Column(String(16), nullable=False, default="shared")
+    credential_username: Mapped[str | None] = Column(String(64), nullable=True)
+    credential_ciphertext: Mapped[str | None] = Column(Text, nullable=True)
+    credential_expires_at: Mapped[datetime | None] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    credential_rotated_at: Mapped[datetime | None] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_task_at: Mapped[datetime | None] = Column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = Column(
+        DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    def to_dict(self) -> dict:
+        # The ciphertext is deliberately absent: the console may learn *whether*
+        # a repo credential exists, never the sealed value.
+        return {
+            "id": self.id,
+            "repo_id": self.repo_id,
+            "name": self.name,
+            "enabled": bool(self.enabled),
+            "max_concurrency": self.max_concurrency,
+            "workspace_subdir": self.workspace_subdir,
+            "egress_policy": self.egress_policy,
+            "egress_allowlist": self.egress_allowlist,
+            "credential_kind": self.credential_kind,
+            "credential_username": self.credential_username,
+            "has_credential": bool(self.credential_ciphertext),
+            "credential_expires_at": iso(self.credential_expires_at),
+            "credential_rotated_at": iso(self.credential_rotated_at),
+            "last_task_at": iso(self.last_task_at),
+            "created_at": iso(self.created_at),
+            "updated_at": iso(self.updated_at),
+        }
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<RepoRunner repo={self.repo_id} {self.credential_kind}>"
+
+
 # ── import_jobs ──────────────────────────────────────────────────────
 
 class ImportJob(Base):
@@ -602,6 +699,11 @@ class AgentTask(Base):
     repo_id: Mapped[int] = Column(
         Integer, ForeignKey("repos.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    #: Soft reference to ``repo_runners.id`` — the logical runner that was
+    #: resolved when this task ran.  Deliberately **not** a foreign key: a soft
+    #: reference survives a runner row being reset without hiding the task, and
+    #: the migration can add it as a plain nullable column to a live table.
+    runner_id: Mapped[int | None] = Column(Integer, nullable=True)
     kind: Mapped[str] = Column(String(16), nullable=False, default="review")
     status: Mapped[str] = Column(String(16), nullable=False, default="queued")
     # JSON: target sha, issue number, finding ids — whatever the runner needs.
@@ -1024,6 +1126,7 @@ __all__ = [
     "Repo",
     "RepoCommit",
     "RepoIssue",
+    "RepoRunner",
     "ReviewRun",
     "WebhookDelivery",
 ]

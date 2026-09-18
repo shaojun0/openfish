@@ -554,24 +554,35 @@ docker compose --profile runner up -d runner
 
 - 镜像 `openfish-runner`：基于 `python:3.12-slim` + `git` + 仓库所需基础工具；
   **不含模型权重、不含宿主 docker socket**。
-- 每个任务一个工作目录（`/work/<task_id>`；重试为 `/work/<task_id>-attempt<n>`，
-  避免回收后的第二次尝试删掉第一次仍在用的 checkout），任务结束**保留 24h
-  便于排障再回收**。
+- 每个任务一个工作目录（默认 `/work/runners/<runner_id>/<task_id>`，即逻辑 runner
+  前缀 + 任务 id；重试为 `…/<task_id>-attempt<n>`，避免回收后的第二次尝试删掉第一次
+  仍在用的 checkout），任务结束**保留 24h** 便于排障再回收。
 - 资源限制：`--cpus 2 --memory 2g --pids-limit 512`。
 - **凭据边界（已落地）**：runner 容器**不继承** backend 的
   `SECRET_KEY` / `FORGEJO_ADMIN_TOKEN` / `GIT_IDENTITY_KEY`（见
   `docker/docker-compose.yml` 的 `x-runner-env`）；仓库自带的 `check_*.py`
   与 headless review 命令再经 `services/sandbox_env.py` 的白名单过滤，拿不到
-  任何平台密钥。runner 只用一枚可单独吊销的
-  `FORGEJO_RUNNER_TOKEN`（git credential helper + 开 PR），未设置时 fix 任务
-  在 push/PR 处**明确失败**，不回落去用 admin 权限。
+  任何平台密钥。runner 默认只用一枚可单独吊销的
+  `FORGEJO_RUNNER_TOKEN`（git credential helper + 开 PR）——仓库可用专属凭据覆盖
+  （下一条）；凭据缺失时 fix 任务在 push/PR 处**明确失败**，不回落去用 admin 权限。
+- **逻辑 per-repo runner（已落地基座）**：进程池仍是**一个共享池**（不挂 docker
+  socket、不按仓库起容器），但每个仓库有一行 `repo_runners` 配置，worker 领取任务
+  时解析四件事：**凭据**（默认回退共享 `FORGEJO_RUNNER_TOKEN`；仓库可用 Fernet
+  密文存专属 token，解不开即 fail-closed 不回退；沙箱容器不带
+  `GIT_IDENTITY_KEY`，其解密封装位置的已知缺口见该设计 §5.2 / §12.7）、**工作区**（默认
+  `AGENT_WORK_ROOT/runners/<runner_id>`，越界路径直接拒绝）、**每仓库并发**
+  （`max_concurrency`，`0` = 继承 `AGENT_MAX_IN_FLIGHT_PER_REPO`）与**出网声明**
+  （`egress_policy`；平台只持久化策略，真正的网络分段由部署侧执行）。
+  `AgentTask.runner_id` 把任务绑定到逻辑 runner，**禁用的 runner 任务不被
+  `claim`**。沙箱边界（不挂 socket、不继承平台密钥）不变；设计与验收场景见
+  [`DESIGN-per-repo-runner.md`](./DESIGN-per-repo-runner.md)。
 - **待补的隔离（两处）**：
   1. *网络*：runner 仍在 `openfish` bridge 上，`network: internal` + 出口白名单是
      后续切片。
   2. *文件系统/控制面*：runner 以可写方式挂载 `./data:/app/data`（平台 SQLite 库
      所在），而它同时执行仓库自带的 `check_*.py`。环境白名单挡不住文件系统，
      因此"隔离覆盖文件系统"目前**不成立**；拆分方式待定（窄队列接口或独立库）。
-  在两者补齐前，凭据边界（上一条）是唯一已落地的隔离。
+  在两者补齐前，凭据边界那一条是唯一已落地的隔离。
 
 ### 9.3 agent 的任务协议（`AGENTS.md` 契约）
 
@@ -715,7 +726,13 @@ make gates
 3. Forgejo migration 对 2 万+ issue 的耗时与内存表现未知，是否需要先只导最近 N 年？
 4. issue 增量同步的触发频率（webhook / 定时 / 手动）与限速策略。
 5. 语义检索是否本轮就要接 `embedding` 模型路由（当前设计留钩子）。
-6. 权限点 `repo:push` 的粒度：仓库级还是全局级（本轮按全局，后续可能需要 per-repo）。
+6. **（已选择 B1）`repo:push` 粒度 / per-repo runner。** 执行侧选择
+   **B1 = 逻辑 per-repo runner**：共享进程池不拆，每个仓库一行 `repo_runners`
+   配置（凭据 / 工作区 / 配额 / 出网声明），任务经 `AgentTask.runner_id` 绑定，
+   禁用的 runner 不可领取（见 §9.2 与
+   [`DESIGN-per-repo-runner.md`](./DESIGN-per-repo-runner.md)）。权限点
+   `repo:push` 本身本轮仍按**全局**——它决定「谁能按仓库推送」，与「任务用哪份
+   执行凭据跑」是两件事，per-repo 授权将来独立演进。
 7. 沙箱执行 DSH 的形态：单进程 headless 还是容器内起 `dsh web` + 驱动 API（S4 已选前者）。
 8. 保护分支规则由 Forgejo 原生（branch protection）还是 openfish policy 承担（倾向 Forgejo 原生）。
 9. `read_policy_auto_review()`（S1）仍在猜 `services/review_policy` 的函数名

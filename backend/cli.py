@@ -28,8 +28,11 @@ Every command is idempotent, so running one twice is harmless.
 from __future__ import annotations
 
 import argparse
+import getpass
+import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 REPO_ROOT = Path(__file__).resolve().parent
 if str(REPO_ROOT) not in sys.path:
@@ -38,6 +41,9 @@ if str(REPO_ROOT) not in sys.path:
 from config import settings  # noqa: E402
 from extensions.database import Session, init_engine  # noqa: E402
 from services.authz import AuthzService, bootstrap  # noqa: E402
+
+if TYPE_CHECKING:  # noqa: E402
+    from services.repo_runner import RepoRunnerService
 
 
 def build_authz(database: str | None) -> AuthzService:
@@ -277,6 +283,212 @@ def cmd_list_permissions(args, authz: AuthzService) -> int:
     return 0
 
 
+# ── Per-repo runners ─────────────────────────────────────────────────
+# Operator surface for `models.agent_hub.RepoRunner`, one row per repository.
+# Each command resolves the slug through the same `Session` the auth commands
+# use, and none of them ever prints the sealed credential — only
+# `has_credential`, which `RepoRunner.to_dict()` exposes in its place.
+
+def _runner_service() -> RepoRunnerService:
+    """A :class:`RepoRunnerService` bound to the CLI's configured session."""
+    from services.repo_runner import RepoRunnerService
+
+    return RepoRunnerService(Session)
+
+
+def _repo_id_for_slug(slug: str) -> int:
+    """Resolve ``<owner>/<name>`` to ``repos.id``; an unknown slug raises."""
+    from models.agent_hub import Repo
+    from services.repo_runner import RepoRunnerError
+
+    session = Session()
+    try:
+        repo_id = session.query(Repo.id).filter(Repo.slug == slug).scalar()
+    finally:
+        session.close()
+    if repo_id is None:
+        raise RepoRunnerError(f"未知的仓库 slug：{slug!r}")
+    return int(repo_id)
+
+
+def _repo_slugs(repo_ids: list[int]) -> dict[int, str]:
+    """Map ``repos.id`` → slug for the ids in *repo_ids*."""
+    from models.agent_hub import Repo
+
+    if not repo_ids:
+        return {}
+    session = Session()
+    try:
+        rows = session.query(Repo.id, Repo.slug).filter(Repo.id.in_(repo_ids)).all()
+    finally:
+        session.close()
+    return {int(repo_id): str(slug) for repo_id, slug in rows}
+
+
+def _print_runner_config(row, slug: str) -> None:
+    """``key : value`` lines for one runner, never the sealed secret."""
+    from services.repo_runner import safe_workspace_subdir
+
+    data = row.to_dict()
+    credential = data["credential_kind"]
+    if data["credential_username"]:
+        credential = f"{credential} (username={data['credential_username']})"
+    concurrency = data["max_concurrency"]
+    lines = [
+        ("slug", slug),
+        ("runner id", str(data["id"])),
+        ("repo id", str(data["repo_id"])),
+        ("name", data["name"] or "—"),
+        ("enabled", "yes" if data["enabled"] else "no"),
+        ("max concurrency", f"{concurrency} (inherit)" if not concurrency else str(concurrency)),
+        (
+            "workspace subdir",
+            safe_workspace_subdir(data["workspace_subdir"], runner_id=data["id"]),
+        ),
+        ("egress policy", data["egress_policy"]),
+        ("egress allowlist", data["egress_allowlist"] or "—"),
+        ("credential kind", credential),
+        ("has credential", "yes" if data["has_credential"] else "no"),
+        ("credential expires", data["credential_expires_at"] or "never"),
+        ("credential rotated", data["credential_rotated_at"] or "never"),
+        ("last task", data["last_task_at"] or "never"),
+        ("created", data["created_at"] or "—"),
+        ("updated", data["updated_at"] or "—"),
+    ]
+    width = max(len(label) for label, _ in lines)
+    for label, value in lines:
+        print(f"{label:<{width}} : {value}")
+
+
+def cmd_runner_list(args) -> int:
+    """One line per runner: slug, enabled, credential source, concurrency, egress."""
+    runners = _runner_service().list()
+    if not runners:
+        print("No repo runners configured. Create one with: cli.py runner enable <slug>")
+        return 0
+    slugs = _repo_slugs([row.repo_id for row in runners])
+    for row in runners:
+        slug = slugs.get(row.repo_id, f"repo-{row.repo_id}")
+        state = "enabled" if row.enabled else "disabled"
+        concurrency = row.max_concurrency or "inherit"
+        egress = row.egress_policy
+        if row.egress_allowlist:
+            egress = f"{egress}:{row.egress_allowlist}"
+        print(
+            f"  {slug:<40} {state:<8} cred={row.credential_kind:<6}"
+            f" concurrency={concurrency:<7} egress={egress}"
+        )
+    return 0
+
+
+def cmd_runner_show(args) -> int:
+    """Full configuration for one runner — never the secret itself."""
+    repo_id = _repo_id_for_slug(args.slug)
+    row = _runner_service().get(repo_id)
+    if row is None:
+        return _fail(
+            f"no runner configured for {args.slug!r}; "
+            f"create it with: cli.py runner enable {args.slug}"
+        )
+    _print_runner_config(row, args.slug)
+    return 0
+
+
+def _runner_set_enabled(args, enabled: bool) -> int:
+    repo_id = _repo_id_for_slug(args.slug)
+    service = _runner_service()
+    row = service.get(repo_id)
+    if row is not None and bool(row.enabled) == enabled:
+        state = "enabled" if enabled else "disabled"
+        print(f"Runner for {args.slug} is already {state} — nothing to do.")
+        return 0
+    row = service.update(repo_id, enabled=enabled)
+    verb = "Enabled" if enabled else "Disabled"
+    print(f"{verb} runner for {args.slug} (id={row.id}).")
+    return 0
+
+
+def cmd_runner_enable(args) -> int:
+    return _runner_set_enabled(args, True)
+
+
+def cmd_runner_disable(args) -> int:
+    return _runner_set_enabled(args, False)
+
+
+def cmd_runner_set(args) -> int:
+    """Update limits, egress policy or workspace of one runner."""
+    if (
+        args.max_concurrency is None
+        and args.egress_policy is None
+        and args.egress_allowlist is None
+        and args.workspace_subdir is None
+    ):
+        return _fail(
+            "runner set needs at least one of --max-concurrency, --egress-policy, "
+            "--egress-allowlist or --workspace-subdir"
+        )
+    repo_id = _repo_id_for_slug(args.slug)
+    row = _runner_service().update(
+        repo_id,
+        max_concurrency=args.max_concurrency,
+        egress_policy=args.egress_policy,
+        egress_allowlist=args.egress_allowlist,
+        workspace_subdir=args.workspace_subdir,
+    )
+    print(f"Updated runner for {args.slug} (id={row.id}).")
+    _print_runner_config(row, args.slug)
+    return 0
+
+
+def cmd_runner_set_credential(args) -> int:
+    """Seal a repo-scoped token read from the environment or a hidden prompt.
+
+    The token is deliberately not an argv value — a flag would land in the
+    shell history and in ``ps``.  ``--token-env`` names the variable to read;
+    without it the operator is prompted through :func:`getpass.getpass`.
+    """
+    repo_id = _repo_id_for_slug(args.slug)
+    if args.token_env:
+        token = (os.environ.get(args.token_env) or "").strip()
+        if not token:
+            return _fail(
+                f"environment variable {args.token_env!r} is unset or empty — "
+                "nothing stored"
+            )
+    else:
+        try:
+            token = getpass.getpass(f"runner token for {args.slug}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            return _fail("no token entered — nothing stored")
+        if not token:
+            return _fail("empty token — nothing stored")
+    row = _runner_service().set_credential(
+        repo_id, token=token, username=args.username or "",
+    )
+    print(
+        f"Stored a repo-scoped runner credential for {args.slug} "
+        f"(id={row.id}, username={row.credential_username or 'x-access-token'})."
+    )
+    print(f"  Drop it again with: cli.py runner clear-credential {args.slug}")
+    return 0
+
+
+def cmd_runner_clear_credential(args) -> int:
+    """Drop the repo-scoped token and fall back to the shared runner token."""
+    repo_id = _repo_id_for_slug(args.slug)
+    service = _runner_service()
+    row = service.get(repo_id)
+    if row is None or not row.to_dict()["has_credential"]:
+        print(f"No repo-scoped credential for {args.slug} — nothing to clear.")
+        return 0
+    row = service.clear_credential(repo_id)
+    print(f"Cleared the repo-scoped credential for {args.slug} (id={row.id}).")
+    print("  The runner falls back to the shared FORGEJO_RUNNER_TOKEN.")
+    return 0
+
+
 # ══════════════════════════════════════════════════════════════════════
 
 def build_parser() -> argparse.ArgumentParser:
@@ -291,6 +503,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  cli.py show zhangsan\n"
             "  cli.py disable-user zhangsan\n"
             "  cli.py list-roles\n"
+            "  cli.py runner list\n"
         ),
     )
     parser.add_argument(
@@ -359,12 +572,81 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("list-permissions", help="List permission points.")
     p.set_defaults(func=cmd_list_permissions)
 
+    p = sub.add_parser("runner", help="Manage the per-repository agent runners.")
+    runner = p.add_subparsers(dest="runner_command", required=True)
+
+    q = runner.add_parser("list", help="List configured repo runners.")
+    q.set_defaults(func=cmd_runner_list)
+
+    q = runner.add_parser("show", help="Show one runner's full configuration.")
+    q.add_argument("slug", help="Repository slug, e.g. owner/name.")
+    q.set_defaults(func=cmd_runner_show)
+
+    q = runner.add_parser("enable", help="Enable a repo runner.")
+    q.add_argument("slug")
+    q.set_defaults(func=cmd_runner_enable)
+
+    q = runner.add_parser("disable", help="Disable a repo runner.")
+    q.add_argument("slug")
+    q.set_defaults(func=cmd_runner_disable)
+
+    q = runner.add_parser("set", help="Update limits, egress policy or workspace.")
+    q.add_argument("slug")
+    q.add_argument(
+        "--max-concurrency", type=int, default=None,
+        help="Max in-flight tasks for this repo; 0 = inherit the platform default.",
+    )
+    q.add_argument(
+        "--egress-policy", default=None,
+        help="inherit | internal | allowlist (validated by the service).",
+    )
+    q.add_argument(
+        "--egress-allowlist", default=None,
+        help="Comma-separated hosts; an empty string clears the allowlist.",
+    )
+    q.add_argument(
+        "--workspace-subdir", default=None,
+        help="Relative path under AGENT_WORK_ROOT; an empty string restores runners/<id>.",
+    )
+    q.set_defaults(func=cmd_runner_set)
+
+    q = runner.add_parser(
+        "set-credential",
+        help="Seal a repo-scoped runner token (never passed on the command line).",
+    )
+    q.add_argument("slug")
+    q.add_argument(
+        "--token-env", default=None, metavar="VAR",
+        help="Environment variable holding the token; omit to be prompted.",
+    )
+    q.add_argument("--username", default=None, help="Username paired with the token.")
+    q.set_defaults(func=cmd_runner_set_credential)
+
+    q = runner.add_parser(
+        "clear-credential",
+        help="Drop the repo-scoped token and fall back to the shared one.",
+    )
+    q.add_argument("slug")
+    q.set_defaults(func=cmd_runner_clear_credential)
+
     return parser
+
+
+def _run_runner(args) -> int:
+    """Dispatch a ``runner`` subcommand, mapping domain errors onto exit 1."""
+    from services.repo_runner import RepoRunnerError
+
+    try:
+        return args.func(args)
+    except RepoRunnerError as exc:
+        return _fail(str(exc))
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     authz = build_authz(args.db)
+    if getattr(args, "runner_command", None):
+        return _run_runner(args)
     try:
         return args.func(args, authz)
     except ValueError as exc:

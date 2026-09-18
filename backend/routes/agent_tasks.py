@@ -31,7 +31,7 @@ from auth.decorators import current_principal, require_permission
 from auth.permissions import AGENT_ADMIN, AGENT_RUN
 from errors import BadRequestError, PypiError
 from models.agent_hub import TASK_KIND, TASK_STATUS, AgentTask, Repo, ReviewRun
-from openapi import api_operation, errors, json_body, ok
+from openapi import api_operation, array_of, errors, json_body, ok, ref
 from services.agent_queue import AgentQueue
 
 agent_tasks_bp = Blueprint("agent_tasks", __name__)
@@ -45,30 +45,15 @@ _MAX_PAGE_SIZE = 100
 
 
 # ── Inline OpenAPI schemas ───────────────────────────────────────────
-
-_TASK_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "id": {"type": "integer"},
-        "repo": {"type": ["string", "null"], "description": "仓库 slug"},
-        "repo_id": {"type": "integer"},
-        "kind": {"type": "string", "description": " | ".join(TASK_KIND)},
-        "status": {"type": "string", "description": " | ".join(TASK_STATUS)},
-        "attempts": {"type": "integer"},
-        "max_attempts": {"type": "integer"},
-        "priority": {"type": "integer"},
-        "result_ref": {"type": ["string", "null"]},
-        "error": {"type": ["string", "null"]},
-        "created_at": {"type": ["string", "null"]},
-        "started_at": {"type": ["string", "null"]},
-        "finished_at": {"type": ["string", "null"]},
-    },
-}
+# The single-task document lives in `schemas.AgentTask`, the shared response
+# registry, so the pydantic model and the published contract are one definition;
+# the list wrapper is inline, exactly as `_REPO_LIST_SCHEMA` is in
+# `routes/repos.py`.
 
 _TASK_LIST_SCHEMA = {
     "type": "object",
     "properties": {
-        "items": {"type": "array", "items": _TASK_SCHEMA},
+        "items": array_of("AgentTask"),
         "total": {"type": "integer"},
         "page": {"type": "integer"},
         "page_size": {"type": "integer"},
@@ -142,6 +127,20 @@ def _repo_slug(session, repo_id: int) -> str | None:
     return str(slug) if slug is not None else None
 
 
+def _runner_id(queue: AgentQueue, task_id: int) -> int | None:
+    """The task's ``repo_runners.id``; ``None`` for a legacy row.
+
+    ``AgentQueue.get`` returns ``AgentTask.to_dict()``, the queue's own
+    serializer, which does not carry the runner column; the route reads the one
+    attribute it needs instead of widening that contract.
+    """
+    with queue.session() as session:
+        value = session.execute(
+            select(AgentTask.runner_id).where(AgentTask.id == task_id)
+        ).scalar_one_or_none()
+    return int(value) if value is not None else None
+
+
 def _task_view(queue: AgentQueue, task_id: int, *, slug: str | None = None) -> dict:
     """One task as the API returns it, with the repo slug joined in."""
     task = queue.get(task_id)
@@ -151,6 +150,7 @@ def _task_view(queue: AgentQueue, task_id: int, *, slug: str | None = None) -> d
         with queue.session() as session:
             slug = _repo_slug(session, int(task["repo_id"]))
     task["repo"] = slug
+    task["runner_id"] = _runner_id(queue, task_id)
     return task
 
 
@@ -220,6 +220,7 @@ def list_agent_tasks():
     for task, slug in rows:
         item = task.to_dict(include_payload=False)
         item["repo"] = slug
+        item["runner_id"] = getattr(task, "runner_id", None)
         items.append(item)
     return jsonify({"items": items, "total": total, "page": page, "page_size": page_size})
 
@@ -236,7 +237,7 @@ def list_agent_tasks():
     ),
     tags=["Agent runtime"],
     request_body={"required": True, "content": json_body(_TASK_REQUEST_SCHEMA)},
-    responses={"201": ok("Task enqueued", _TASK_SCHEMA), **_errors("400", "409")},
+    responses={"201": ok("Task enqueued", ref("AgentTask")), **_errors("400", "409")},
 )
 def create_agent_task():
     payload = _body()
@@ -286,7 +287,7 @@ def create_agent_task():
         "Administrative (`agent:admin`)."
     ),
     tags=["Agent runtime"],
-    responses={"200": ok("Task requeued", _TASK_SCHEMA), **_errors("409")},
+    responses={"200": ok("Task requeued", ref("AgentTask")), **_errors("409")},
 )
 def retry_agent_task(task_id: int):
     queue = _queue()
@@ -306,7 +307,7 @@ def retry_agent_task(task_id: int):
         "cooperative cancellation signal.  Administrative (`agent:admin`)."
     ),
     tags=["Agent runtime"],
-    responses={"200": ok("Task cancelled", _TASK_SCHEMA), **_errors("409")},
+    responses={"200": ok("Task cancelled", ref("AgentTask")), **_errors("409")},
 )
 def cancel_agent_task(task_id: int):
     queue = _queue()

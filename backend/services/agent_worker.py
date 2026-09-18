@@ -22,10 +22,12 @@ The review command comes from ``AGENT_REVIEW_COMMAND`` and is the *only* thing
 that goes into a child process's argv; the model credential travels to the child
 through the environment (``OPENFISH_MODEL_*``, resolved by
 :func:`services.agent_runner.resolve_model_env`) and never into argv, a log line
-or the work directory.  The Forgejo token likewise lives only inside
-:class:`services.repo_import.ForgejoClient` (env → ``ImportConfig``); this module
-never reads it.  That is the seam a separate git-credential refactor can replace
-without touching the runner.
+or the work directory.  The per-repository git/PR credential is resolved from
+:class:`services.repo_runner.RepoRunnerService` (a Fernet-sealed repo token, else
+the shared ``FORGEJO_RUNNER_TOKEN``): the plaintext only ever reaches
+:class:`services.repo_import.ForgejoClient` and the runner's git subprocess
+environment, and the runner redacts it from logs and result.json.  This module
+never logs it and never reads ``FORGEJO_ADMIN_TOKEN``.
 
 Everything external is injectable (``session_factory``, ``forgejo_client``,
 ``review_command``, …), so ``scripts/check_agent_runtime.py`` proves the wiring
@@ -40,6 +42,7 @@ import os
 import shlex
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -59,10 +62,12 @@ from services.agent_runner import (
     Result,
     SubprocessRunnerAdapter,
     TaskRequest,
+    configured_work_root,
     mask_secrets,
     resolve_model_env,
 )
 from services.git_auth import git_host_of
+from services.repo_runner import RepoRunnerService, RunnerCredential, shared_runner_token
 from services.review_policy import (
     SOURCE_FILE,
     builtin_default,
@@ -77,10 +82,12 @@ logger = logging.getLogger("cpypiserver.agent_worker")
 #: Empty (the default) makes every review task fail loudly — never "done".
 ENV_REVIEW_COMMAND = "AGENT_REVIEW_COMMAND"
 
-#: The narrow Forgejo credential the runner uses for git push and the PR API.
-#: Deliberately **not** ``FORGEJO_ADMIN_TOKEN``: the runner containers execute
-#: repository-supplied code, so the admin token stays in the backend container.
-#: Empty means the runner can review but cannot publish, and says so loudly.
+#: The shared fallback credential the runner uses when a repository has no
+#: repo-scoped token.  Deliberately **not** ``FORGEJO_ADMIN_TOKEN``: the runner
+#: containers execute repository-supplied code, so the admin token stays in the
+#: backend container.  Empty means the runner can review but cannot publish, and
+#: says so loudly.  Mirrors :data:`services.repo_runner.SHARED_TOKEN_ENV`, the
+#: single implementation (:func:`runner_token` delegates there).
 ENV_RUNNER_TOKEN = "FORGEJO_RUNNER_TOKEN"
 
 #: Wall-clock budget for that command, so a stuck model client fails the task.
@@ -123,11 +130,32 @@ def sqlalchemy_session_factory(engine: Any) -> Callable[[], SASession]:
     return make
 
 
-def _load_task(claimed: ClaimedTask, sessions: Callable[[], SASession]) -> tuple[TaskRequest, str]:
-    """Turn a claimed queue row into the runner's :class:`TaskRequest`.
+@dataclass(frozen=True)
+class _LoadedTask:
+    """A claimed queue row resolved to everything one handler run needs.
+
+    ``credential`` is ``None`` when the repository has neither a sealed
+    repo-scoped token nor a shared ``FORGEJO_RUNNER_TOKEN``; the fix/push path
+    then fails loudly on the git call, while a review-only task still runs.
+    ``workspace_root`` is the repository's own logical runner directory, so two
+    repos claimed by the same pooled worker never share a checkout root.
+    """
+
+    task: TaskRequest
+    slug: str
+    credential: RunnerCredential | None
+    workspace_root: Path
+
+
+def _load_task(claimed: ClaimedTask, sessions: Callable[[], SASession]) -> _LoadedTask:
+    """Turn a claimed queue row into the runner's task plus its repo runner.
 
     ``slug`` is the Forgejo name when the repository was mirrored (open PRs go
-    there), otherwise the platform slug.
+    there), otherwise the platform slug.  The repository's logical runner is
+    resolved here: a disabled runner refuses the task, ``last_task_at`` is
+    stamped, the (possibly shared) credential is read — ``None`` when neither a
+    repo-scoped nor a shared token exists — and the workspace root is derived
+    from the runner's ``workspace_subdir`` under ``AGENT_WORK_ROOT``.
     """
     if claimed.kind not in SUPPORTED_KINDS:
         raise AgentRunnerError(
@@ -135,19 +163,33 @@ def _load_task(claimed: ClaimedTask, sessions: Callable[[], SASession]) -> tuple
             f"{', '.join(SUPPORTED_KINDS)}）；不要把它当作已完成"
         )
     payload = claimed.payload or {}
+    repo_id = int(claimed.repo_id)
     session = sessions()
     try:
-        repo = session.get(Repo, int(claimed.repo_id))
+        repo = session.get(Repo, repo_id)
         if repo is None:
-            raise AgentRunnerError(f"仓库 {claimed.repo_id} 不存在，无法执行任务 {claimed.id}")
+            raise AgentRunnerError(f"仓库 {repo_id} 不存在，无法执行任务 {claimed.id}")
         slug = str(repo.forgejo_repo or repo.slug)
         commit_sha = str(payload.get("commit_sha") or "").strip()
         if not commit_sha:
-            commit_sha = _latest_commit_sha(session, int(repo.id))
+            commit_sha = _latest_commit_sha(session, repo_id)
         base_branch = str(repo.default_branch or "main")
         repo_url = _repo_url(slug)
     finally:
         session.close()
+
+    # One logical runner per repository: it owns the credential and the
+    # workspace.  A disabled runner must not execute even when the task was
+    # already leased (the claim query skips new ones; this is the backstop).
+    runners = RepoRunnerService(sessions)
+    runner = runners.get(repo_id)
+    if runner is not None and not bool(runner.enabled):
+        raise AgentRunnerError(
+            f"仓库 {repo_id} 的 runner 已禁用（enabled=false），拒绝执行任务 {claimed.id}"
+        )
+    runners.record_task(repo_id)
+    credential = runners.credential(repo_id)
+    workspace_root = runners.workspace_root(repo_id, configured_work_root())
 
     # Every write task gets its own `agent/*` branch and its own work directory,
     # both keyed by the attempt number: a queue retry must never collide with the
@@ -173,7 +215,9 @@ def _load_task(claimed: ClaimedTask, sessions: Callable[[], SASession]) -> tuple
         issue_number=_optional_int(payload.get("issue_number")),
         attempt=attempt,
     )
-    return task, slug
+    return _LoadedTask(
+        task=task, slug=slug, credential=credential, workspace_root=workspace_root,
+    )
 
 
 def _make_publish_guard(
@@ -436,23 +480,33 @@ def _attach_evidence(
 # ── open_pr_fn: the single Forgejo credential seam ───────────────────
 
 def runner_token() -> str:
-    """The runner's narrow Forgejo credential, or ``""`` when unconfigured."""
-    return (os.environ.get(ENV_RUNNER_TOKEN) or "").strip()
+    """The runner's narrow Forgejo credential, or ``""`` when unconfigured.
+
+    A thin, name-compatible wrapper over
+    :func:`services.repo_runner.shared_runner_token`, which owns the single
+    implementation of the ``FORGEJO_RUNNER_TOKEN`` read.  Prefer the per-repo
+    credential resolved by :class:`services.repo_runner.RepoRunnerService`; this
+    is only the deployment-wide fallback.
+    """
+    return shared_runner_token()
 
 
 def build_open_pr_fn(
     forgejo_repo: str,
     *,
     client: Any | None = None,
+    token: str | None = None,
 ) -> Callable[..., str]:
     """A ``open_pr_fn`` bound to one repository.
 
     Without an injected *client* this builds a :class:`ForgejoClient` whose token
-    is ``FORGEJO_RUNNER_TOKEN`` — **never** the platform's
+    is *token* — the credential the handler already resolved for this
+    repository (``RepoRunnerService.credential``) — or, when *token* is ``None``,
+    ``FORGEJO_RUNNER_TOKEN``.  **Never** the platform's
     ``FORGEJO_ADMIN_TOKEN``.  The runner executes repository-supplied code, so it
     gets the narrow, revocable credential and not the instance-wide admin one;
-    an unset runner token means PR creation fails loudly instead of silently
-    borrowing admin authority.
+    an unset token means PR creation fails loudly instead of silently borrowing
+    admin authority.
 
     The client is wrapped in :class:`services.agent_surface.RestrictedForgejoClient`
     **at call time**: the agent path gets exactly one capability
@@ -475,9 +529,17 @@ def build_open_pr_fn(
             from services.repo_import import ForgejoClient, ImportConfig
 
             config = ImportConfig.from_env()
-            token = runner_token()
-            if token:
+            if token is not None:
+                # An explicit *token* is authoritative, including an explicit
+                # ``""``: the handler resolved this repo's credential, and
+                # re-reading the ambient env (or keeping ``ImportConfig``'s own
+                # ``FORGEJO_ADMIN_TOKEN``) could silently authenticate as a
+                # different principal.
                 config = replace(config, admin_token=token)
+            else:
+                shared = runner_token()
+                if shared:
+                    config = replace(config, admin_token=shared)
             resolved = ForgejoClient(config=config)
         from services.agent_surface import RestrictedForgejoClient
 
@@ -753,11 +815,17 @@ def build_handler(
     policy_parser = build_policy_parser()
 
     def handle(claimed: ClaimedTask) -> str | None:
-        task, slug = _load_task(claimed, sessions)
+        loaded = _load_task(claimed, sessions)
+        task, slug = loaded.task, loaded.slug
+        # The repository's own credential, else the shared deployment token, else
+        # "" — which leaves the fix/push path to fail loudly at git while a
+        # review-only task, which never authenticates for a write, still runs.
+        git_token = loaded.credential.token if loaded.credential is not None else ""
         run_id = _open_review_run(claimed, task, sessions)
         logger.info(
-            "agent task %s: repo=%s kind=%s sha=%s run=%s",
+            "agent task %s: repo=%s kind=%s sha=%s run=%s runner_credential=%s",
             claimed.id, slug, task.kind, task.commit_sha[:12] or "<default-branch>", run_id,
+            loaded.credential.source if loaded.credential is not None else "none",
         )
         sink = DbTaskSink(
             ingest=_make_ingest(int(claimed.repo_id), run_id, sessions),
@@ -768,11 +836,12 @@ def build_handler(
         adapter = SubprocessRunnerAdapter(
             review_fn=review_fn,
             search_fn=build_search_fn(int(claimed.repo_id), sessions=sessions),
-            open_pr_fn=build_open_pr_fn(slug, client=forgejo_client),
-            # The single narrow credential for both the clone/push and the PR
-            # API; the compose env hands it in and nothing else.  The host pin
-            # means the credential helper only ever answers for this task's repo.
-            git_token=runner_token(),
+            open_pr_fn=build_open_pr_fn(slug, client=forgejo_client, token=git_token),
+            # The single credential for both the clone/push and the PR API: this
+            # repository's runner credential when it has one, else the shared
+            # deployment token.  The host pin means the credential helper only
+            # ever answers for this task's repo.
+            git_token=git_token,
             git_host=git_host_of(task.repo_url),
         )
         runner = AgentRunner(
@@ -780,6 +849,10 @@ def build_handler(
             sink=sink,
             model_env=model_env,
             policy_parser=policy_parser,
+            # One logical runner per repo: the checkout lives under that repo's
+            # own workspace root, never the shared root a pooled worker defaults
+            # to.
+            work_root=loaded.workspace_root,
             # Fencing: refuse to push/open a PR if this worker lost the lease
             # while the task ran (a second replica may own it now).
             publish_guard=_make_publish_guard(claimed, sessions),

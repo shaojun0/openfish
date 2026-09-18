@@ -189,6 +189,12 @@ EXPECTED: dict[tuple[str, str], str] = {
     ("repos", "import_repo"): "REPO_WRITE",
     ("repos", "sync_repo"): "REPO_WRITE",
     ("repos", "git_credential"): "REPO_PUSH",
+    # The per-repo runner: reading its configuration is `repo:read`; changing
+    # settings or sealing/clearing its credential is `repo:write`.
+    ("repos", "get_runner"): "REPO_READ",
+    ("repos", "update_runner"): "REPO_WRITE",
+    ("repos", "put_runner_credential"): "REPO_WRITE",
+    ("repos", "delete_runner_credential"): "REPO_WRITE",
     ("repo_context", "search_repo_context"): "REPO_READ",
     ("findings", "list_findings"): "FINDING_READ",
     ("findings", "get_finding"): "FINDING_READ",

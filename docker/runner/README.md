@@ -102,6 +102,35 @@ docker compose --profile db --profile runner --scale runner=6 up -d
 `backend` 与**所有** `runner` 副本必须指向同一个 `DATABASE_URL`，否则副本之间互相
 看不见任务。
 
+### 2.4 按仓库解析逻辑 runner（B1）
+
+runner 池始终是**一个共享池**：所有副本跑同一条 `services.agent_queue worker`，
+**不新增容器、不挂宿主编 docker socket、不按仓库起守护进程**。每个任务领到时，
+worker 按任务所属仓库解析一行 `repo_runners`（逻辑 runner），用它的配置执行：
+
+| 解析项 | 取值 / 回退 | 说明 |
+| --- | --- | --- |
+| 凭据 | 仓库专属 Fernet 密文；无则 `FORGEJO_RUNNER_TOKEN` | 密文解不开即**失败，不回退**共享 token（fail-closed） |
+| 工作区 | 默认 `AGENT_WORK_ROOT/runners/<runner_id>` | 与 `/work/<task_id>` 叠加，仓库与任务两级都不撞车 |
+| 并发 | `repo_runners.max_concurrency`；`0` = `AGENT_MAX_IN_FLIGHT_PER_REPO` | 生产者在**入队**侧抑制超额任务（返回 `0`） |
+| 出网策略 | `egress_policy`（`inherit` / `internal` / `allowlist`） | **只是声明**：平台持久化策略，真正的网络分段仍由部署侧执行（§4） |
+
+> 路径写法：本文其余章节为简洁仍写 `/work/<task_id>`；启用逻辑 runner 后，任务目录
+> 实际是 `${AGENT_WORK_ROOT}/runners/<runner_id>/<task_id>`（任务目录本身仍由
+> `agent_runner.workdir_for()` 生成，见 §2.1）。
+
+`AgentTask.runner_id` 记录任务绑定到哪一行；**被禁用的 runner 的任务不会被领取**
+（领取查询跳过；已领到的旧任务在执行前也会再校验一次）。这一层**不改变**本文档的
+两条硬边界——**不挂宿主 docker socket**、**不按仓库/按任务起容器**。需要更强的
+物理隔离时才考虑按任务起容器（见上一节末尾），设计与验收见
+[`docs/agent-hub/DESIGN-per-repo-runner.md`](../../docs/agent-hub/DESIGN-per-repo-runner.md)。
+
+> ⚠️ **repo 专属凭据的解密前提**：本容器刻意不带 `GIT_IDENTITY_KEY`（§9），而
+> 仓库专属 token 是 Fernet 密文。`credential()` 取不到 cipher 时会 **fail-closed**
+> （共享 `FORGEJO_RUNNER_TOKEN` 路径不受影响）；解密封装应放在哪个进程尚未定，
+> 见 `DESIGN-per-repo-runner.md` §12.7。**不要**为了「让它能跑」把
+> `GIT_IDENTITY_KEY` 塞进 runner 环境——那会破坏本节的安全边界。
+
 ## 3. 资源限制
 
 | 限制 | 值 | 理由 |
@@ -236,7 +265,9 @@ link "$DOCKER_DIR/agent-work" "$PROJECT_DIR/backend/data/agent-work"
 - [ ] **runner 的环境里没有** `SECRET_KEY` / `FORGEJO_ADMIN_TOKEN` /
       `GIT_IDENTITY_KEY` / `OAUTH2_CLIENT_SECRET` / 上游口令
       （`docker inspect` 里逐个确认；`scripts/check_git_boundary.py` 会离线断言）；
-- [ ] `FORGEJO_RUNNER_TOKEN` 是一枚**单独签发、可单独吊销、非 admin** 的 token；
+- [ ] runner 实际使用的 token（共享 `FORGEJO_RUNNER_TOKEN` 或 `repo_runners` 中的
+      仓库专属凭据，见 §2.4）都是**单独签发、可单独吊销、非 admin** 的；仓库专属
+      凭据在 Forgejo 侧应尽量收窄到该仓库/团队（`DESIGN-per-repo-runner.md` §12）；
 - [ ] runner 所在网络无公网出口（`internal: true` 或防火墙等价物）——
       **待补**：当前 compose 仍是普通 bridge，见 §7 上方的说明；
 - [ ] `read_only` 根文件系统下，唯一可写路径是 `/work`、`/app/data` 与 `/tmp`。
@@ -282,10 +313,12 @@ AGENT_REVIEW_TIMEOUT=900        # 可选，默认 900s
   子进程——平台密钥（`SECRET_KEY` / `FORGEJO_ADMIN_TOKEN` / `GIT_IDENTITY_KEY`）
   被 `services/sandbox_env.py` 的白名单挡在外面，仓库自带的 gate 也拿不到模型 key。
 - PR 由 `ForgejoClient.create_pull_request()` 打开，git push 由
-  `credential.helper` + `OPENFISH_GIT_TOKEN` 认证；两者都用**同一枚**
-  `FORGEJO_RUNNER_TOKEN`（`agent_worker.runner_token()`），它**不是**平台的
-  `FORGEJO_ADMIN_TOKEN`。token 不进 argv、不进 clone URL、不落 `.git/config`。
-  未设置时 fix 任务在 push/PR 处**明确失败**，不会回落到 admin 权限。
+  `credential.helper` + `OPENFISH_GIT_TOKEN` 认证；两者默认都用**同一枚**
+  `FORGEJO_RUNNER_TOKEN`（`agent_worker.runner_token()`）；若该仓库在
+  `repo_runners` 里配了专属凭据，则改用 `RepoRunnerService.credential()` 解析出的
+  那一枚（§2.4）。无论哪一枚都**不是**平台的 `FORGEJO_ADMIN_TOKEN`。token 不进
+  argv、不进 clone URL、不落 `.git/config`。凭据缺失时 fix 任务在 push/PR 处
+  **明确失败**，不会回落到 admin 权限。
 - 发布前有**租约 fencing**：`AgentRunner` 在 `push` 与 `open_pr` 之前各调用一次
   `publish_guard`（worker 注入的 DB 活性检查）。租约被回收后，旧副本拒绝发布，
   而不是再推一个分支/再开一个 PR。

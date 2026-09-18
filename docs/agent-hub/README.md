@@ -7,6 +7,9 @@ finding 之后我该做什么」。设计与契约的权威是 [`DEVELOPMENT.md`
 - 想改实现 / 加规则 → 读 DEVELOPMENT.md 的 §4（数据模型）、§6（finding 状态机）、§9（运行时）。
 - 想理解 **AI 自己写 / 维护校验套件**的边界与治理（两套 check、信任阶梯 L0–L3、
   「永不自动合并」红线与责任矩阵）→ 读 [`DESIGN-ai-checks.md`](./DESIGN-ai-checks.md)。
+- 想知道**执行边界**怎么按仓库区分（逻辑 per-repo runner：凭据 / 工作区 / 并发配额 /
+  出网声明，以及为什么不为每个仓库起容器）→ 读
+  [`DESIGN-per-repo-runner.md`](./DESIGN-per-repo-runner.md)。
 - 想知道页面上每个字段从哪来 → 读 DEVELOPMENT.md 的 §4.2 + §5.3。
 - 只是想把一个仓库导入进来用 → 从下面第二节开始。
 

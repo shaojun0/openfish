@@ -480,3 +480,36 @@ class SetSuperuserRequest(BaseModel):
     """Body of `PUT /api/v1/admin/users/{user_id}/superuser`."""
 
     superuser: bool
+
+
+# ── Agent runtime ────────────────────────────────────────────────────
+
+class AgentTask(BaseModel):
+    """One agent task as `/api/v1/agent/tasks` returns it.
+
+    ``runner_id`` names the logical per-repository runner
+    (``repo_runners.id``) that owns the task.  It is ``null`` for a legacy row
+    that was queued before runners existed (``agent_tasks.runner_id IS NULL``),
+    which is why the console must treat it as optional.
+    """
+
+    id: int
+    repo: str | None = Field(default=None, description="仓库 slug")
+    repo_id: int
+    runner_id: int | None = Field(
+        default=None,
+        description=(
+            "repo_runners.id — the logical runner that owns this task; null for "
+            "a task queued before runners existed"
+        ),
+    )
+    kind: str
+    status: str
+    attempts: int
+    max_attempts: int
+    priority: int
+    result_ref: str | None = None
+    error: str | None = None
+    created_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None

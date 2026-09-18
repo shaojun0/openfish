@@ -2,7 +2,7 @@
 
 ``extensions.database`` calls ``Base.metadata.create_all()`` at boot, which
 creates missing *tables* but never alters an existing one, and then runs its own
-small ALTER list.  This module is the same idea, scoped to the ten
+small ALTER list.  This module is the same idea, scoped to the fifteen
 ``models.agent_hub`` tables, and is the single entry point the Agent Hub code
 (routes, the queue worker, the gates) uses when it needs the schema without
 booting Flask:
@@ -56,7 +56,8 @@ from .agent_hub import (
 )
 from .agent_hub import AgentTask, CheckRun, CheckSuiteSnapshot, CheckValidation
 from .agent_hub import Finding, FindingEvent, FindingEvidence, GitIdentity
-from .agent_hub import ImportJob, Repo, RepoCommit, RepoIssue, ReviewRun, WebhookDelivery
+from .agent_hub import ImportJob, Repo, RepoCommit, RepoIssue, RepoRunner
+from .agent_hub import ReviewRun, WebhookDelivery
 from .base import Base
 
 logger = logging.getLogger("cpypiserver.models.agent_hub_migrate")
@@ -68,7 +69,7 @@ logger = logging.getLogger("cpypiserver.models.agent_hub_migrate")
 #: on an existing deployment it is created whole by ``create_missing_tables`` —
 #: there is no column-level ALTER to back-fill.
 AGENT_HUB_TABLES = (
-    Repo, ImportJob, RepoIssue, RepoCommit, ReviewRun, AgentTask,
+    Repo, RepoRunner, ImportJob, RepoIssue, RepoCommit, ReviewRun, AgentTask,
     CheckSuiteSnapshot, CheckValidation, CheckRun,
     Finding, FindingEvent, FindingEvidence, GitIdentity, WebhookDelivery,
 )
@@ -88,6 +89,13 @@ _CHECK_CONSTRAINTS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     # created before ``validate`` was added carries the old CHECK and every
     # ``POST /repos/import`` fails.  Evolving it here repairs those databases.
     ("import_jobs", "ck_import_jobs_phase", "phase", IMPORT_PHASE),
+    # ``repo_runners`` is created whole today, but its two vocabularies are
+    # exactly the kind that grows (a new credential kind / egress mode), so the
+    # evolution entries are registered up front — the maintenance rule.
+    ("repo_runners", "ck_repo_runners_credential_kind", "credential_kind",
+     ("shared", "repo")),
+    ("repo_runners", "ck_repo_runners_egress_policy", "egress_policy",
+     ("inherit", "internal", "allowlist")),
 )
 
 #: ``(table, column, column DDL)`` for columns that may postdate a database
@@ -96,7 +104,7 @@ _CHECK_CONSTRAINTS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
 #: constant, no inline foreign-key clause on SQLite-only syntax.
 #:
 #: Only ``repos`` needs entries today: it is the table a deployment that
-#: predates this module can already have.  The other nine are created whole by
+#: predates this module can already have.  The other tables are created whole by
 #: :func:`create_missing_tables`, so a column added to one of *them* later is
 #: added here as well — that is the maintenance rule.
 _COLUMNS: tuple[tuple[str, str, str], ...] = (
@@ -121,6 +129,9 @@ _COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("agent_tasks", "dedup_key", "VARCHAR(200)"),
     # The PR a task opened; the merge webhook's finding link.
     ("agent_tasks", "pr_url", "VARCHAR(512)"),
+    # Which logical runner served the task; a soft reference (no FK), so it is
+    # added as a plain nullable column on an existing deployment.
+    ("agent_tasks", "runner_id", "INTEGER"),
 )
 
 #: ``(index name, table, column definitions, unique?)``.  ``IF NOT EXISTS`` is
