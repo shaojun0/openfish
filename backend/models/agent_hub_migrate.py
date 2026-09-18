@@ -2,7 +2,7 @@
 
 ``extensions.database`` calls ``Base.metadata.create_all()`` at boot, which
 creates missing *tables* but never alters an existing one, and then runs its own
-small ALTER list.  This module is the same idea, scoped to the nine
+small ALTER list.  This module is the same idea, scoped to the ten
 ``models.agent_hub`` tables, and is the single entry point the Agent Hub code
 (routes, the queue worker, the gates) uses when it needs the schema without
 booting Flask:
@@ -38,8 +38,8 @@ import logging
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
-from .agent_hub import AgentTask, Finding, FindingEvent, FindingEvidence, ImportJob
-from .agent_hub import Repo, RepoCommit, RepoIssue, ReviewRun
+from .agent_hub import AgentTask, Finding, FindingEvent, FindingEvidence, GitIdentity
+from .agent_hub import ImportJob, Repo, RepoCommit, RepoIssue, ReviewRun
 from .base import Base
 
 logger = logging.getLogger("cpypiserver.models.agent_hub_migrate")
@@ -47,9 +47,12 @@ logger = logging.getLogger("cpypiserver.models.agent_hub_migrate")
 #: Every table this module owns, in dependency order (a table appears after the
 #: tables it references).  ``create_missing_tables`` also resolves foreign keys
 #: by name, so the order is documentation rather than a requirement.
+#: ``git_identities`` references ``users`` (the only table here that does), so
+#: on an existing deployment it is created whole by ``create_missing_tables`` —
+#: there is no column-level ALTER to back-fill.
 AGENT_HUB_TABLES = (
     Repo, ImportJob, RepoIssue, RepoCommit, ReviewRun, AgentTask,
-    Finding, FindingEvent, FindingEvidence,
+    Finding, FindingEvent, FindingEvidence, GitIdentity,
 )
 
 #: ``(table, column, column DDL)`` for columns that may postdate a database
@@ -58,7 +61,7 @@ AGENT_HUB_TABLES = (
 #: constant, no inline foreign-key clause on SQLite-only syntax.
 #:
 #: Only ``repos`` needs entries today: it is the table a deployment that
-#: predates this module can already have.  The other eight are created whole by
+#: predates this module can already have.  The other nine are created whole by
 #: :func:`create_missing_tables`, so a column added to one of *them* later is
 #: added here as well — that is the maintenance rule.
 _COLUMNS: tuple[tuple[str, str, str], ...] = (

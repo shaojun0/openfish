@@ -834,6 +834,32 @@ class AuthzService:
         finally:
             session.close()
 
+    def set_active(self, user_id: int, value: bool = True) -> bool:
+        """Enable or deactivate an account.
+
+        ``is_active`` is the one switch every login path checks
+        (``auth/guards.py``), so this is the *revocation point*: deactivating a
+        user must also cut off the git credentials minted on their behalf.
+        That second half lives one layer up — ``cli.py disable-user`` calls
+        ``services.git_identity.revoke`` right after this — because
+        authorization and git-identity are separate concerns and this service
+        holds no knowledge of Forgejo.
+        """
+        session = self._s
+        try:
+            user = session.get(User, user_id)
+            if user is None:
+                raise ValueError(f"user {user_id} not found")
+            user.is_active = bool(value)
+            session.commit()
+            self.invalidate()
+            return True
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
     def count_superusers(self) -> int:
         session = self._s
         try:

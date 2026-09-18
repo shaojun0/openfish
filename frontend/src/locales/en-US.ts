@@ -923,6 +923,7 @@ export default {
     repeated: 'Seen {count} times; seen_count is growing',
     evidenceNone: 'No linked issues',
     evidenceLink: 'issue',
+    evidenceDetail: 'View evidence',
     truncated: 'Showing the newest {shown} of {total}; narrow the filters to see the rest.',
     empty: 'No matching findings.',
     loadFailed: 'Failed to load the debt board',
@@ -964,9 +965,13 @@ export default {
     evidenceTitle: 'Historical issue evidence',
     evidenceDesc:
       'The agent must search historical issues before reporting a problem; matches are listed here by number.',
+    evidenceFailed: 'Failed to load the historical issue evidence',
+    evidenceTruncated:
+      'There is more evidence than the character budget allows — {count} entries are not shown.',
     relationMentions: 'Mentions',
     relationDuplicateOf: 'Duplicate of',
     relationFixedBy: 'Fixed by',
+    relationRecall: 'Keyword recall',
     noEvidence: 'No linked historical issues.',
     eventsTitle: 'Event history',
     eventStart: 'First seen',

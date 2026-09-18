@@ -154,6 +154,7 @@
         }
         if (state.last_apply_at) row('最近应用', el('span', { class: 'dshei-muted' }, state.last_apply_at))
         row('包源自动切换', pill(state.auto_mirrors ? '开' : '关', state.auto_mirrors ? 'ok' : ''))
+        row('git 凭据助手', pill(state.auto_git_credential ? '开' : '关', state.auto_git_credential ? 'ok' : ''))
         var act = el('div', { class: 'dshei-act' })
         var toggle = el('button', { type: 'button', class: on ? '' : 'primary' }, on ? '停用企业内网模式' : '启用企业内网模式')
         var reapply = el('button', { type: 'button' }, '重新应用')

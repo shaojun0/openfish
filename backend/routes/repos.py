@@ -51,7 +51,7 @@ from auth.decorators import current_sub, current_user_id, require_permission
 from auth.permissions import REPO_PUSH, REPO_READ, REPO_WRITE
 from errors import BadRequestError, PypiError
 from openapi import api_operation, errors, json_body, ok
-from services import repo_import
+from services import git_identity, repo_import
 
 logger = logging.getLogger("cpypiserver.routes.repos")
 
@@ -73,18 +73,18 @@ _MAX_BODY_BYTES = 64 * 1024
 REPO_KINDS = ("upstream", "workspace")
 IMPORT_MODES = ("code", "code+issues", "issues")
 
-#: Lifetime of a minted git credential, in days.  Short by design: the key is
-#: shown once and used by a checkout or a pipeline run, so it should not become
-#: a long-lived second password for the account (contrast `routes/device.py`,
-#: whose 90 days buy a container restart without a re-login).
-GIT_CREDENTIAL_LIFETIME_DAYS = 7
+#: Lifetime of a minted git credential lives in ``services/git_identity.py``
+#: (``DEFAULT_TOKEN_LIFETIME_DAYS``): the service owns rotation, so a second
+#: number here would be a second truth.
 
 _SLUG_NOTE = (
     "Repository slug — always `\"<owner>/<name>\"`, e.g. `vllm-project/vllm`"
 )
 
 #: The git credential document (§5.2).  Shaped so it can be pasted into a git
-#: credential helper or a CI variable without transformation.
+#: credential helper or a CI variable without transformation.  ``password`` is a
+#: **Forgejo** access token, not an openfish API key: the platform brokers it
+#: through its Forgejo admin token (see ``services/git_identity.py``).
 _GIT_CREDENTIAL_SCHEMA = {
     "type": "object",
     "properties": {
@@ -95,18 +95,35 @@ _GIT_CREDENTIAL_SCHEMA = {
         },
         "username": {
             "type": "string",
-            "description": "Any non-empty value; Forgejo ignores it and checks the password",
+            "description": (
+                "The user's dedicated Forgejo login (`of-<id>-<hash>`), derived "
+                "deterministically from the platform account"
+            ),
         },
         "password": {
             "type": "string",
-            "description": "The freshly minted API key — shown once, never stored in clear",
+            "description": (
+                "A Forgejo access token minted for that account — shown once, "
+                "stored encrypted, never a platform API key"
+            ),
         },
         "expires_at": {
             "type": ["string", "null"],
-            "description": "ISO-8601 UTC expiry of the minted key",
+            "description": "ISO-8601 UTC expiry of the minted token",
+        },
+        "read_only": {
+            "type": "boolean",
+            "description": (
+                "True for an upstream mirror: the token was minted with "
+                "`read:repository` only, so it cannot push anywhere"
+            ),
+        },
+        "kind": {
+            "type": "string",
+            "description": "upstream (read-only mirror) | workspace",
         },
     },
-    "required": ["slug", "clone_url", "username", "password"],
+    "required": ["slug", "clone_url", "username", "password", "read_only"],
 }
 
 _REPO_SCHEMA = {
@@ -877,64 +894,140 @@ def get_import(job_id: int):
 @api_operation(
     summary="Mint a git credential for this repository",
     description=(
-        "Implements §5.2's credential hand-off: the platform does not own the "
-        "git wire protocol (Forgejo does), so it hands the caller one HTTP "
-        "Basic credential to use against `/git/<owner>/<name>.git`.\n\n"
-        "Authentication is the platform's own API-key mechanism — **not a "
-        "second credential system**: the minted key is validated by the same "
-        "code path as `pip`/`npm`/`docker` access. The key is returned **once** "
-        "and only its hash is stored; set it as the password with any non-empty "
-        "username:\n\n"
-        "```bash\ngit clone "
-        "$(curl -fsS -H \"Authorization: Bearer $KEY\" \\\n"
-        "    <base>/api/v1/repos/<slug>/git-credential | jq -r .clone_url)\n```\n\n"
-        "**Known limitation — the push half is not closed yet** "
-        "(DEVELOPMENT.md §13, open question 1). `clone` of a mirror works, "
-        "because Forgejo serves reads anonymously. `push` does not: "
-        "`git-receive-pack` checks the Basic credential against Forgejo, and "
-        "Forgejo does not know this platform's API keys. Closing it is a "
-        "deployment decision — either configure Forgejo to delegate auth back "
-        "to this backend, or have this endpoint mint a *Forgejo* token "
-        "(`/users/{u}/tokens`). Branch protection is independent and still "
-        "holds: only `agent/*` may ever be pushed (I4)."
+        "Implements §5.2's credential hand-off. The platform does not own the "
+        "git wire protocol (Forgejo does), and it is **Forgejo** that checks "
+        "the HTTP Basic credential on `git-receive-pack` — so this endpoint "
+        "hands back a **Forgejo** token, not one of this platform's API keys.\n\n"
+        "Authentication of the *caller* is unchanged: the platform credential "
+        "(`Bearer` API key or session) must carry `repo:push`. That is the "
+        "first gate; what the caller receives is brokered from it:\n\n"
+        "1. the platform user is mapped to a dedicated Forgejo account "
+        "(`git_identities`, created lazily and idempotently) whose login is "
+        "derived from the account id — `of-<user_id>-<sha256(external_id)[:10]>`;\n"
+        "2. the platform's `FORGEJO_ADMIN_TOKEN` mints a short-lived Forgejo "
+        "access token for that account (reused while unexpired, then rotated);\n"
+        "3. the response is `{username, password}` for HTTP Basic, with "
+        "`username` the Forgejo login and `password` its token.\n\n"
+        "`kind: upstream` (a read-only mirror) is **allowed** and receives a "
+        "`read:repository` ticket — `read_only: true` says so; a `workspace` "
+        "gets `write:repository`. Branch protection still holds independently: "
+        "only `agent/*` may ever be pushed (I4).\n\n"
+        "```bash\n"
+        "git clone \"$(curl -fsS -H \"Authorization: Bearer $KEY\" \\\n"
+        "    <base>/api/v1/repos/<slug>/git-credential | jq -r .clone_url)\"\n"
+        "```\n\n"
+        "Deployment prerequisites: `FORGEJO_ADMIN_TOKEN`, `FORGEJO_BASE_URL`, "
+        "`FORGEJO_PUBLIC_BASE_URL` and a `GIT_IDENTITY_KEY` (Fernet material "
+        "for encrypted token storage). With `GIT_IDENTITY_KEY` unset this "
+        "endpoint answers **503** — it never falls back to storing a token in "
+        "clear. See `docs/agent-hub/integration/S6.md` for the exact scopes "
+        "(`write:admin` on the platform token) and configuration."
     ),
     tags=["Repositories"],
     parameters=[_SLUG_PARAM],
     responses={
         "200": ok("The minted git credential", _GIT_CREDENTIAL_SCHEMA),
-        **errors("401", "403", "404", "409", "500"),
+        **errors("401", "403", "404", "502", "503", "500"),
     },
 )
 def git_credential(slug: str):
     repo = _repo_or_404(slug)
-    if getattr(repo, "kind", "workspace") == "upstream":
-        raise PypiError(
-            f"仓库 {slug!r} 是上游只读镜像，不能推送",
-            status_code=409,
+    kind = getattr(repo, "kind", "workspace")
+    # §8.1: an upstream mirror is read-only, so it gets a read-only ticket
+    # (`read:repository`) rather than a refusal — clone/fetch is a legitimate
+    # use of the endpoint, and Forgejo enforces the mirror on its own side too.
+    read_only = kind == "upstream"
+
+    user_id = current_user_id()
+    if not user_id:
+        raise PypiError("git 凭据必须绑定平台账号（当前主体没有 user_id）", status_code=403)
+    external_id = (current_sub() or "").strip()
+    authz = current_app.extensions.get("authz")
+    user = authz.get_user(int(user_id)) if authz is not None else None
+    if not external_id:
+        external_id = str(getattr(user, "external_id", "") or "")
+    if not external_id:
+        raise PypiError("git 凭据必须能追溯到稳定的平台身份（external_id）", status_code=403)
+
+    try:
+        credential = _git_identity_service().token_for(
+            int(user_id),
+            external_id,
+            display_name=getattr(user, "display_name", None),
+            email=getattr(user, "email", None),
+            read_only=read_only,
         )
+    except git_identity.GitIdentityConfigError as exc:
+        # A missing GIT_IDENTITY_KEY (or Forgejo admin token) is a deployment
+        # gap: 503, never a plaintext fallback.
+        raise PypiError(f"git 身份兑换未配置：{exc}", status_code=503) from exc
+    except repo_import.ForgejoError as exc:
+        raise PypiError(f"Forgejo 请求失败：{exc}", status_code=502) from exc
+    except git_identity.GitIdentityError as exc:
+        raise PypiError(str(exc), status_code=500) from exc
 
-    manager = current_app.extensions.get("api_key_manager")
-    if manager is None:
-        raise PypiError("API 密钥服务不可用", status_code=500)
-
-    # Git credentials are deliberately short-lived: a checkout clones once, and
-    # a leaked token in a CI log should not outlive the pipeline by much.
-    minted = manager.create_key(
-        f"git:{slug}",
-        created_by=current_sub() or "",
-        expires_in_days=GIT_CREDENTIAL_LIFETIME_DAYS,
-        user_id=current_user_id(),
-    )
-
-    forgejo_repo = getattr(repo, "forgejo_repo", None) or slug
-    root = f"{request.scheme}://{request.host}{request.script_root}".rstrip("/")
     return jsonify({
         "slug": slug,
-        "clone_url": f"{root}/git/{forgejo_repo}.git",
-        "username": "git",
-        "password": minted["key"],
-        "expires_at": minted.get("expires_at"),
+        "clone_url": _clone_url(_forgejo_repo_name(repo, slug)),
+        "username": credential.username,
+        "password": credential.token,
+        "expires_at": credential.expires_at,
+        "read_only": read_only,
+        "kind": kind,
     })
+
+
+# ── Git credential helpers ───────────────────────────────────────────
+# The endpoint above is the only writer of a credential; these two read the
+# Forgejo environment the rest of the repo already uses and build the URL.  They
+# live here rather than in the service because they are HTTP-shaped (they need
+# `request.host` when FORGEJO_PUBLIC_BASE_URL is a path prefix).
+
+def _git_config() -> repo_import.ImportConfig:
+    """The Forgejo/import environment, read once per request.
+
+    ``ImportConfig.from_env`` is the single reader of ``FORGEJO_BASE_URL`` /
+    ``FORGEJO_ADMIN_TOKEN`` / ``FORGEJO_OWNER`` / ``FORGEJO_PUBLIC_BASE_URL``;
+    this endpoint deliberately invents no second set of variable names.
+    """
+    return repo_import.ImportConfig.from_env()
+
+
+def _forgejo_repo_name(repo, slug: str) -> str:
+    """The Forgejo-side ``<owner>/<name>`` for the clone URL.
+
+    A repo that finished an import carries ``forgejo_repo``. A freshly created
+    workspace has not been migrated yet, so the name is derived the way
+    ``RepoImportService`` builds it (``FORGEJO_OWNER`` plus ``owner__name``).
+    """
+    existing = getattr(repo, "forgejo_repo", None)
+    if existing:
+        return str(existing)
+    owner = _git_config().owner
+    return f"{owner}/{slug.replace('/', '__')}"
+
+
+def _clone_url(forgejo_repo: str) -> str:
+    """The public clone URL, honouring ``FORGEJO_PUBLIC_BASE_URL``.
+
+    An absolute prefix is used verbatim; a path prefix (the default ``/git``) is
+    resolved against the request, which keeps the historical behaviour for
+    deployments that do not set the variable.
+    """
+    base = _git_config().public_base_url or "/git"
+    if base.startswith(("http://", "https://")):
+        prefix = base.rstrip("/")
+    else:
+        root = f"{request.scheme}://{request.host}{request.script_root}".rstrip("/")
+        prefix = f"{root}/{base.strip('/')}"
+    return f"{prefix}/{forgejo_repo}.git"
+
+
+def _git_identity_service() -> git_identity.GitIdentityService:
+    """A service bound to the process-wide scoped session, like ``_service()``."""
+    from extensions.database import Session
+
+    return git_identity.GitIdentityService(Session)
 
 
 __all__ = ["repo_bp", "issue_to_dict", "repo_to_dict"]

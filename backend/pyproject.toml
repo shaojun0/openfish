@@ -9,6 +9,12 @@ description = "A lightweight Python package server built with Flask."
 requires-python = ">=3.12"
 dependencies = [
     "clamd>=1.0.2",
+    # Fernet (AES-128-CBC + HMAC) for the Forgejo git-identity tokens.
+    # A runtime dependency, not a dev one: ``services/git_identity.py`` seals
+    # every minted token with it, and a production image without it would 503
+    # the git-credential endpoint.  Until now it only arrived transitively
+    # through a dev extra, which is exactly what this list exists to prevent.
+    "cryptography>=42",
     "flask-caching>=2.4",
     "flask>=3.1",
     "flask-pydantic>=0.14.0",

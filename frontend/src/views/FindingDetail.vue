@@ -10,6 +10,8 @@ import {
   cancelAgentTask,
   fetchAgentTaskLog,
   fetchFinding,
+  fetchFindingEvidence,
+  fetchRepos,
   fixFinding,
   retryAgentTask,
 } from '@/api/agentHub'
@@ -36,8 +38,12 @@ interface EvidenceRef {
   number?: number | null
   issue?: { number?: number | null; url?: string | null; title?: string | null } | null
   relation?: string | null
+  /** `evidence` = linked through `finding_evidence`; `keyword` = anchor recall. */
+  origin?: 'evidence' | 'keyword'
   url?: string | null
   title?: string | null
+  state?: string | null
+  author?: string | null
 }
 
 interface Finding {
@@ -130,6 +136,13 @@ const run = ref<RunSummary | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 
+/** `repo_id -> slug`; the evidence route is keyed by slug, S3 by numeric id. */
+const repoSlugs = ref<Record<string, string>>({})
+const evidenceLoading = ref(false)
+const evidenceError = ref('')
+const evidenceTruncated = ref(false)
+const evidenceOmitted = ref(0)
+
 const task = ref<AgentTask | null>(null)
 const fixing = ref(false)
 const logVisible = ref(false)
@@ -138,11 +151,75 @@ const logText = ref('')
 
 const today = dayjs().format('YYYY-MM-DD')
 
+/** The repo as `owner/name`, falling back to `#<id>` when the map missed it. */
+const repoLabel = computed(() => {
+  const joined = String(finding.value?.repo_slug ?? '')
+  if (joined) return joined
+  const slug = repoSlugOf(finding.value?.repo_id)
+  if (slug) return slug
+  return finding.value?.repo_id ? `#${finding.value.repo_id}` : '—'
+})
+
+function slugMap(data: unknown): Record<string, string> {
+  const map: Record<string, string> = {}
+  for (const repo of asList(data, ['items', 'repos']) as Array<{
+    id?: number
+    slug?: string
+  }>) {
+    if (repo.id !== undefined && repo.slug) map[String(repo.id)] = repo.slug
+  }
+  return map
+}
+
+function repoSlugOf(repoId: number | null | undefined): string {
+  if (repoId === undefined || repoId === null) return ''
+  return repoSlugs.value[String(repoId)] ?? ''
+}
+
+/**
+ * The finding's linked history (`finding_evidence`) plus anchor recall, read
+ * from `GET /repos/<slug>/context/search?finding_id=…` (§4.6 / §13.2). Failure
+ * is deliberately **not** fatal: the card shows its error and empty state while
+ * the finding itself still renders.
+ */
+async function loadEvidence(slug: string): Promise<EvidenceRef[]> {
+  if (!slug) return []
+  evidenceLoading.value = true
+  evidenceError.value = ''
+  evidenceTruncated.value = false
+  evidenceOmitted.value = 0
+  try {
+    const data = (await fetchFindingEvidence(slug, id.value, { limit: 20 })) as {
+      items?: EvidenceRef[]
+      truncated?: boolean
+      omitted?: number
+    }
+    evidenceTruncated.value = data?.truncated === true
+    evidenceOmitted.value = Number(data?.omitted ?? 0)
+    return asList(data, ['items']) as EvidenceRef[]
+  } catch (e) {
+    evidenceError.value = apiError(e) || t('findingDetail.evidenceFailed')
+    return []
+  } finally {
+    evidenceLoading.value = false
+  }
+}
+
 async function load(): Promise<void> {
   loading.value = true
   loadError.value = ''
   try {
-    const data = (await fetchFinding(id.value)) as Record<string, unknown> | null
+    // The board passes `?repo=<slug>` (see Findings.vue), so the evidence
+    // request starts in the very same wave as the detail request. On a bare
+    // deep link the slug is unknown until the finding answers, so it is
+    // resolved from `repo_id` afterwards — one extra request, never N+1.
+    const slugFromRoute = String(route.query.repo ?? '')
+    const [data, repos, early] = await Promise.all([
+      fetchFinding(id.value),
+      fetchRepos({ per_page: 200 }).catch(() => null),
+      slugFromRoute ? loadEvidence(slugFromRoute) : Promise.resolve(null),
+    ])
+    repoSlugs.value = slugMap(repos)
     const row =
       (data?.finding as Finding | undefined) ?? (data as unknown as Finding | null) ?? null
     finding.value = row
@@ -150,12 +227,15 @@ async function load(): Promise<void> {
       data?.events ?? (row as { events?: FindingEvent[] } | null)?.events,
       ['items'],
     ) as FindingEvent[]
-    evidence.value = asList(
-      data?.evidence ?? row?.evidence,
-      ['items'],
-    ) as EvidenceRef[]
     run.value = (data?.run as RunSummary | undefined) ?? null
     gates.value = asList(data?.gates ?? run.value?.gates, ['items']) as GateResult[]
+    if (early === null) {
+      evidence.value = await loadEvidence(
+        String(row?.repo_slug ?? '') || repoSlugOf(row?.repo_id),
+      )
+    } else {
+      evidence.value = early
+    }
   } catch (e) {
     finding.value = null
     loadError.value = apiError(e) || t('findingDetail.loadFailed')
@@ -208,8 +288,13 @@ function relationLabel(relation: string | null | undefined): string {
       return t('findingDetail.relationFixedBy')
     case 'mentions':
       return t('findingDetail.relationMentions')
+    case null:
+    case undefined:
+    case '':
+      // No `finding_evidence` row: the item came back from anchor recall.
+      return t('findingDetail.relationRecall')
     default:
-      return relation || t('findingDetail.relationMentions')
+      return relation
   }
 }
 
@@ -419,9 +504,7 @@ onMounted(load)
         </template>
         <el-descriptions :column="2" border>
           <el-descriptions-item :label="t('findingDetail.repo')">
-            <span class="mono">
-              {{ finding.repo_slug || (finding.repo_id ? `#${finding.repo_id}` : '—') }}
-            </span>
+            <span class="mono">{{ repoLabel }}</span>
           </el-descriptions-item>
           <el-descriptions-item :label="t('findingDetail.ruleId')">
             <span class="mono">{{ finding.rule_id || '—' }}</span>
@@ -521,11 +604,23 @@ onMounted(load)
       </el-card>
 
       <!-- Historical issues (§4.6) -->
-      <el-card shadow="never">
+      <el-card v-loading="evidenceLoading" shadow="never">
         <template #header>
           <span class="card-title">{{ t('findingDetail.evidenceTitle') }}</span>
         </template>
         <p class="finding-detail__hint">{{ t('findingDetail.evidenceDesc') }}</p>
+        <el-alert
+          v-if="evidenceError"
+          class="finding-detail__evidence-note"
+          type="warning"
+          show-icon
+          :closable="false"
+          :title="t('findingDetail.evidenceFailed')"
+          :description="evidenceError"
+        />
+        <p v-if="evidenceTruncated" class="finding-detail__hint">
+          {{ t('findingDetail.evidenceTruncated', { count: evidenceOmitted }) }}
+        </p>
         <ul v-if="evidence.length" class="finding-detail__evidence">
           <li v-for="(item, index) in evidence" :key="index" class="finding-detail__evidence-item">
             <el-tag size="small" effect="plain">{{ relationLabel(item.relation) }}</el-tag>
@@ -542,7 +637,7 @@ onMounted(load)
             </span>
           </li>
         </ul>
-        <el-empty v-else :description="t('findingDetail.noEvidence')" />
+        <el-empty v-else-if="!evidenceLoading" :description="t('findingDetail.noEvidence')" />
       </el-card>
 
       <!-- Event history -->
@@ -716,6 +811,10 @@ onMounted(load)
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.finding-detail__evidence-note {
+  margin-bottom: 12px;
 }
 
 .finding-detail__evidence-item {

@@ -28,16 +28,14 @@ import { formatDateOnly } from '@/utils/format'
  * An overdue row and a row whose `seen_count` grew are both marked: those are
  * exactly the two conditions §6.2 uses to drag a finding back to `open`, so a
  * board that hid them would hide the reactivation before it happens.
+ *
+ * The evidence column deliberately shows **no per-row evidence**: fetching it
+ * here would be an N+1 (one request per rendered row) and the linked history is
+ * one click away, rendered in full on the detail page.  The column is instead
+ * an explicit "view evidence" entry that carries the repository slug, so
+ * `FindingDetail` can start its evidence request in parallel with the detail
+ * request (§13.2).
  */
-interface EvidenceRef {
-  issue_number?: number | null
-  number?: number | null
-  issue?: { number?: number | null; url?: string | null; title?: string | null } | null
-  relation?: string | null
-  url?: string | null
-  title?: string | null
-}
-
 interface Finding {
   id: number | string
   /** S3 serialises the numeric id; the slug comes from the repo map. */
@@ -56,7 +54,6 @@ interface Finding {
   owner?: string | null
   due?: string | null
   pr_url?: string | null
-  evidence?: EvidenceRef[] | null
 }
 
 type DecisionAction = 'fix' | 'acknowledge' | 'wontfix' | 'false_positive'
@@ -203,15 +200,6 @@ function severityLabel(severity: string | null | undefined): string {
     : severity || t('common.unknown')
 }
 
-function evidenceNumber(evidence: EvidenceRef): number | null {
-  const number = evidence.issue_number ?? evidence.number ?? evidence.issue?.number
-  return typeof number === 'number' ? number : null
-}
-
-function evidenceUrl(evidence: EvidenceRef): string | null {
-  return evidence.url ?? evidence.issue?.url ?? null
-}
-
 /** Slug for a row: the API may join it in, otherwise the repo map supplies it. */
 function repoSlugOf(row: Finding): string {
   if (row.repo_slug) return String(row.repo_slug)
@@ -233,25 +221,13 @@ function repoHref(row: Finding): string {
 }
 
 /**
- * Every linked historical issue gets a link: the source-system URL when the
- * mirror kept one, otherwise the repo page's issue drawer (which reads
- * `?issue=<number>`).
+ * The detail location.  The slug travels in the query so the detail page can
+ * request the finding and its evidence in the same wave — evidence otherwise
+ * has to wait for `repo_id -> slug` resolution (§13.2).
  */
-function evidenceHref(row: Finding, evidence: EvidenceRef): string {
-  const external = evidenceUrl(evidence)
-  if (external) return external
-  const number = evidenceNumber(evidence)
+function detailRoute(row: Finding): { path: string; query: Record<string, string> } {
   const slug = repoSlugOf(row)
-  if (!number || !slug) return ''
-  const path = slug.split('/').map(encodeURIComponent).join('/')
-  return `/repos/${path}?issue=${number}`
-}
-
-function evidenceLabel(evidence: EvidenceRef): string {
-  const number = evidenceNumber(evidence)
-  const title = evidence.title ?? evidence.issue?.title
-  const prefix = number ? `#${number}` : t('findings.evidenceLink')
-  return title ? `${prefix} ${title}` : prefix
+  return { path: `/findings/${row.id}`, query: slug ? { repo: slug } : {} }
 }
 
 function statusBadgeType(row: Finding): 'success' | 'warning' | 'danger' | 'info' {
@@ -554,21 +530,9 @@ onMounted(() => {
 
         <el-table-column :label="t('findings.colEvidence')" min-width="200">
           <template #default="{ row }">
-            <div class="finding-evidence">
-              <a
-                v-for="(ev, index) in row.evidence ?? []"
-                :key="index"
-                class="finding-evidence__link"
-                :href="evidenceHref(row, ev) || undefined"
-                target="_blank"
-                rel="noopener"
-              >
-                {{ evidenceLabel(ev) }}
-              </a>
-              <span v-if="!(row.evidence ?? []).length" class="finding-evidence__empty">
-                {{ t('findings.evidenceNone') }}
-              </span>
-            </div>
+            <router-link class="finding-evidence__link" :to="detailRoute(row)">
+              {{ t('findings.evidenceDetail') }}
+            </router-link>
           </template>
         </el-table-column>
 
@@ -582,7 +546,7 @@ onMounted(() => {
 
         <el-table-column :label="t('common.actions')" width="320" align="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="$router.push(`/findings/${row.id}`)">
+            <el-button link type="primary" @click="$router.push(detailRoute(row))">
               {{ t('findings.actionDetail') }}
             </el-button>
             <template v-if="canDecide">
@@ -691,21 +655,9 @@ onMounted(() => {
 
         <el-table-column :label="t('findings.colEvidence')" min-width="200">
           <template #default="{ row }">
-            <div class="finding-evidence">
-              <a
-                v-for="(ev, index) in row.evidence ?? []"
-                :key="index"
-                class="finding-evidence__link"
-                :href="evidenceHref(row, ev) || undefined"
-                target="_blank"
-                rel="noopener"
-              >
-                {{ evidenceLabel(ev) }}
-              </a>
-              <span v-if="!(row.evidence ?? []).length" class="finding-evidence__empty">
-                {{ t('findings.evidenceNone') }}
-              </span>
-            </div>
+            <router-link class="finding-evidence__link" :to="detailRoute(row)">
+              {{ t('findings.evidenceDetail') }}
+            </router-link>
           </template>
         </el-table-column>
 
@@ -719,7 +671,7 @@ onMounted(() => {
 
         <el-table-column :label="t('common.actions')" width="360" align="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="$router.push(`/findings/${row.id}`)">
+            <el-button link type="primary" @click="$router.push(detailRoute(row))">
               {{ t('findings.actionDetail') }}
             </el-button>
             <template v-if="canDecide">
@@ -907,8 +859,7 @@ onMounted(() => {
 }
 
 .finding-rule__title,
-.finding-location__symbol,
-.finding-evidence__empty {
+.finding-location__symbol {
   font-size: 12px;
   color: var(--el-text-color-secondary);
 }
@@ -929,12 +880,6 @@ onMounted(() => {
   margin-left: 4px;
   vertical-align: middle;
   color: var(--el-color-danger);
-}
-
-.finding-evidence {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
 }
 
 .finding-evidence__link {

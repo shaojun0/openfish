@@ -10,6 +10,7 @@ DSH（DeepSeek Harness）的**企业内网模式**插件。把 DSH 接到企业�
 | 企业平台的 **api-key 是必选项**，没有就跑不起来 | 没有 key 时**不会**启用企业内网模式；面板把用户送到平台的设备授权页登录，登录成功后平台签发的 key **由插件自动收下**，无需复制粘贴 |
 | 模型路由表里哪条是默认模型 | 用 key 读 `GET /api/v1/models/resolved`，为每条启用的路由注册一个 `llm-pi-ai` provider，并把 `agent-default-model` 指向 `aliases` 含 `default` 的那条 |
 | 内网包源要一个个手配 | 自动写 pip / npm / apt / docker / nvm 的镜像配置 |
+| git 仓库的 push 凭据 | 生成 git credential helper（`/usr/local/bin/openfish-git-credential`，`700`）+ `/etc/gitconfig`：clone/push 时用平台 key 向平台换一张**短期 Forgejo 票**（Forgejo 只认自己的 token，平台 key 本身推不上去） |
 | 工具与文档入口 | 面板列出平台的 `/api/v1/tools`、`/api/v1/docs` 与各生态页面 |
 
 ## 安装
@@ -51,8 +52,9 @@ dsh plugin --profile web add link:<openfish 仓库路径>/integrations/dsh-plugi
 | `platformUrl` | `https://47.97.243.86:9443` | 企业平台地址 |
 | `apiKey` | `''` | 一般不填，让用户在面板里领 |
 | `autoMirrors` | `true` | 自动写包源配置 |
+| `autoGitCredential` | `true` | 自动写 git credential helper 与 `/etc/gitconfig`（同 `autoMirrors` 风格；关掉会删除 helper） |
 | `defaultAlias` | `default` | 认哪个别名是默认模型 |
-| `verifyTls` / `caFile` | `false` / `''` | 平台证书校验 |
+| `verifyTls` / `caFile` | `false` / `''` | 平台证书校验（git 侧同步写进 `/etc/gitconfig`） |
 | `requestTimeoutMs` | `20000` | 平台请求超时 |
 
 ## 宿主侧 HTTP 端点
@@ -73,15 +75,24 @@ dsh plugin --profile web add link:<openfish 仓库路径>/integrations/dsh-plugi
 | POST | `/mirrors/apply` | 重写包源配置文件 |
 | GET | `/routes.json` | 原始模型路由 |
 | GET | `/catalog.json` | 工具 / 文档目录与入口链接 |
-| POST | `/config` | 改 `platformUrl` / `autoMirrors` / `verifyTls` / `defaultAlias` |
+| POST | `/config` | 改 `platformUrl` / `autoMirrors` / `autoGitCredential` / `verifyTls` / `defaultAlias` |
 
 ## 安全
 
 * 从不把 api-key 的值返回给浏览器；面板只显示前缀与来源。
 * key 存在 DSH 凭据服务（`$DSH_HOME/.credentials.yaml`）：
   `ENTERPRISE_INTRANET_PLATFORM_KEY` 与每条路由的 `ENTERPRISE_INTRANET_KEY_<SLUG>`。
+* **git credential helper 里带着平台 key**，所以插件把脚本写成 `700`
+  （`/usr/local/bin/openfish-git-credential`，普通用户不可读），
+  `/etc/gitconfig` 只写 `helper` 指针与 `useHttpPath = true`。停用企业内网模式、
+  或把 `autoGitCredential` 设为 `false` 时，插件会删除这个脚本。
+* helper 交给 git 的**不是平台 key**，而是平台按需兑换的**短期 Forgejo 票**
+  （默认 7 天，按用户隔离；上游只读仓拿到的是只读 scope）。票由 git 在内存里
+  用完即弃，插件不落盘。
+* 平台不可达 / 兑换失败时 helper **静默退出**（stdout 为空、exit 0），只在
+  stderr 留一行原因——不会把 git 卡死。
 * 平台自签证书用 `node:https` 的 `rejectUnauthorized` / `ca` 处理，
-  不会去动 `NODE_TLS_REJECT_UNAUTHORIZED`。
+  不会去动 `NODE_TLS_REJECT_UNAUTHORIZED`；git 侧对应写 `sslVerify` / `sslCAInfo`。
 
 ## 依赖
 

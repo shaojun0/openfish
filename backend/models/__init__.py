@@ -3,7 +3,7 @@
 Importing this package registers every table on ``Base.metadata`` — keep it
 that way, because ``create_all`` only creates what has been imported.
 
-``agent_hub`` is the ninth-through-seventeenth table group (repos, imported
+``agent_hub`` is the ninth-through-eighteenth table group (repos, imported
 collaboration history, findings, review runs and the agent task queue); its
 constants and ``to_dict()`` serializers are re-exported here so callers can say
 ``from models import FINDING_STATUS`` instead of reaching into the module.
@@ -31,6 +31,7 @@ from .agent_hub import (
     Finding,
     FindingEvent,
     FindingEvidence,
+    GitIdentity,
     ImportJob,
     Repo,
     RepoCommit,
@@ -56,6 +57,7 @@ __all__ = [
     "Finding",
     "FindingEvent",
     "FindingEvidence",
+    "GitIdentity",
     "ImportJob",
     "Repo",
     "RepoCommit",

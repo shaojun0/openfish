@@ -20,11 +20,14 @@ lease query non-indexable.  ``to_dict()`` still renders ISO-8601 through
 
 Relationship to the rest of the schema
 --------------------------------------
-There are deliberately **no foreign keys into ``users``**: an agent finding is
-attributed to an actor string (an OAuth subject) exactly like
-``api_keys.created_by``, so a repository imported from upstream keeps its
-history even when the account that decided a finding is later removed.  Within
-the module, foreign keys are real and cascade, because those rows are ours.
+There are deliberately **no foreign keys into ``users``** for the history
+tables: an agent finding is attributed to an actor string (an OAuth subject)
+exactly like ``api_keys.created_by``, so a repository imported from upstream
+keeps its history even when the account that decided a finding is later
+removed.  The one exception is :class:`GitIdentity`, which is a *live* mapping
+rather than history — it is meaningless without its account, so it carries a
+real ``users.id`` foreign key with ``ON DELETE CASCADE``.  Within the module,
+foreign keys are real and cascade, because those rows are ours.
 """
 
 from __future__ import annotations
@@ -624,6 +627,72 @@ class AgentTask(Base):
         return f"<AgentTask {self.id} {self.kind} {self.status}>"
 
 
+# ── git_identities ───────────────────────────────────────────────────
+
+class GitIdentity(Base):
+    """The per-user bridge from an openfish account to a Forgejo credential.
+
+    Spec: ``DEVELOPMENT.md`` §5.2 (the git credential hand-off) and §13.1 (the
+    push credential chain this table closes).  Forgejo authenticates
+    ``git-receive-pack`` itself, so an openfish API key can never be the push
+    password; the platform keeps one *dedicated* Forgejo account per openfish
+    user and stores the Forgejo access token it minted for that account.
+
+    ``forgejo_username`` is derived deterministically from
+    ``(user_id, external_id)`` by ``services.git_identity.derive_username`` and
+    is effectively permanent: commit attribution and audit hang off it, so a
+    rename would orphan every past commit.  Treat the derivation rule as frozen.
+
+    ``token_ciphertext`` is a Fernet-sealed envelope holding the Forgejo token
+    and the scope it was minted with — **no plaintext Forgejo token may ever
+    reach this table**.  ``services.git_identity`` is the only writer and the key
+    comes from the ``GIT_IDENTITY_KEY`` environment variable.
+    ``token_expires_at`` is this platform's rotation deadline (Forgejo access
+    tokens carry none of their own), ``rotated_at`` the last mint and
+    ``revoked_at`` a deactivation that the service can revive.
+    """
+
+    __tablename__ = "git_identities"
+
+    id: Mapped[int] = Column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    # Forgejo-side login name.  Unique because it is the remote account key.
+    forgejo_username: Mapped[str] = Column(String(64), nullable=False, unique=True)
+    external_id: Mapped[str] = Column(String(256), nullable=False)
+    token_ciphertext: Mapped[str | None] = Column(Text, nullable=True)
+    token_expires_at: Mapped[datetime | None] = Column(DateTime(timezone=True), nullable=True)
+    rotated_at: Mapped[datetime | None] = Column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = Column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = Column(
+        DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    def to_dict(self) -> dict:
+        # The ciphertext is deliberately absent: this document is for the
+        # console, and the only thing it may learn is *whether* a token exists.
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "forgejo_username": self.forgejo_username,
+            "external_id": self.external_id,
+            "has_token": bool(self.token_ciphertext),
+            "token_expires_at": iso(self.token_expires_at),
+            "rotated_at": iso(self.rotated_at),
+            "revoked_at": iso(self.revoked_at),
+            "created_at": iso(self.created_at),
+            "updated_at": iso(self.updated_at),
+        }
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<GitIdentity user={self.user_id} {self.forgejo_username}>"
+
+
 # ── finding_evidence ─────────────────────────────────────────────────
 
 class FindingEvidence(Base):
@@ -706,6 +775,7 @@ __all__ = [
     "Finding",
     "FindingEvent",
     "FindingEvidence",
+    "GitIdentity",
     "ImportJob",
     "Repo",
     "RepoCommit",

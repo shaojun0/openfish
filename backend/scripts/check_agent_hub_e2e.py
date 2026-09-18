@@ -27,6 +27,8 @@ safe to run beside the other gates.  Everything it asserts is an invariant from
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import os
 import sys
 import tempfile
@@ -75,6 +77,18 @@ def main() -> int:
     # naming, so prefixing it here would silently bootstrap a second, unused
     # account and every admin call would 403.
     os.environ["SERVER__ADMIN_USERS"] = f'["{args.user}"]'
+
+    # §5.2 credential exchange.  This gate is offline, so it has no real Forgejo:
+    # it sets the storage key (otherwise the endpoint correctly answers 503) and
+    # points the exchange at a closed port, then asserts the *failure mode* —
+    # a clean 502/503 envelope, never a 500 or a traceback.  That the exchange
+    # actually mints a Forgejo ticket is proven separately, against an injected
+    # fake client, by `scripts/check_git_identity.py`.
+    os.environ["GIT_IDENTITY_KEY"] = base64.urlsafe_b64encode(
+        hashlib.sha256(b"openfish-e2e-gate").digest()
+    ).decode()
+    os.environ.setdefault("FORGEJO_ADMIN_TOKEN", "e2e-not-a-real-token")
+    os.environ["FORGEJO_BASE_URL"] = "http://127.0.0.1:1"
 
     from extensions.database import Session, init_engine
     from auth.api_keys import ApiKeyManager
@@ -208,13 +222,29 @@ def main() -> int:
 
     print("── 5 · S1 git credential hand-off (§5.2) ───────────────────")
     response = client.get("/api/v1/repos/openfish/e2e/git-credential", headers=auth)
-    check("git-credential answers", response.status_code == 200, str(response.status_code))
-    cred = response.get_json() or {}
-    check("it returns a clone URL and a one-time password",
-          cred.get("clone_url", "").endswith(".git") and bool(cred.get("password")),
-          str(sorted(cred))[:200])
-    check("the minted password is a platform API key",
-          str(cred.get("password", "")).startswith("cpypi_"), str(cred.get("password"))[:12])
+    status = response.status_code
+    payload = response.get_json() or {}
+    # The endpoint is authenticated and reachable — that much is offline-checkable.
+    check("git-credential is not a 401/403 for a permitted caller",
+          status not in (401, 403), str(status))
+    check("git-credential never answers 500 (no unhandled failure)",
+          status != 500, f"{status} {str(payload)[:200]}")
+    if status == 200:
+        # A deployment with a live Forgejo: the ticket must be a *Forgejo* token,
+        # never the platform's own API key (that was the §13.1 defect).
+        check("a live exchange returns a clone URL and a ticket",
+              str(payload.get("clone_url", "")).endswith(".git") and bool(payload.get("password")),
+              str(sorted(payload))[:200])
+        check("the ticket is not the platform API key",
+              not str(payload.get("password", "")).startswith("cpypi_"),
+              str(payload.get("password"))[:12])
+    else:
+        # Offline: the deployment gap must surface as a clean, typed envelope.
+        check("an unconfigured/unreachable Forgejo degrades to 502/503",
+              status in (502, 503), str(status))
+        check("the degradation carries an error envelope",
+              isinstance(payload.get("error"), str) and bool(payload["error"]),
+              str(payload)[:200])
 
     print("── 6 · S4 task surface (§5.3) ──────────────────────────────")
     response = client.get("/api/v1/agent/tasks", headers=auth)

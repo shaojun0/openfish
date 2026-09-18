@@ -99,8 +99,12 @@ x-backend-env: &backend-env
   FORGEJO_PUBLIC_BASE_URL: ${FORGEJO_PUBLIC_BASE_URL:-/git}
   # 平台专用 Forgejo admin token 与 webhook 共享密钥。
   # **密钥只走环境变量，永不进仓库、不进日志**（与 model_routes.json 的不落密原则一致）。
+  # admin token 至少需要 `write:admin`（建用户 / 替用户铸票 / 删用户都在 /admin/*）。
   FORGEJO_ADMIN_TOKEN: ${FORGEJO_ADMIN_TOKEN:-}
   FORGEJO_WEBHOOK_SECRET: ${FORGEJO_WEBHOOK_SECRET:-}
+  # Fernet 主密钥：加密落库 git_identities 表里的 Forgejo token（§5.2 身份兑换）。
+  # 缺失时 /git-credential 返回 503，**不回退明文**。
+  GIT_IDENTITY_KEY: ${GIT_IDENTITY_KEY:-}
   # 大仓保护（§8.2）：到上限标 partial=true 并由 API 显式暴露，绝不静默截断。
   IMPORT_MAX_ISSUES: ${IMPORT_MAX_ISSUES:-20000}
   IMPORT_MAX_COMMITS: ${IMPORT_MAX_COMMITS:-5000}

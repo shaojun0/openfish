@@ -150,6 +150,67 @@ def cmd_show(args, authz: AuthzService) -> int:
     return 0
 
 
+def _revoke_git_identity(user_id: int, *, delete_forgejo_user: bool = False) -> bool:
+    """Revoke the Forgejo credential minted for *user_id* (best effort).
+
+    The import is local so ``cli.py --help`` stays cheap, and a failure here is a
+    warning rather than an error: the account is already deactivated, and the
+    operator must not be left with a half-applied command.  Git-identity
+    revocation itself needs no ``GIT_IDENTITY_KEY`` (it deletes by the
+    deterministic username), so a missing key does not block it.
+    """
+    from services.git_identity import GitIdentityError, GitIdentityService
+
+    try:
+        return GitIdentityService(Session).revoke(
+            user_id, delete_forgejo_user=delete_forgejo_user,
+        )
+    except GitIdentityError as exc:
+        print(f"warning: git identity not revoked: {exc}", file=sys.stderr)
+        return False
+
+
+def cmd_disable_user(args, authz: AuthzService) -> int:
+    """Deactivate an account and cut off its git credentials.
+
+    ``is_active=False`` is the switch every login path checks; because the git
+    push credential is a Forgejo token minted *on the user's behalf*, it has to
+    be revoked here too — otherwise a deactivated account keeps pushing.
+    """
+    user = authz.find_user(args.identity)
+    if user is None:
+        return _fail(f"no account for {args.identity!r}")
+    if not user.is_active:
+        print(f"{args.identity} is already inactive — nothing to do.")
+        return 0
+    authz.set_active(user.id, False)
+    revoked = _revoke_git_identity(
+        user.id, delete_forgejo_user=args.delete_forgejo_user,
+    )
+    print(f"Deactivated {_describe(authz, user)}")
+    print("  Every login path checks is_active, so the account can no longer authenticate.")
+    if revoked:
+        suffix = " (Forgejo account deleted)" if args.delete_forgejo_user else ""
+        print(f"  git identity: revoked{suffix}")
+    else:
+        print("  git identity: none on record")
+    print("  Re-enable with: cli.py enable-user " + args.identity)
+    return 0
+
+
+def cmd_enable_user(args, authz: AuthzService) -> int:
+    user = authz.find_user(args.identity)
+    if user is None:
+        return _fail(f"no account for {args.identity!r}")
+    if user.is_active:
+        print(f"{args.identity} is already active — nothing to do.")
+        return 0
+    authz.set_active(user.id, True)
+    print(f"Reactivated {_describe(authz, user)}")
+    print("  The next git-credential request re-provisions a Forgejo token.")
+    return 0
+
+
 def cmd_list_admins(args, authz: AuthzService) -> int:
     admins = [u for u in authz.list_users(limit=1000) if u["is_superuser"]]
     if not admins:
@@ -216,6 +277,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  cli.py create-admin zhangsan\n"
             "  cli.py grant zhangsan publisher\n"
             "  cli.py show zhangsan\n"
+            "  cli.py disable-user zhangsan\n"
             "  cli.py list-roles\n"
         ),
     )
@@ -256,6 +318,21 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("show", help="Show one account's roles and permissions.")
     p.add_argument("identity")
     p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser(
+        "disable-user",
+        help="Deactivate an account and revoke its Forgejo git credential.",
+    )
+    p.add_argument("identity")
+    p.add_argument(
+        "--delete-forgejo-user", action="store_true",
+        help="Also delete the account's dedicated Forgejo account.",
+    )
+    p.set_defaults(func=cmd_disable_user)
+
+    p = sub.add_parser("enable-user", help="Reactivate a deactivated account.")
+    p.add_argument("identity")
+    p.set_defaults(func=cmd_enable_user)
 
     p = sub.add_parser("list-admins", help="List superusers.")
     p.set_defaults(func=cmd_list_admins)

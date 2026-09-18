@@ -337,8 +337,16 @@ finding_evidence: finding_id, repo_issue_id, relation("mentions"|"duplicate_of"|
 | `/git/<owner>/<repo>.git/info/refs?service=git-receive-pack` | push（需 `repo:push`） |
 | `/forgejo-api/` | 内部 API 反代（openfish 后端调用，不对外直接暴露） |
 
-凭据：API-key 与 git 共用一套（HTTP Basic，用户名任意，密码为 API-key），
-复用现有 `auth/` 里的 API-key 校验，**不新建第二套凭据体系**。
+凭据：**两段式**。调用方先用平台凭据（API-key，或 DSH 通过设备授权自动获得的
+那一枚）向 `GET /api/v1/repos/<slug>/git-credential` 换取一张票；平台凭据是第一道门
+（`repo:push`），**git 面本身使用的是换来的 Forgejo 票**——因为 `git-receive-pack` 的
+Basic 由 Forgejo 校验，它不认识平台的 API key（§13.1）。
+
+兑换规则：平台为每个用户懒创建一个专属 Forgejo 账号（`of-<user_id>-<sha256(external_id)[:10]>`，
+**一经上线不可改**），并用 `FORGEJO_ADMIN_TOKEN` 铸一张最小 scope 的 access token：
+`kind=workspace` 给 `write:repository`，`kind=upstream` 只读镜像给 `read:repository`。
+token 用 Fernet（`GIT_IDENTITY_KEY`）加密落库、按用户隔离、到期轮换，用户被禁用即撤销
+（`cli.py disable-user`）。缺 `GIT_IDENTITY_KEY` 时该端点返回 **503**，**不降级为明文**。
 
 ### 5.3 REST 契约（`/api/v1`，需同步 `openapi/` 与 `check_contract.py`）
 
@@ -675,12 +683,17 @@ make gates
 
 ## 13. 开放问题（实现中遇到请追加到 `docs/agent-hub/OPEN-QUESTIONS.md`）
 
-1. **（最高优先，已确认未闭合）push 的凭据链。** `git-receive-pack` 的 Basic 认证由
-   **Forgejo** 承担，而 `/git-credential` 铸造的是 **openfish API key**；Forgejo 默认
-   不认识它。因此 `clone`（匿名只读）成立，**`push` 端到端不成立**。两条闭合路径：
-   ① 给 Forgejo 配认证委派（把 Basic 转给 openfish 校验）；② 让 `git-credential` 改铸
-   Forgejo token（新增对 `/users/{u}/tokens` 的调用）。这是部署决策，不在本轮实现范围内。
-   `routes/repos.py::git_credential` 的 docstring 与 README 权限表已如实标注，避免假装闭环。
+1. **（已闭合，S6；但上线前须用真 Forgejo 验证一次）push 的凭据链。**
+   `git-receive-pack` 的 Basic 认证由 **Forgejo** 承担，而旧 `/git-credential` 铸造的是
+   **openfish API key**；Forgejo 不认识它，因此 `clone`（匿名只读）成立、**`push` 必 401**。
+   S6 采用**身份兑换**闭合：`GET /api/v1/repos/<slug>/git-credential` 保留 `repo:push` 作为
+   第一道门，然后用平台的 `FORGEJO_ADMIN_TOKEN` 为该用户懒创建一个 Forgejo 账号并铸一张
+   **Forgejo access token** 返回；token 用 Fernet（`GIT_IDENTITY_KEY`）加密落库、按用户
+   隔离、过期轮换，撤销接到 `cli.py disable-user`。部署变量、admin token 的最小 scope
+   （`write:admin`）与等价 CLI 引导路径见 `docs/agent-hub/integration/S6.md`。
+   **残留风险**：铸票的 REST 形状（`POST /admin/users` + `POST /users/{u}/tokens` 带
+   `Sudo:`）没有活 Forgejo 可验证，门禁使用假客户端——上线前必须实测一次 push；
+   兜底是 CLI 引导。分支保护仍独立成立（I4），用户票不含任何 admin scope。
 2. 前端「历史 issue 证据」与「gates 结果」两块目前恒为空：`Finding` 的序列化不内联
    evidence，也没有 review_run 的 HTTP 出口（`services.repo_context.related_to_finding()`
    已实现但未接路由）。修法二选一：搜索路由透传 `finding_id`，或详情内联 evidence + 最近一次 run。

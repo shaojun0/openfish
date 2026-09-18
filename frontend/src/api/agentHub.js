@@ -72,12 +72,20 @@ import { http } from './client'
 
 /**
  * @typedef {Object} FindingEvidence
+ * `GET /findings/<id>` does **not** inline evidence (§13.2); the linked issues
+ * come from `fetchFindingEvidence()`, which reads the context-search route
+ * keyed by `finding_id`.  The aliases below cover both that shape (`number`,
+ * `url`, `title`, `origin`) and the older inline guess.
  * @property {number} [issue_number]
  * @property {number} [number]
  * @property {{number?: number}|null} [issue]
- * @property {string} [relation]          mentions|duplicate_of|fixed_by
+ * @property {string|null} [relation]     mentions|duplicate_of|fixed_by, null on keyword recall
+ * @property {'evidence'|'keyword'} [origin]
  * @property {string|null} [url]
  * @property {string|null} [title]
+ * @property {'open'|'closed'|string} [state]
+ * @property {string|null} [author]
+ * @property {number} [chars]             characters this entry occupies in `text`
  */
 
 /**
@@ -102,7 +110,7 @@ import { http } from './client'
  * @property {string|null} [decided_at]
  * @property {string|null} [pr_url]
  * @property {boolean} [reactivated]
- * @property {FindingEvidence[]} [evidence]  inlined only when the API joins it
+ * @property {FindingEvidence[]} [evidence]  fetched separately via `fetchFindingEvidence`
  * @property {string|null} [created_at]
  * @property {string|null} [updated_at]
  */
@@ -317,6 +325,21 @@ export async function searchRepoContext(slug, params) {
     params: clean(params),
   })
   return data
+}
+
+/**
+ * The historical issues already linked to one finding, plus keyword recall from
+ * its anchors.  §13.2's "historical issue evidence" has exactly one HTTP exit:
+ * the context-search route with `finding_id` (mutually exclusive with `q`, so a
+ * keyword can never be mixed in).  The route answers the same bounded shape as
+ * `searchRepoContext`, so it is reused rather than duplicated.
+ * @param {string} slug
+ * @param {number|string} findingId
+ * @param {{limit?: number, offset?: number, budget?: number}} [params]
+ * @returns {Promise<{items?: FindingEvidence[], text?: string, truncated?: boolean, omitted?: number, budget_used?: number}>}
+ */
+export async function fetchFindingEvidence(slug, findingId, params = {}) {
+  return searchRepoContext(slug, { ...params, finding_id: findingId })
 }
 
 // ── Findings (§5.3, §6) ─────────────────────────────────────────────

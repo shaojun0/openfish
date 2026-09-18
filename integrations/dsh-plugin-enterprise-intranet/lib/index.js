@@ -11,7 +11,10 @@
  *     路由注册一个 `llm-pi-ai` provider，并把 `agent-default-model` 指向
  *     `aliases` 含 `default` 的那条路由。
  *  3. **包源切换。** 把 pip / npm / docker / debian 指向平台的内网镜像。
- *  4. **工具与文档。** 面板里列出平台 `/api/v1/tools` 与 `/api/v1/docs` 目录。
+ *  4. **git 仓库凭据。** 生成一个 git credential helper（`/etc/gitconfig` 指向
+ *     它），对 `https://<平台>/git/<owner>/<name>.git` 用平台 key 换一张短期
+ *     Forgejo 票 —— push 由 Forgejo 校验，平台 key 本身过不了。
+ *  5. **工具与文档。** 面板里列出平台 `/api/v1/tools` 与 `/api/v1/docs` 目录。
  *
  * 设计约束（为什么是这样写的）
  * ---------------------------
@@ -58,12 +61,16 @@ const DEFAULTS = {
   platformUrl: 'https://47.97.243.86:9443',
   enterpriseMode: false,
   autoMirrors: true,
+  autoGitCredential: true,
   defaultAlias: 'default',
   verifyTls: false,
   caFile: '',
   requestTimeoutMs: 20000,
   apiKey: '',
 }
+
+/** 插件生成的 git credential helper 路径（gitconfig 里指向它）。 */
+const GIT_HELPER_PATH = '/usr/local/bin/openfish-git-credential'
 
 /** openfish 的 provider 取值 → pi-ai 的 wire protocol。 */
 const API_BY_PROVIDER = {
@@ -118,11 +125,12 @@ function writeState(state) {
 }
 
 /** 原子写一个配置文件，返回结果而不是抛错（容器里有些路径可能只读）。 */
-function writeConfigFile(file, content) {
+function writeConfigFile(file, content, mode = null) {
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true })
     const tmp = `${file}.${process.pid}.tmp`
     fs.writeFileSync(tmp, content, 'utf8')
+    fs.chmodSync(tmp, mode === null || mode === undefined ? 0o644 : mode)
     fs.renameSync(tmp, file)
     return { file, ok: true }
   } catch (err) {
@@ -571,6 +579,161 @@ export function apply(ctx, config) {
     return url.toString()
   }
 
+  /**
+   * 生成 git credential helper（Node 脚本，只用内置模块）。
+   *
+   * 它按 git credential 协议从 stdin 读 `protocol/host/path`，从 `path` 解析
+   * `<owner>/<name>`，用平台 API key 调平台
+   * `GET /api/v1/repos/<owner>/<name>/git-credential` 换一张**短期 Forgejo 票**
+   * （openfish 用 admin token 兑换，见 S6.md），再把 `username/password` 输出给
+   * git。失败一律**静默退出**（stdout 为空、exit 0），只在 stderr 留一行原因：
+   * 平台不可用时不能让 git 卡死。
+   */
+  function gitCredentialHelperSource(key) {
+    const platform = JSON.stringify(String(configNow().platformUrl || DEFAULTS.platformUrl).replace(/\/+$/, ''))
+    const apiKey = JSON.stringify(String(key || ''))
+    const verifyTls = configNow().verifyTls === true
+    const caFile = JSON.stringify(String(configNow().caFile || ''))
+    return `#!/usr/bin/env node
+// 由 dsh-plugin-enterprise-intranet 自动生成，请勿手改。
+// openfish git credential helper：把平台 API key 换成短期 Forgejo 票。
+'use strict'
+const fs = require('node:fs')
+const http = require('node:http')
+const https = require('node:https')
+
+const PLATFORM = ${platform}
+const API_KEY = ${apiKey}
+const VERIFY_TLS = ${verifyTls ? 'true' : 'false'}
+const CA_FILE = ${caFile}
+
+function fail(reason) {
+  process.stderr.write('openfish-git-credential: ' + reason + '\\n')
+  process.exit(0) // 空答案 = 没有凭据，让 git 继续（可能提示输入），不阻塞
+}
+
+function readStdin() {
+  try { return fs.readFileSync(0, 'utf8') } catch { return '' }
+}
+
+function requestJson(url, headers) {
+  return new Promise((resolve, reject) => {
+    let target
+    try { target = new URL(url) } catch { reject(new Error('platform url invalid: ' + url)); return }
+    const isHttps = target.protocol === 'https:'
+    const transport = isHttps ? https : http
+    const options = {
+      method: 'GET',
+      hostname: target.hostname,
+      port: target.port || (isHttps ? 443 : 80),
+      path: target.pathname + target.search,
+      headers: Object.assign({ Accept: 'application/json' }, headers),
+    }
+    if (isHttps) {
+      if (CA_FILE) {
+        try { options.ca = fs.readFileSync(CA_FILE) } catch { options.rejectUnauthorized = false }
+      } else if (VERIFY_TLS !== true) {
+        options.rejectUnauthorized = false
+      }
+    }
+    const req = transport.request(options, (res) => {
+      const chunks = []
+      res.on('data', (chunk) => chunks.push(chunk))
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8')
+        let body = null
+        try { body = raw ? JSON.parse(raw) : null } catch { body = null }
+        resolve({ status: res.statusCode || 0, body })
+      })
+    })
+    req.setTimeout(15000, () => req.destroy(new Error('platform request timed out')))
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+async function main() {
+  // git 把动作作为参数传进来（get/store/erase），stdin 上才是 protocol/host/path。
+  const action = process.argv[2] || 'get'
+  if (action !== 'get') return // store/erase：无需持久化
+  const lines = readStdin().split('\\n')
+  const fields = {}
+  for (const line of lines) {
+    const at = line.indexOf('=')
+    if (at > 0) fields[line.slice(0, at)] = line.slice(at + 1)
+  }
+  if (fields.protocol !== 'http' && fields.protocol !== 'https') return
+  const parts = String(fields.path || '')
+    .replace(/^\\/+/, '')
+    .replace(/\\.git$/, '')
+    .split('/')
+    .filter(Boolean)
+  if (parts.length < 2) { fail('git path 里没有 <owner>/<name>'); return }
+  const owner = parts[parts.length - 2]
+  const name = parts[parts.length - 1]
+  const url = PLATFORM + '/api/v1/repos/' + encodeURIComponent(owner) + '/' + encodeURIComponent(name) + '/git-credential'
+  try {
+    const res = await requestJson(url, { Authorization: 'Bearer ' + API_KEY })
+    if (res.status !== 200 || !res.body || !res.body.password) {
+      fail('platform refused (HTTP ' + res.status + ') for ' + owner + '/' + name)
+      return
+    }
+    process.stdout.write('username=' + res.body.username + '\\n')
+    process.stdout.write('password=' + res.body.password + '\\n')
+    process.stdout.write('\\n')
+  } catch (err) {
+    fail(String((err && err.message) || err))
+  }
+}
+
+main().catch((err) => fail(String((err && err.message) || err)))
+`
+  }
+
+  /**
+   * `/etc/gitconfig`：把 credential.helper 指向上面的脚本。
+   *
+   * `useHttpPath = true` 是关键：不打开它，git 不会把仓库 path 传给 helper，
+   * 同一 host 下的不同仓库就无法区分。TLS 姿态与插件其余部分一致（平台自签
+   * 证书时跳过校验，或按 `caFile` 校验）。
+   */
+  function gitConfigSource() {
+    const cfg = configNow()
+    const lines = [
+      '# 由 dsh-plugin-enterprise-intranet 自动生成（企业内网模式）',
+      '[credential]',
+      `\thelper = ${GIT_HELPER_PATH}`,
+      '\tuseHttpPath = true',
+    ]
+    if (cfg.verifyTls === true && cfg.caFile) {
+      lines.push('[http]', `\tsslCAInfo = ${cfg.caFile}`)
+    } else if (cfg.verifyTls !== true) {
+      lines.push('[http]', '\tsslVerify = false')
+    }
+    return lines.join('\n') + '\n'
+  }
+
+  /** 关闭 git 自动化时删掉带 key 的 helper；gitconfig 只删我们生成的那份。 */
+  function removeGitCredential() {
+    const removed = []
+    try {
+      fs.rmSync(GIT_HELPER_PATH, { force: true })
+      removed.push(GIT_HELPER_PATH)
+    } catch {
+      // 只读路径或本来就不存在
+    }
+    try {
+      const current = fs.readFileSync('/etc/gitconfig', 'utf8')
+      if (current.includes(GIT_HELPER_PATH)) {
+        fs.rmSync('/etc/gitconfig', { force: true })
+        removed.push('/etc/gitconfig')
+      }
+    } catch {
+      // 没有 gitconfig 就不用管
+    }
+    return removed
+  }
+
   function mirrorsFor(key, routes) {
     const base = String(configNow().platformUrl || DEFAULTS.platformUrl).replace(/\/+$/, '')
     const host = new URL(base).host
@@ -629,6 +792,16 @@ export function apply(ctx, config) {
         },
         env: {},
       },
+      git: {
+        label: 'git 仓库',
+        // helper 里带着平台 key（写盘 700 权限），/etc/gitconfig 指过去并打开
+        // useHttpPath，这样同一 host 下的不同 <owner>/<name> 都能区分。
+        files: {
+          [GIT_HELPER_PATH]: { content: gitCredentialHelperSource(key), mode: 0o700 },
+          '/etc/gitconfig': { content: gitConfigSource(), mode: 0o644 },
+        },
+        env: {},
+      },
     }
   }
 
@@ -636,12 +809,20 @@ export function apply(ctx, config) {
     const mirrors = mirrorsFor(key)
     const results = []
     const envLines = ['# 由 dsh-plugin-enterprise-intranet 自动生成（企业内网模式）']
-    for (const entry of Object.values(mirrors)) {
-      for (const [file, content] of Object.entries(entry.files || {})) {
-        results.push(writeConfigFile(file, content))
+    for (const [name, entry] of Object.entries(mirrors)) {
+      if (name === 'git' && configNow().autoGitCredential === false) {
+        // 关掉 git 自动化时不能把带 key 的 helper 留在盘上。
+        for (const file of removeGitCredential()) results.push({ file, ok: true, removed: true })
+        continue
       }
-      for (const [name, value] of Object.entries(entry.env || {})) {
-        envLines.push(`export ${name}="${String(value).replace(/"/g, '\\"')}"`)
+      for (const [file, spec] of Object.entries(entry.files || {})) {
+        const value = spec && typeof spec === 'object' && !Array.isArray(spec)
+          ? spec
+          : { content: spec, mode: null }
+        results.push(writeConfigFile(file, value.content, value.mode))
+      }
+      for (const [envName, value] of Object.entries(entry.env || {})) {
+        envLines.push(`export ${envName}="${String(value).replace(/"/g, '\\"')}"`)
       }
     }
     results.push(writeConfigFile('/etc/profile.d/enterprise-intranet.sh', envLines.join('\n') + '\n'))
@@ -691,7 +872,9 @@ export function apply(ctx, config) {
     await settings().replace(DEFAULT_MODEL_NS, { provider: providerId, model: modelId })
 
     let mirrorResults = null
-    if (configNow().autoMirrors) mirrorResults = await applyMirrors(key)
+    if (configNow().autoMirrors || configNow().autoGitCredential !== false) {
+      mirrorResults = await applyMirrors(key)
+    }
 
     const next = {
       ...current,
@@ -734,6 +917,10 @@ export function apply(ctx, config) {
   async function disableEnterpriseMode() {
     const current = readState()
     await unregisterProviders(current.providers || [])
+
+    // 停用意味着不再有平台 key 可用，所以带 key 的 git helper 必须删掉，
+    // 不能留在镜像里等下一次 clone 时被人读出来。
+    removeGitCredential()
 
     // 只在默认模型确实还指着本插件的 provider 时才动它：用户在企业内网模式下
     // 自己把默认模型改成别的，停用不该把那次修改一起抹掉。
@@ -803,6 +990,7 @@ export function apply(ctx, config) {
       api_key_source: source,
       enterprise_mode: cfg.enterpriseMode === true,
       auto_mirrors: cfg.autoMirrors !== false,
+      auto_git_credential: cfg.autoGitCredential !== false,
       default_alias: cfg.defaultAlias || 'default',
       verify_tls: cfg.verifyTls === true,
       reachable,
@@ -1009,6 +1197,7 @@ export function apply(ctx, config) {
         patch.platformUrl = body.platform_url.trim().replace(/\/+$/, '')
       }
       if (typeof body.auto_mirrors === 'boolean') patch.autoMirrors = body.auto_mirrors
+      if (typeof body.auto_git_credential === 'boolean') patch.autoGitCredential = body.auto_git_credential
       if (typeof body.verify_tls === 'boolean') patch.verifyTls = body.verifyTls
       if (typeof body.default_alias === 'string' && body.default_alias.trim()) {
         patch.defaultAlias = body.default_alias.trim()

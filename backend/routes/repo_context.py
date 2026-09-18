@@ -138,9 +138,28 @@ _QUERY_PARAMS = [
             "Keyword query, title-weighted. Whitespace-separated terms are AND-ed; "
             "a Chinese run stays one term and matches as a substring. Case folding "
             "is explicit (`lower()` on both sides), so English is case-insensitive "
-            "and Chinese is unaffected."
+            "and Chinese is unaffected. **Mutually exclusive with `finding_id`** "
+            "(giving both is a 400): a finding starts from its own linked history "
+            "instead of a keyword."
         ),
         "schema": {"type": "string"},
+    },
+    {
+        "name": "finding_id",
+        "in": "query",
+        "required": False,
+        "description": (
+            "Start from one finding's known history instead of a keyword (§4.6). "
+            "Its `finding_evidence` rows come back first, carrying the link's "
+            "`relation`, followed by recall from its `file_path` / `symbol` / "
+            "`rule_id`. Refused with 400 when `q` is also present; the finding "
+            "must belong to this repository and an unknown id is the same 404 as "
+            "a foreign one. `limit` / `offset` / `budget` still apply, so the "
+            "character budget is never bypassed. `kind` and the structured "
+            "filters describe keyword mode only — this path derives its recall "
+            "from the finding and returns issues."
+        ),
+        "schema": {"type": "integer"},
     },
     {
         "name": "kind",
@@ -235,6 +254,22 @@ def _int_arg(name: str, default: int, *, low: int, high: int) -> int:
     return max(low, min(high, value))
 
 
+def _optional_int_arg(name: str) -> int | None:
+    """An optional integer query argument — ``None`` when absent, 400 on junk.
+
+    ``_int_arg`` cannot express "not given at all": it needs a default and a
+    clamp, and ``finding_id`` has neither (an absent id switches the route to
+    keyword mode; a present one must be the exact id, not a clamped one).
+    """
+    raw = (request.args.get(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise BadRequestError(f"参数 {name} 必须是整数") from exc
+
+
 def _bool_arg(name: str) -> bool | None:
     raw = (request.args.get(name) or "").strip().lower()
     if not raw:
@@ -279,6 +314,14 @@ def _repo(slug: str) -> tuple[int, str]:
         "issues and pull requests, commits, and existing findings. This is the "
         "call an agent makes **before** reporting a finding (spec §8.3), so that "
         "a problem already discussed upstream is cited instead of re-reported.\n\n"
+        "Two mutually exclusive modes (§4.6):\n"
+        "* `q=<keywords>` — title-weighted keyword search over the whole history.\n"
+        "* `finding_id=<id>` — start from that finding's linked history: its "
+        "`finding_evidence` rows come back first with their `relation`, then "
+        "recall from its `file_path` / `symbol` / `rule_id`. Supplying both is a "
+        "400. The finding must belong to this repository; an unknown id and one "
+        "from another repository are the *same* 404, so the endpoint never "
+        "confirms which ids exist.\n\n"
         "Search is `lower(col) LIKE %term%` on both SQLite and PostgreSQL — no "
         "`ILIKE`, no `tsvector`, no extension — so the same query works on either "
         "backend. Terms are AND-ed and a title hit is weighted "
@@ -305,6 +348,15 @@ def _repo(slug: str) -> tuple[int, str]:
     },
 )
 def search_repo_context(slug: str):
+    q = (request.args.get("q") or "").strip()
+    finding_id = _optional_int_arg("finding_id")
+    if finding_id is not None and q:
+        raise BadRequestError(
+            "finding_id 与 q 互斥：给了 finding_id 就以该 finding 的关联证据"
+            "（finding_evidence）为检索起点，并自动用它的 file_path/symbol/rule_id "
+            "召回；不能再叠加关键词 q，请二选一。"
+        )
+
     kind = (request.args.get("kind") or repo_context.ALL_KINDS).strip().lower()
     if kind not in (*repo_context.KINDS, repo_context.ALL_KINDS):
         raise BadRequestError(
@@ -312,10 +364,40 @@ def search_repo_context(slug: str):
         )
 
     repo_id, source = _repo(slug)
+    limit = _int_arg(
+        "limit", repo_context.DEFAULT_LIMIT, low=1, high=repo_context.MAX_LIMIT
+    )
+    offset = _int_arg("offset", 0, low=0, high=1_000_000)
+    budget = _int_arg(
+        "budget", repo_context.DEFAULT_BUDGET,
+        low=repo_context.MIN_BUDGET, high=repo_context.MAX_BUDGET,
+    )
+
+    if finding_id is not None:
+        # §4.6: the association read-out lives in `related_to_finding`, which
+        # already applies the untrusted wrapper and the top-k/budget cut.  This
+        # route only resolves the slug and turns its LookupError into a 404.
+        try:
+            result = repo_context.related_to_finding(
+                Session(),
+                repo_id=repo_id,
+                finding_id=finding_id,
+                limit=limit,
+                offset=offset,
+                budget=budget,
+                source=source,
+            )
+        except LookupError:
+            # Deliberately one shape for "no such finding" and "belongs to
+            # another repo": the caller must not learn which ids exist.
+            abort(404, description=f"仓库 {slug!r} 下不存在 finding {finding_id}")
+        result["slug"] = slug
+        return jsonify(result)
+
     result = repo_context.search(
         Session(),
         repo_id=repo_id,
-        q=request.args.get("q", ""),
+        q=q,
         state=request.args.get("state") or None,
         label=request.args.get("label") or None,
         author=request.args.get("author") or None,
@@ -323,14 +405,9 @@ def search_repo_context(slug: str):
         is_pull_request=_bool_arg("is_pull_request"),
         since=_time_arg("since"),
         until=_time_arg("until"),
-        limit=_int_arg(
-            "limit", repo_context.DEFAULT_LIMIT, low=1, high=repo_context.MAX_LIMIT
-        ),
-        offset=_int_arg("offset", 0, low=0, high=1_000_000),
-        budget=_int_arg(
-            "budget", repo_context.DEFAULT_BUDGET,
-            low=repo_context.MIN_BUDGET, high=repo_context.MAX_BUDGET,
-        ),
+        limit=limit,
+        offset=offset,
+        budget=budget,
         source=source,
     )
     result["slug"] = slug
