@@ -133,6 +133,9 @@ if [ ! -f "$DOCKER_DIR/forgejo/forgejo.env" ]; then
     echo "  JWT_SECRET (and later FORGEJO_ADMIN_TOKEN) before starting Forgejo."
 fi
 # Each agent task gets /work/<task_id>; kept 24h after it finishes for triage.
+# Ownership doesn't matter to the runner: its worker is root inside the container
+# with CAP_DAC_OVERRIDE (compose cap_add), so it can write a bind mount this
+# script created as the invoking host user (same for docker/data).
 mkdir -p "$DOCKER_DIR/agent-work"
 
 echo

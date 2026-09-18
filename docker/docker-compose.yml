@@ -105,6 +105,8 @@ x-backend-env: &backend-env
   # Fernet 主密钥：加密落库 git_identities 表里的 Forgejo token（§5.2 身份兑换）。
   # 缺失时 /git-credential 返回 503，**不回退明文**。
   GIT_IDENTITY_KEY: ${GIT_IDENTITY_KEY:-}
+  # 仓库凭据专用密钥：API 用它加密 repo_runners.credential_ciphertext（与 GIT_IDENTITY_KEY 分离）。
+  RUNNER_CREDENTIAL_KEY: ${RUNNER_CREDENTIAL_KEY:-}
   # 大仓保护（§8.2）：到上限标 partial=true 并由 API 显式暴露，绝不静默截断。
   IMPORT_MAX_ISSUES: ${IMPORT_MAX_ISSUES:-20000}
   IMPORT_MAX_COMMITS: ${IMPORT_MAX_COMMITS:-5000}
@@ -126,11 +128,18 @@ x-backend-env: &backend-env
 # ── 智能体运行时沙箱的**全部**环境（§9.2）────────────────────────────
 # 刻意**不**继承 x-backend-env：runner 会执行仓库自带的 check_*.py 与 headless
 # review 命令（services/sandbox_env.py 又把这层再收窄一次），而 backend 的环境里
-# 有 SECRET_KEY / FORGEJO_ADMIN_TOKEN / GIT_IDENTITY_KEY。沙箱只拿到三样东西：
-#   1. 队列数据库（worker 必须领任务）；
-#   2. 模型路由表（只读挂载 + MODELS_FILE）；
-#   3. 一枚可单独吊销、**非 admin** 的 FORGEJO_RUNNER_TOKEN，同时用于 git
-#      credential helper 与开 PR；未设置时 fix/PR 明确失败，不会静默借用 admin。
+# 有 SECRET_KEY / FORGEJO_ADMIN_TOKEN / GIT_IDENTITY_KEY。容器内的信任边界是
+# **两个 uid**：
+#   * 受信任 worker（root，仅 CAP_SETUID/CAP_SETGID）持有队列数据库、模型路由、
+#     可单独吊销、**非 admin** 的 FORGEJO_RUNNER_TOKEN（git credential helper +
+#     开 PR，未设置时 fix/PR 明确失败），以及只用于开 repo_runners 密文的仓库凭据
+#     专用密钥 RUNNER_CREDENTIAL_KEY；
+#   * 不可信代码（仓库自带 check_*.py、headless review 命令）被降到 uid 10002
+#     （AGENT_SANDBOX_UID/GID，见 services/sandbox_identity.py），读不到 worker 的
+#     /proc/<pid>/environ，也就拿不到上面任何凭据；
+#   * sandbox_env 仍剔除**每一个**平台密钥（SECRET_KEY / FORGEJO_ADMIN_TOKEN /
+#     GIT_IDENTITY_KEY / RUNNER_CREDENTIAL_KEY / 上游口令…）。
+# GIT_IDENTITY_KEY 仍然**不**进 runner：用户身份主密钥只在 backend。
 # 完整隔离（`network: internal` + 出口白名单）仍需部署侧网络分段，见
 # docs/agent-hub/DESIGN-git-thin-layer.md。
 x-runner-env: &runner-env
@@ -144,6 +153,9 @@ x-runner-env: &runner-env
   FORGEJO_OWNER: ${FORGEJO_OWNER:-openfish}
   # runner 专用凭据（**不是** FORGEJO_ADMIN_TOKEN）。
   FORGEJO_RUNNER_TOKEN: ${FORGEJO_RUNNER_TOKEN:-}
+  # 仓库凭据专用密钥：worker 用它解开 repo_runners.credential_ciphertext。
+  # 与用户身份主密钥 GIT_IDENTITY_KEY 刻意分离；后者不进本容器。
+  RUNNER_CREDENTIAL_KEY: ${RUNNER_CREDENTIAL_KEY:-}
   # 运行时旋钮。
   AGENT_WORK_ROOT: /work
   AGENT_WORK_RETENTION_SECONDS: "${AGENT_WORK_RETENTION_SECONDS:-86400}"
@@ -157,6 +169,8 @@ x-runner-env: &runner-env
   AGENT_PR_POLICY: "${AGENT_PR_POLICY:-}"
   AGENT_AUTO_FIX: "${AGENT_AUTO_FIX:-}"
   # 沙箱固定值。
+  AGENT_SANDBOX_UID: "10002"
+  AGENT_SANDBOX_GID: "10000"
   GIT_TERMINAL_PROMPT: "0"
   PYTHONDONTWRITEBYTECODE: "1"
 
@@ -290,6 +304,17 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      # SETUID/SETGID drop the untrusted child to uid 10002; they are effective
+      # only because the worker runs as root (docker/runner/Dockerfile) — a
+      # non-root `USER` would leave CapEff empty and the drop would fail closed.
+      - SETUID
+      - SETGID
+      # The worker also writes /work and /app/data bind mounts whose host owner
+      # is not root (prepare-mounts.sh creates them as the operator), and cleans
+      # up files the sandbox uid created.  DAC_OVERRIDE lets the *trusted* worker
+      # do that; the untrusted child is still dropped with CapEff=0.
+      - DAC_OVERRIDE
     tmpfs:
       - /tmp:size=512m
     environment:

@@ -4,6 +4,8 @@
 > `AgentTask.runner_id` 已在基座落地并验证（`models/agent_hub.py`、
 > `models/agent_hub_migrate.py`、`services/repo_runner.py`、`services/agent_queue.py`）。
 > 本文件记录**执行边界**的设计与语义，包含验收门禁与未决问题。
+> **切片 A（已落地）**：仓库专属凭据改用专用密钥 `RUNNER_CREDENTIAL_KEY` 密封与
+> 打开（§5.2），不可信子进程降权到沙箱 uid 10002（§6.5）。
 > **规格关系**：本文件细化 `DEVELOPMENT.md` §9.2 的沙箱一节，并闭合 §13 开放问题 6
 > 中「repo:push 粒度 / per-repo runner」的选择（**B1 = 逻辑 runner**）。
 > **与鉴权设计的关系**：身份账号体系见
@@ -23,9 +25,11 @@
 3. **任务绑定 runner。** `enqueue` 时把当前 `RepoRunner.id` 写进
    `AgentTask.runner_id`（软引用，无 FK）；`claim` 用 `NOT EXISTS` 跳过「该仓库的
    runner 被禁用」的任务。老任务 `runner_id IS NULL` 照常可领，不因新增列而卡死。
-4. **凭据 fail-closed。** 默认回退到部署级 `FORGEJO_RUNNER_TOKEN`；仓库专属 token 用
-   `services.git_identity.TokenCipher`（Fernet，`GIT_IDENTITY_KEY`）封装后落库。
-   **明文永不进数据库 / 日志 / argv / `.git/config`**；密文解不开时**报错，不回退**。
+4. **凭据 fail-closed，两把钥匙。** 默认回退到部署级 `FORGEJO_RUNNER_TOKEN`；仓库专属
+   token 用**专用**的 `RUNNER_CREDENTIAL_KEY`（Fernet）封装后落库。这枚密钥只解
+   `repo_runners.credential_ciphertext`（服务凭据），backend 与 runner 都有；用户身份
+   主密钥 `GIT_IDENTITY_KEY` **不进 runner**。**明文永不进数据库 / 日志 / argv /
+   `.git/config`**；密文解不开时**报错，不回退**。
 5. **工作区按 runner 隔离。** 默认 `AGENT_WORK_ROOT/runners/<runner_id>`，路径经
    `safe_workspace_subdir()` 校验，越界路径直接拒绝（不静默改写成「看起来安全」）。
 6. **配额优先级固定。** 显式入参 > `repo_runners.max_concurrency`（> 0 时）>
@@ -35,6 +39,11 @@
    不把「写了 allowlist」说成「平台已经拦住了」。
 8. **迁移无 Alembic。** 走 `models/agent_hub_migrate.ensure_schema(engine)`，幂等，
    SQLite 与 PostgreSQL 同路径，返回「本次实际改了什么」。
+9. **不可信代码降权。** worker 以 root（effective `CAP_SETUID` + `CAP_SETGID` +
+   `CAP_DAC_OVERRIDE`，属于共享组 gid 10000）运行；
+   仓库自带的 `check_*.py` 与 headless review 命令降到沙箱 uid 10002（共享组 gid
+   10000）；任务工作树组可写 + setgid 且 **owner 不变**。请求了降权却做不到时
+   **fail-closed**，绝不按 worker uid 跑不可信代码（见 §6.5，含诚实的残余限制）。
 
 ---
 
@@ -60,10 +69,11 @@
 - **不承担用户身份**：用户 git 身份、账号体系与反向代理认证属于薄中间层设计，
   不在本设计范围内（见 §13）。
 - **不新增依赖**：沿用 `cryptography`（Fernet）、SQLAlchemy、现有服务模块。
-- **不让 runner 容器拿到平台密钥**：本设计不改变 `docker/runner/README.md` §9 的
-  凭据边界，**不把 `GIT_IDENTITY_KEY` 塞进 runner 环境**；repo 凭据的解密必须发生在
-  受信侧，绝不是任务自带的 `check_*.py` 子进程。当前 worker 在 runner 容器内解析
-  凭据这一事实与该边界存在缺口，见 §5.2 / §12.7。
+- **不让 runner 容器拿到用户身份主密钥**：本设计不改变 `docker/runner/README.md`
+  §9 的凭据边界，**不把 `GIT_IDENTITY_KEY` 塞进 runner 环境**。repo 凭据改用**专用**
+  的 `RUNNER_CREDENTIAL_KEY`：backend 用它密封、runner 用它打开（§5.2），因此沙箱
+  worker 能解析仓库凭据，却仍拿不到用户身份密文的主密钥。它同时不是靠环境白名单
+  兜底——不可信子进程被降到沙箱 uid 10002，读不到 worker 的环境（§6.5）。
 
 ---
 
@@ -206,22 +216,38 @@ runner_runnable = ~(
 - 用户名用约定值 `x-access-token`（Forgejo 接受访问令牌作密码，用户名任意）；
 - 这是所有未配置仓库的默认路径，行为与既有 `agent_worker.runner_token()` 一致。
 
-### 5.2 repo-scoped（Fernet 密文）
+### 5.2 repo-scoped（专用密钥 `RUNNER_CREDENTIAL_KEY` 的 Fernet 密文）
 
 - 写入：`set_credential(repo_id, token=…, username=…, expires_at=…)`；
-  **先取到 cipher，再写库**——缺 `GIT_IDENTITY_KEY` 时抛 `RepoRunnerError`，
+  **先取到 cipher，再写库**——缺 `RUNNER_CREDENTIAL_KEY` 时抛 `RepoRunnerError`，
   什么都不落库，绝不退化成明文或共享 token；
-- 加密：`services.git_identity.TokenCipher`（Fernet，key 来自 `GIT_IDENTITY_KEY`）；
+- 加密：`services.git_identity.TokenCipher`（Fernet），key 取自专用环境变量
+  `RUNNER_CREDENTIAL_KEY`（`services/repo_runner.py::_require_cipher`）；
 - 落库：`credential_kind='repo'`、`credential_ciphertext=<密文>`、
   `credential_username`、`credential_expires_at`、`credential_rotated_at`；
+- 打开：worker 在 runner 容器内用**同一枚** `RUNNER_CREDENTIAL_KEY` 解封，因此仓库
+  专属凭据在沙箱 runner 内可用（不再 fail-closed）；
 - 清除：`clear_credential()` 把 `credential_kind` 拨回 `shared`、清空密文 / 用户名 /
   过期时间，于是自动回退到共享 token。
 
-**已知缺口（诚实标注）**：`services/agent_worker.py` 在 profile `runner` 的容器内
-解析凭据，而该容器的 `x-runner-env` **刻意不含** `GIT_IDENTITY_KEY`
-（`docker/docker-compose.yml` §9.2、`docker/runner/README.md` §9）。因此
-`credential_kind='repo'` 目前在沙箱 runner 内会因取不到 cipher 而 **fail-closed**
-（共享 token 路径不受影响）。解密封装应该发生在哪个进程尚未定，见 §12.7。
+**两把钥匙，各管一摊（切片 A 的核心）**：
+
+| 密钥 | 在哪 | 解什么 | 进 runner 吗 |
+|---|---|---|---|
+| `GIT_IDENTITY_KEY` | 仅 backend | `git_identities` 里的**用户身份** token（`DEVELOPMENT.md` §5.2 身份兑换） | **否**，永不进 runner 环境 |
+| `RUNNER_CREDENTIAL_KEY` | backend + runner | `repo_runners.credential_ciphertext`（**服务凭据**） | 是，worker 要用它给任务解凭据 |
+
+`RUNNER_CREDENTIAL_KEY` 是执行平面专用：它只打开「某仓库的 runner token」这类服务
+凭据，打不开用户身份密文——后者的主密钥 `GIT_IDENTITY_KEY` 始终留在 backend。两枚
+密钥之间**没有回退**：缺 `RUNNER_CREDENTIAL_KEY` 时按上面的规则 fail-closed，绝不用
+`GIT_IDENTITY_KEY` 顶替。把专用密钥交给 runner 是**有意**的取舍：仓库专属凭据的
+解密必须发生在沙箱 worker 内（它才是执行 clone / push 的进程），而它只换来服务凭据的
+可读性。
+
+**残余风险（诚实标注）**：`RUNNER_CREDENTIAL_KEY` 确实进了 runner 容器环境，所以
+**同 uid** 的进程能读到它。本切片用 uid 分离（§6.5）让不可信仓库代码读不到 worker 的
+环境（含这枚密钥）；若部署没有配置 `AGENT_SANDBOX_UID/GID`（开发模式）或根本没能力
+降权，这个前提就不成立。
 
 ### 5.3 fail-closed
 
@@ -273,6 +299,79 @@ runner_id=runner.id)`：
 
 > 迁移期注意：既有部署的目录是 `/work/<task_id>`。切换到 runner 前缀属于**目录布局
 > 变更**，不能只改解析而不迁移；见 §12 未决问题。
+
+### 6.5 沙箱 uid：worker root / 沙箱 10002 / 共享组 10000（切片 A）
+
+**要修的问题。** 此前 runner 容器里**所有**进程都以 `USER runner`（uid 10001）运行：
+worker 持有 `FORGEJO_RUNNER_TOKEN` / `RUNNER_CREDENTIAL_KEY`，而它执行的不可信代码
+——仓库自带的 `backend/scripts/check_*.py`（`services/gates.py`）与 headless
+`AGENT_REVIEW_COMMAND`（`services/agent_worker.build_review_fn`）——是**同一个 uid**，
+于是可以读 `/proc/<worker_pid>/environ` 把凭据偷走。`services/sandbox_env.py` 只
+过滤子进程的**环境变量**，挡不住这种「读别人的 `/proc`」的路径。
+
+**新模型。** worker 以 **root（uid 0，effective `CAP_SETUID` + `CAP_SETGID` +
+`CAP_DAC_OVERRIDE`，且属于共享组 gid 10000）** 运行并持有凭据；不可信子进程被降到
+**沙箱 uid 10002**，与工作树同属**共享组 gid 10000**：
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| worker | root（uid 0） | 持有凭据、跑 git / 开 PR。必须 root：Docker 只把 `cap_add` 变成 root 进程的 effective capability；非 root 下 CapEff=0，降权 fail-closed、任务全红 |
+| worker 组 | gid 10000 | `usermod -aG openfish root`；root 只有属于目标组时才能把工作树 `chgrp` 到 10000（刻意不给 `CAP_CHOWN`） |
+| 沙箱 uid / gid | 10002 / 10000 | `AGENT_SANDBOX_UID` / `AGENT_SANDBOX_GID` |
+| 工作树属主 | **worker（root）** | 只 `chgrp` 到 10000 + `g+rwX` + 目录 setgid，**绝不 `chown`**；工作目录是符号链接时直接 `SandboxIdentityError`，不顺着链接 `chgrp/chmod` |
+| 沙箱 HOME | `/tmp` 下 worker-owned 目录（`openfish-sandbox-home-*`） | 由 `sandbox_env_overrides()` 用 `mkdtemp` + `O_NOFOLLOW` fd `fchmod` 创建一次；**不**在 checkout 内，避免仓库用符号链接把 worker 的 chmod 变成任意写 |
+| 所需 capability | `CAP_SETUID`（bit 7）+ `CAP_SETGID`（bit 6）+ `CAP_DAC_OVERRIDE`（bit 1） | 前两枚做降权；`DAC_OVERRIDE` 让受信任 worker 写 `prepare-mounts.sh` 以宿主机用户创建的 `/work`、`/app/data` bind mount，并回收沙箱产物（子进程仍 CapEff=0） |
+| 子进程 umask | `0o002` | 与共享组一致；`0o022` 会让沙箱目录对 worker 组只读，回收删不掉 |
+
+工作树为什么**不能 `chown`**：`git` 的 `safe.directory` 检查按**属主**判定，把工作树
+改成沙箱 uid 会让 worker 自己的 `git clone/fetch/commit/push` 报 dubious ownership。
+所以走「组可写 + setgid」——worker 仍是属主，沙箱 uid 借组权限读写；`prepare_untrusted_workdir()`
+把从工作树到 `AGENT_WORK_ROOT` 的各级父目录也放开 traverse，沙箱 uid 才进得去。
+
+`services/sandbox_identity.py` 是本切片的**唯一实现**（其他模块不得自写第二份降权）：
+
+- `configured_identity()`：两个环境变量都没设 → `None`（开发/测试：无降权、处处
+  no-op）；**两个都设且都是正整数**才返回身份；只设一个或解析不出 → 抛
+  `SandboxIdentityError`（fail closed，绝不静默按可信 uid 跑不可信代码）；
+- `privilege_drop_capable()`：`os.geteuid()==0` 为真；否则读 `/proc/self/status` 的
+  `CapEff`，要求同时有 `CAP_SETUID` 与 `CAP_SETGID`；非 Linux / 读不到 `/proc` 时
+  退化为 `euid==0`；
+- `untrusted_popen_kwargs()`：未配置 → `{}`；配置了但不可降权 → 抛
+  `SandboxIdentityError`（消息点名 `CAP_SETUID` / `CAP_SETGID` 与两个环境变量）；
+  否则 `{"user": uid, "group": gid, "extra_groups": [gid], "umask": 0o002}`；
+- `sandbox_env_overrides()`：未配置 → `{}`；否则返回 worker-owned 的
+  `/tmp/openfish-sandbox-home-*`（`mkdtemp` 建一次、2775、经 `O_NOFOLLOW` fd 设权限）
+  作为 `HOME`；调用方在 `sandbox_env()` **之后**合并；
+- `prepare_untrusted_workdir()`：未配置 → no-op；工作目录不是真实目录（符号链接 /
+  特殊文件）→ 抛 `SandboxIdentityError`；否则逐条 best-effort 地对工作树递归 `chgrp`
+  到沙箱 gid（不改 owner）、文件与目录加 `g+rwX`、目录加 setgid，并放开到
+  `AGENT_WORK_ROOT` 的父目录；单个 `OSError` 只记 debug、不抛出；幂等；**永不 chown**；
+- `describe_identity()`：一行可安全进日志的描述，例如
+  `sandbox uid=10002 gid=10000 (privilege drop capable)` 或
+  `no sandbox uid configured (dev mode: untrusted code runs as the worker)`。
+
+worker 自己的 `git status` / `git add` / `git push` 在不可信代码之后跑，而 `.git/config`
+是仓库可写文件：其中的 `core.fsmonitor`（`git status` 执行）与 `filter.<n>.clean`
+（`git add` 执行）会作为子进程继承 `OPENFISH_GIT_TOKEN`。`agent_runner` 因此在三条
+命令前都重新断言 `.git/config` 摘要与 clone 后一致，并对 `git status`/`git add` 显式
+传 `-c core.fsmonitor=false`；hooks 目录建在 `/tmp`（sticky），不放可写工作树。
+
+**fail-closed 语义**：只要请求了降权（两个变量都设），却无法完成降权，就必须**报错**，
+不允许「悄悄按 worker uid 跑」——否则凭据边界表面成立、实际被绕过。
+
+**残余限制（诚实标注，本切片不解决）**：
+
+1. **跨任务 / 跨仓库可读。** 所有任务共用同一个沙箱 uid 10002，共享 `/work` 上另一个
+   任务的 checkout 对当前沙箱进程**可读**（工作树组可读）。要真正任务间隔离，需要每
+   任务命名空间 / cgroup，或「每任务 / 每仓库一个物理 runner」（B2/B3，见 §2、§12.2）。
+2. **平台 DB 仍可被不可信代码读取（G1）。** runner 以 rw 方式挂载 `./data:/app/data`
+   （平台 SQLite / 队列库所在），当前文件权限下沙箱 uid 仍读得到。uid 分离只堵住了
+   「读 worker 环境偷凭据」这一条路径，**没有**隔离数据面；闭合方式见
+   `DEVELOPMENT.md` §9.2 待补第 2 条（窄队列接口或独立库）。
+3. **网络出口未分段**（§8，部署侧待补），与 uid 分离相互独立。
+4. 降权产物是「同 uid 的不可信代码无法读 worker 的 `/proc/<pid>/environ`」；它**不**
+   声称容器内的内核级隔离。沙箱 uid 若自己在该工作树里跑 `git`，仍可能因为不是属主而
+   触发 `safe.directory`——那条路径不在本切片契约内。
 
 ---
 
@@ -372,7 +471,7 @@ cd backend
 | 2 | `RepoRunner.to_dict()` **不含**密文字段、**含** `has_credential` | §3 |
 | 3 | `ensure()` 幂等：二次调用返回同一行，且**不覆盖**已改过的 `enabled` / `max_concurrency` / `egress_policy` | §3 |
 | 4 | `credential()`：repo 密文可解时 `source='repo'`；无 repo 凭据时回退 `source='shared'`；两者皆无时 `None`；**密文损坏时抛 `RepoRunnerError` 且不回退** | §5 |
-| 5 | `set_credential()` 在缺 `GIT_IDENTITY_KEY` 时**不落库**；落库后 DB 中**不含明文**（夹具可断言密文 != 明文） | §5 |
+| 5 | `set_credential()` 在缺 `RUNNER_CREDENTIAL_KEY` 时**不落库**（且不用 `GIT_IDENTITY_KEY` 顶替）；落库后 DB 中**不含明文**（夹具可断言密文 != 明文） | §5 |
 | 6 | `clear_credential()` 后 `credential_kind='shared'`、密文为 `None`，`credential()` 回到共享 token | §5 |
 | 7 | `safe_workspace_subdir()` 的拒绝矩阵（绝对路径 / `..` / 反斜杠 / 控制字符 / 非法字符）与默认值 `runners/<id>` | §6 |
 | 8 | `workspace_root()` = `base/runners/<id>`，且会按需建行 | §6 |
@@ -387,7 +486,7 @@ cd backend
 
 ## 11. 验收场景
 
-按顺序在**离线夹具**（1–6）与**真容器**（7；8 待 §12.7 闭合后）上验证：
+按顺序在**离线夹具**（1–6）与**真容器**（7–9）上验证：
 
 1. **默认即共享。** 未配置任何 runner，入队一个 review 任务 → `runner_id` 为
    `None`（无行）或指向默认行；`credential()` 返回 `source='shared'`。
@@ -405,9 +504,22 @@ cd backend
 7. **迁移幂等（真库）。** 对既有部署跑两次 `ensure_schema`：第一次报告
    `repo_runners` 建表与 `agent_tasks.runner_id` 加列（若缺失），第二次空报告；
    `check_database.py` 在 SQLite 与 PostgreSQL 都过。
-8. **端到端（依赖 §12.7 闭合）。** 先定下 repo 凭据的解密封装位置，再配一个仓库
-   专属凭据 + `runners/1` 工作区，跑一次 fix 任务：clone / push 用该凭据，工作树落在
-   `AGENT_WORK_ROOT/runners/<runner_id>/<task_id>`，PR 打开后 `last_task_at` 更新。
+8. **端到端（依赖 §12.7 已闭合）。** 配一个仓库专属凭据 + `runners/1` 工作区，跑一次
+   fix 任务：clone / push 用该凭据（worker 用 `RUNNER_CREDENTIAL_KEY` 在容器内解封），
+   工作树落在 `AGENT_WORK_ROOT/runners/<runner_id>/<task_id>`，PR 打开后
+   `last_task_at` 更新。
+9. **降权（切片 A，需真容器 / `CAP_SETUID`+`CAP_SETGID`+`CAP_DAC_OVERRIDE`）。** 设好
+   `AGENT_SANDBOX_UID=10002` / `AGENT_SANDBOX_GID=10000` 后跑一个带
+   `check_*.py` 的任务：子进程的 `os.geteuid()==10002`，且它读不到
+   `/proc/<worker_pid>/environ` 里的 `FORGEJO_RUNNER_TOKEN` /
+   `RUNNER_CREDENTIAL_KEY`；工作树属主是 worker（root），worker 的 `git` 不报
+   dubious ownership；worker 的 `id -G` 含 `10000`，且能写 `/work` / `/app/data`
+   bind mount（宿主属主不是 root 时靠 `DAC_OVERRIDE`）。**先验证 capability 真的
+   effective**：`docker exec <runner> grep -E '^CapEff:' /proc/1/status` 必须是
+   `c2`（`SETUID|SETGID|DAC_OVERRIDE`）；若是 `0`，说明镜像用了非 root `USER`，
+   compose 的 `cap_add` 只落在 bounding set——此时每个任务都会 fail-closed，必须改回
+   `USER root`。只设一个变量、或请求降权却没有 effective capability 时，任务
+   **明确失败**，不按 worker uid 执行。
 
 ---
 
@@ -433,14 +545,14 @@ cd backend
    `internal` 网络 / 出口白名单的部署自动化尚未落地（§8 的诚实性条款）。
 6. **`last_task_at` 的用途。** 现在只是「最近活跃」信号；是否据此做空闲回收
    （如长期无任务的 runner 行清理、工作区回收）未定。
-7. **repo 凭据的解密封装位置（已知实现缺口）。** `RepoRunnerService.credential()`
-   当前由 `services/agent_worker.py` 在 profile `runner` 的容器内调用，而该容器
-   刻意不带 `GIT_IDENTITY_KEY`（§5.2 的诚实标注）。候选修法二选一：
-   ① 在**受信侧**（backend / 独立的凭据服务）解密后经内部通道把凭据交给 worker，
-   不让沙箱持有主密钥；② 为执行平面引入一枚**专用**封装密钥，并确认它不进入任务
-   子进程（`services/sandbox_env.py` 的白名单）。在选定前，仓库专属凭据只在能提供
-   该 cipher 的进程内可用——沙箱 runner 内的 repo 凭据解析会 fail-closed，这是
-   **实现缺口**而不是文档笔误。
+7. **repo 凭据的解密封装位置（切片 A 已闭合）。** 取候选②：引入执行平面**专用**的
+   封装密钥 `RUNNER_CREDENTIAL_KEY`，只用于 `repo_runners.credential_ciphertext`。
+   它在 backend（`set_credential` 密封）与 runner 容器（`credential()` 打开）**都有**，
+   而用户身份主密钥 `GIT_IDENTITY_KEY` 仍**只在 backend**、不进 runner 环境
+   （§5.2）。「它不进任务子进程」不再只靠 `services/sandbox_env.py` 的白名单：
+   不可信子进程被降到沙箱 uid 10002，读不到 worker 的环境与 `/proc/<pid>/environ`
+   （§6.5）。残留风险与限制（同 uid 跨任务可读、平台 DB 仍可读）见 §6.5 的诚实标注，
+   属于**已知缺口**而不是文档笔误。
 
 ---
 
@@ -455,10 +567,11 @@ cd backend
 | 承载者 | openfish 认证 + nginx 注入身份头 + Forgejo 信任代理 | `repo_runners` 一行 + 共享进程池的解析逻辑 |
 | 变更对象 | 删除 `/git-credential`、`GitIdentity`、admin 铸票 | 新增 `repo_runners`、`AgentTask.runner_id`、领取/配额语义 |
 
-衔接点只有一个：**at-rest 封装原语**。本设计当前用
-`services.git_identity.TokenCipher`（Fernet，`GIT_IDENTITY_KEY`）封装**服务凭据**
-（repo-scoped runner token），而薄中间层要删除的是**用户 token 的落库与铸造**。
-两者都用到「加密存储」这一能力，但对象不同：
+衔接点只有一个：**at-rest 封装原语**。本设计复用 `services.git_identity.TokenCipher`
+（Fernet），但**密钥分离**：薄中间层的**用户身份** token 继续用 `GIT_IDENTITY_KEY`
+封装且只留在 backend；本设计的**服务凭据**（repo-scoped runner token）改用专用的
+`RUNNER_CREDENTIAL_KEY`（§5.2），因此执行平面能自行解封而无需持有用户身份主密钥。
+两者都用到「加密存储」这一能力，但对象与密钥都不同：
 
 - 薄中间层落地后，`git_identities` 表与用户铸票逻辑消失，**用户**不再有密文；
 - 执行平面仍然需要一枚**服务凭据**的密文封装，因此封装原语（或其后继）需要保留，
@@ -466,6 +579,7 @@ cd backend
 
 因此正确的读法是：**薄中间层管身份、本设计管执行**；若两份设计同时实施，
 唯一需要对齐的接口是「封装原语保留在哪里、密钥叫什么」，而不是「谁取代谁」。
-在薄中间层真正合并前，本设计沿用现状（`TokenCipher` + `GIT_IDENTITY_KEY`），
-不提前假设其删除。两者的共同底线一致：**不挂 docker socket、token 不进日志 /
-argv / `.git/config`、默认 fail-closed**。
+本设计已经把执行平面的密钥定名为 `RUNNER_CREDENTIAL_KEY` 并与用户身份主密钥
+`GIT_IDENTITY_KEY` 解耦；薄中间层真正合并时，只需删除用户身份那一侧，不必动执行平面。
+两者的共同底线一致：**不挂 docker socket、token 不进日志 / argv / `.git/config`、
+默认 fail-closed**。

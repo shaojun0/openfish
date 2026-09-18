@@ -565,24 +565,46 @@ docker compose --profile runner up -d runner
   任何平台密钥。runner 默认只用一枚可单独吊销的
   `FORGEJO_RUNNER_TOKEN`（git credential helper + 开 PR）——仓库可用专属凭据覆盖
   （下一条）；凭据缺失时 fix 任务在 push/PR 处**明确失败**，不回落去用 admin 权限。
+  **两把钥匙，各管一摊（切片 A）**：用户身份主密钥 `GIT_IDENTITY_KEY` 仍只留在
+  backend、**永不进 runner**；仓库专属 token 改用**专用**的 `RUNNER_CREDENTIAL_KEY`
+  密封（`repo_runners.credential_ciphertext`），这枚密钥 backend 与 runner **都有**，
+  于是 worker 能在沙箱内解封**服务凭据**，却拿不到用户身份密文的主密钥。两枚密钥
+  之间没有回退：缺 `RUNNER_CREDENTIAL_KEY` 时 repo 凭据写入不落库、解析 fail-closed。
+- **沙箱 uid 分离（切片 A，已落地）**：worker 以 root（effective
+  `CAP_SETUID` + `CAP_SETGID` + `CAP_DAC_OVERRIDE`，且属于共享组 gid 10000；
+  Docker 只对 root 进程授予 effective capability，非 root `USER` 下 cap_add 只进
+  bounding set、降权无法完成）运行；仓库自带的
+  `check_*.py` 与 headless review 命令被降到**沙箱 uid 10002**（共享组 gid 10000），
+  任务工作树组可写 + setgid 且 **owner 不变**（只 `chgrp`，绝不 `chown`，worker 的
+  `git` 不会报 dubious ownership）。因此不可信代码读不到 worker 的
+  `/proc/<pid>/environ`，也就偷不到 `FORGEJO_RUNNER_TOKEN` / `RUNNER_CREDENTIAL_KEY`；
+  沙箱 `HOME` 是 `/tmp` 下的 worker-owned 目录，不在 checkout 内。
+  降权由 `services/sandbox_identity.py` 一处实现；`AGENT_SANDBOX_UID` /
+  `AGENT_SANDBOX_GID` **两个都设**才生效，只设一个或不合法即 fail-closed，
+  请求了降权却无 effective `CAP_SETUID` / `CAP_SETGID` 时直接报错，绝不静默按
+  worker uid 跑不可信代码。语义、capability 要求与残余限制见
+  [`DESIGN-per-repo-runner.md`](./DESIGN-per-repo-runner.md) §6.5。
 - **逻辑 per-repo runner（已落地基座）**：进程池仍是**一个共享池**（不挂 docker
   socket、不按仓库起容器），但每个仓库有一行 `repo_runners` 配置，worker 领取任务
-  时解析四件事：**凭据**（默认回退共享 `FORGEJO_RUNNER_TOKEN`；仓库可用 Fernet
-  密文存专属 token，解不开即 fail-closed 不回退；沙箱容器不带
-  `GIT_IDENTITY_KEY`，其解密封装位置的已知缺口见该设计 §5.2 / §12.7）、**工作区**（默认
+  时解析四件事：**凭据**（默认回退共享 `FORGEJO_RUNNER_TOKEN`；仓库可用
+  `RUNNER_CREDENTIAL_KEY` 的 Fernet 密文存专属 token，解不开即 fail-closed 不回退；
+  worker 在容器内用同一枚专用密钥打开，**无需** `GIT_IDENTITY_KEY`，见该设计
+  §5.2 / §12.7）、**工作区**（默认
   `AGENT_WORK_ROOT/runners/<runner_id>`，越界路径直接拒绝）、**每仓库并发**
   （`max_concurrency`，`0` = 继承 `AGENT_MAX_IN_FLIGHT_PER_REPO`）与**出网声明**
   （`egress_policy`；平台只持久化策略，真正的网络分段由部署侧执行）。
   `AgentTask.runner_id` 把任务绑定到逻辑 runner，**禁用的 runner 任务不被
   `claim`**。沙箱边界（不挂 socket、不继承平台密钥）不变；设计与验收场景见
   [`DESIGN-per-repo-runner.md`](./DESIGN-per-repo-runner.md)。
-- **待补的隔离（两处）**：
+- **待补的隔离（切片 A 后更新）**：
   1. *网络*：runner 仍在 `openfish` bridge 上，`network: internal` + 出口白名单是
      后续切片。
-  2. *文件系统/控制面*：runner 以可写方式挂载 `./data:/app/data`（平台 SQLite 库
-     所在），而它同时执行仓库自带的 `check_*.py`。环境白名单挡不住文件系统，
-     因此"隔离覆盖文件系统"目前**不成立**；拆分方式待定（窄队列接口或独立库）。
-  在两者补齐前，凭据边界那一条是唯一已落地的隔离。
+  2. *文件系统/数据面*：uid 分离已堵住「读 worker 环境偷凭据」，但 runner 仍以可写
+     方式挂载 `./data:/app/data`（平台 SQLite 库所在），而它同时执行仓库自带的
+     `check_*.py`——**平台 DB 仍可被不可信代码读取（G1）**；此外所有任务共用沙箱
+     uid 10002，`/work` 上**跨任务 / 跨仓库可读**。两条都要靠每任务命名空间 / 物理
+     runner，或窄队列接口 / 独立库来闭合。
+  在补齐前，「隔离覆盖文件系统」仍**不成立**。
 
 ### 9.3 agent 的任务协议（`AGENTS.md` 契约）
 

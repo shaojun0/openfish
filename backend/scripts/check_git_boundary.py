@@ -44,6 +44,7 @@ from services.sandbox_env import (  # noqa: E402
     PLATFORM_SECRETS,
     sandbox_env,
 )
+from services.sandbox_identity import SANDBOX_GID_ENV, SANDBOX_UID_ENV  # noqa: E402
 
 REPO_DIR = REPO_ROOT.parent
 DOCKER_DIR = REPO_DIR / "docker"
@@ -95,6 +96,41 @@ def _yaml_service(text: str, name: str) -> str:
             break
         body.append(line)
     return "\n".join(body)
+
+
+def _yaml_list(block: str, key: str) -> list[str]:
+    """The ``- item`` entries of a list key inside a service block."""
+    lines = block.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.strip() == f"{key}:"), None)
+    if start is None:
+        return []
+    key_indent = len(lines[start]) - len(lines[start].lstrip())
+    items: list[str] = []
+    for line in lines[start + 1:]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if len(line) - len(line.lstrip()) <= key_indent:
+            break
+        if stripped.startswith("- "):
+            items.append(stripped[2:].strip())
+    return items
+
+
+def _yaml_scalar(block: str, key: str) -> str:
+    """The scalar value of ``key: value`` in a YAML block, unquoted (or ``""``)."""
+    for line in block.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or ":" not in stripped:
+            continue
+        name, _, value = stripped.partition(":")
+        if name.strip() != key:
+            continue
+        value = value.split("#", 1)[0].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        return value
+    return ""
 
 
 def _nginx_location(text: str, path: str) -> str:
@@ -234,8 +270,33 @@ def check_compose_runner_env() -> None:
         check(f"runner env does not carry {secret}", secret not in effective)
     check("runner env carries the dedicated runner token",
           "FORGEJO_RUNNER_TOKEN" in effective)
+    check("runner env carries the dedicated runner credential key",
+          "RUNNER_CREDENTIAL_KEY:" in effective)
+    check("runner env carries the sandbox uid",
+          f"{SANDBOX_UID_ENV}:" in effective)
+    check("runner env carries the sandbox gid",
+          f"{SANDBOX_GID_ENV}:" in effective)
+    # Presence alone lets a drifted value (a uid the image never creates) pass
+    # and fail closed at runtime; pin the values the Dockerfile creates.
+    check("runner env sets the sandbox uid to 10002",
+          _yaml_scalar(runner_env, SANDBOX_UID_ENV) == "10002",
+          repr(_yaml_scalar(runner_env, SANDBOX_UID_ENV)))
+    check("runner env sets the sandbox gid to 10000",
+          _yaml_scalar(runner_env, SANDBOX_GID_ENV) == "10000",
+          repr(_yaml_scalar(runner_env, SANDBOX_GID_ENV)))
     check("runner env still reaches the queue database",
           "API_KEYS_FILE" in effective or "DATABASE_URL" in effective)
+
+    # The seal side lives in x-backend-env; a runner anchor that can open a
+    # credential is useless if the backend side was deleted.
+    backend_env = _yaml_anchor(text, "x-backend-env: &backend-env")
+    check("the backend (seal side) carries RUNNER_CREDENTIAL_KEY",
+          _yaml_scalar(backend_env, "RUNNER_CREDENTIAL_KEY") != "")
+
+    env_example = DOCKER_DIR / ".env.example"
+    example = env_example.read_text(encoding="utf-8") if env_example.is_file() else ""
+    check("the compose env template assigns RUNNER_CREDENTIAL_KEY",
+          "RUNNER_CREDENTIAL_KEY=" in example)
 
     runner_service = _yaml_service(text, "runner")
     check("the runner service uses the sandbox env anchor",
@@ -248,6 +309,15 @@ def check_compose_runner_env() -> None:
           "compose must leave AGENT_PR_POLICY empty so the policy file decides")
     check("per-repo auto_fix is not shadowed by a compose default",
           'AGENT_AUTO_FIX: "${AGENT_AUTO_FIX:-}"' in runner_env)
+    # Privilege separation needs exactly CAP_SETUID/CAP_SETGID to drop the
+    # untrusted child to the sandbox uid, plus CAP_DAC_OVERRIDE for the root
+    # worker to write host-owned bind mounts; anything more re-opens the boundary.
+    cap_drop = _yaml_list(runner_service, "cap_drop")
+    cap_add = _yaml_list(runner_service, "cap_add")
+    check("the runner service still drops ALL capabilities",
+          cap_drop == ["ALL"], repr(cap_drop))
+    check("the runner service adds back only SETUID/SETGID/DAC_OVERRIDE",
+          set(cap_add) == {"SETUID", "SETGID", "DAC_OVERRIDE"}, repr(cap_add))
 
 
 def check_no_admin_token_on_agent_path() -> None:
@@ -275,11 +345,20 @@ def check_publish_cannot_be_hijacked() -> None:
     runner = (REPO_ROOT / "services" / "agent_runner.py").read_text(encoding="utf-8")
     check("the fix commit passes --no-verify", '"--no-verify"' in runner)
     check("one hooks-off helper serves both commit and push",
-          runner.count("*self._no_hooks_args(root)") >= 2,
+          runner.count("*self._no_hooks_args()") >= 2,
           "a publish step grew without core.hooksPath")
     check("the hooks-off directory is created fresh, not at a predictable path",
           'mkdtemp(prefix="openfish-hooks-"' in runner,
           "a fixed path inside the writable checkout can be symlinked to .git/hooks")
+    check("the hooks-off directory is not created in the writable work tree",
+          "dir=root.parent" not in runner,
+          "the untrusted uid can replace a temp dir under the work tree")
+    check("every post-untrusted git command re-asserts .git/config",
+          runner.count("self._assert_config_untouched(root)") >= 3,
+          "changed_paths/commit/push must all re-assert the post-clone config")
+    check("git status disables a repo-config fsmonitor program",
+          '"core.fsmonitor=false"' in runner,
+          "core.fsmonitor is executed by git status with the token in the env")
     check("push targets the pinned repo_url, never the mutable origin",
           '"push", "--quiet", target' in runner
           and '"push", "--quiet", "origin"' not in runner)

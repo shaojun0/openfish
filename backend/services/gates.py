@@ -51,6 +51,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from services.digest import sha256_text
 from services.sandbox_env import sandbox_env
+from services.sandbox_identity import (
+    SandboxIdentityError,
+    sandbox_env_overrides,
+    untrusted_popen_kwargs,
+)
 
 logger = logging.getLogger("cpypiserver.gates")
 
@@ -456,15 +461,33 @@ class SubprocessGateExecutor:
         cwd: str,
         timeout: float,
     ) -> tuple[int, str, bool]:
-        """Run *argv* in its own process group; return ``(exit, output, timed_out)``."""
+        """Run *argv* in its own process group; return ``(exit, output, timed_out)``.
+
+        A check is **untrusted code**: it comes from the repository under review.
+        When the deployment configures a sandbox identity
+        (``AGENT_SANDBOX_UID`` / ``AGENT_SANDBOX_GID``) the child is dropped to
+        that uid/gid, so it can no longer read the worker's
+        ``/proc/<pid>/environ`` and walk off with ``FORGEJO_RUNNER_TOKEN``.  The
+        ``HOME`` override is merged **after** :func:`sandbox_env`, which is the
+        allowlist that has already dropped the platform credentials; it points at
+        a worker-owned directory outside the checkout, never at anything inside
+        the repository's own (writable) work tree.  Without the two env vars this
+        is exactly the spawn it always was (dev / this gate).
+        """
+        child = self._child_env()
+        child.update(sandbox_env_overrides())
         proc = subprocess.Popen(
             list(argv),
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=self._child_env(),
+            env=child,
             start_new_session=True,
+            # ``{}`` in dev mode; a configured-but-unusable identity raises
+            # ``SandboxIdentityError`` and the gate fails loudly instead of
+            # quietly running repository code as the trusted worker.
+            **untrusted_popen_kwargs(),
         )
         try:
             out, err = proc.communicate(timeout=timeout)
@@ -483,6 +506,14 @@ class SubprocessGateExecutor:
         except OSError as exc:
             return ExecOutcome(
                 127, f"[error] cannot execute {script}: {exc}\n", False,
+                _elapsed_ms(started),
+            )
+        except SandboxIdentityError as exc:
+            # A configured-but-unusable sandbox identity is a failed gate, not a
+            # reason to fall back to the trusted uid: repository code must never
+            # run beside the worker's credential just because the drop failed.
+            return ExecOutcome(
+                127, f"[error] sandbox identity unusable: {exc}\n", False,
                 _elapsed_ms(started),
             )
         if timed_out:
@@ -506,6 +537,15 @@ class SubprocessGateExecutor:
             return ExecOutcome(
                 127,
                 f"[error] cannot execute check {command.id} ({argv[0]}): {exc}\n",
+                False,
+                _elapsed_ms(started),
+            )
+        except SandboxIdentityError as exc:
+            # Same fail-closed rule as :meth:`run`: the check is repository code,
+            # so a broken drop is a red gate and never a spawn as the worker.
+            return ExecOutcome(
+                127,
+                f"[error] sandbox identity unusable for check {command.id}: {exc}\n",
                 False,
                 _elapsed_ms(started),
             )

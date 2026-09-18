@@ -89,6 +89,12 @@ from services.gates import (
 from services.git_auth import credential_args, git_env
 from services.model_routes import mask_api_key, resolve
 from services.sandbox_env import sandbox_env
+from services.sandbox_identity import (
+    SANDBOX_HOME_DIRNAME,
+    SandboxIdentityError,
+    describe_identity,
+    prepare_untrusted_workdir,
+)
 
 logger = logging.getLogger("cpypiserver.agent_runner")
 
@@ -378,10 +384,20 @@ def checkout_root(workdir: str | Path) -> Path:
 
 
 def mark_finished(workdir: str | Path) -> Path:
-    """Drop the ``.done`` marker that makes a work directory sweepable."""
+    """Drop the ``.done`` marker that makes a work directory sweepable.
+
+    Opened with ``O_NOFOLLOW``: the work directory is group-writable by the
+    sandbox uid, so a check could plant ``.done`` as a symlink and turn this
+    worker-owned write into a clobber of the link's target.  A planted symlink
+    fails with ``ELOOP``/``ENOTDIR``, which the caller already logs and swallows.
+    """
     marker = Path(workdir) / FINISHED_MARKER
     marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(utc_now_iso(), encoding="utf-8")
+    fd = os.open(
+        marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644,
+    )
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(utc_now_iso())
     return marker
 
 
@@ -1338,10 +1354,19 @@ class SubprocessRunnerAdapter:
         running a check leaves a ``__pycache__`` behind, and reporting that as
         "the agent edited this" would make the path guard fire on a check that
         simply executed.  Real source and suite edits are never transient.
+
+        ``.git/config`` came from the checkout, which untrusted code has been
+        writing since the clone; ``git status`` executes a ``core.fsmonitor``
+        program named there, and that child would inherit the worker's
+        ``OPENFISH_GIT_TOKEN``.  The post-clone digest is therefore re-asserted
+        first, and the repository-supplied hook is disabled explicitly.
         """
         root = checkout_root(workdir)
+        self._assert_config_untouched(root)
         output = self._run([
-            self._git_binary, "-C", str(root), "status", "--porcelain", "--untracked-files=all",
+            self._git_binary, "-C", str(root),
+            "-c", "core.fsmonitor=false",
+            "status", "--porcelain", "--untracked-files=all",
         ])
         return [
             name for name in (line[3:].strip() for line in output.splitlines())
@@ -1445,19 +1470,34 @@ class SubprocessRunnerAdapter:
         task started on.  Comparing ``HEAD`` before and after also covers a task
         with **no** target sha (clone followed the default branch tip), where
         comparing against ``commit_sha`` would never detect an empty diff.
+
+        This is the first worker-run git command after untrusted code, and
+        ``git add`` executes any clean filter ``.git/config`` names while ``git
+        status`` executes ``core.fsmonitor`` — both would run with the worker's
+        ``OPENFISH_GIT_TOKEN``.  The config is re-asserted against the post-clone
+        digest and the fsmonitor hook disabled before either runs.
         """
         root = checkout_root(workdir)
+        self._assert_config_untouched(root)
         before = self._run([self._git_binary, "-C", str(root), "rev-parse", "HEAD"]).strip()
-        status = self._run([self._git_binary, "-C", str(root), "status", "--porcelain"])
+        status = self._run([
+            self._git_binary, "-C", str(root),
+            "-c", "core.fsmonitor=false",
+            "status", "--porcelain",
+        ])
         if status.strip():
-            self._run([self._git_binary, "-C", str(root), "add", "-A"])
+            self._run([
+                self._git_binary, "-C", str(root),
+                "-c", "core.fsmonitor=false",
+                "add", "-A",
+            ])
             # ``--no-verify`` plus an empty ``core.hooksPath``: the checkout was
             # produced by a command that could leave a ``.git/hooks/pre-commit``
             # behind (``git status`` never reports ``.git/**``), and a hook would
             # run *after* the path guard and could rewrite what gets committed.
             self._run([
                 self._git_binary, "-C", str(root),
-                *self._no_hooks_args(root),
+                *self._no_hooks_args(),
                 "-c", "user.name=openfish-agent",
                 "-c", "user.email=agent@openfish.invalid",
                 "commit", "--quiet", "--no-verify", "-m", message,
@@ -1471,7 +1511,7 @@ class SubprocessRunnerAdapter:
         return True
 
     @staticmethod
-    def _no_hooks_args(root: Path) -> list[str]:
+    def _no_hooks_args() -> list[str]:
         """``-c core.hooksPath=…`` so a hook planted in the checkout never runs.
 
         Git discovers hooks only from the working tree's ``.git`` directory, so
@@ -1481,11 +1521,13 @@ class SubprocessRunnerAdapter:
         *and* push) must carry this.
 
         The directory is created **fresh with an unpredictable name** on every
-        call: the checkout is writable by the code that ran before this step, so
-        a fixed path inside it could have been replaced with a symlink to
-        ``.git/hooks`` — which would put the hooks straight back.
+        call, under the system temp dir rather than the work tree: the checkout
+        and its parent are writable by the code that ran before this step, so a
+        directory inside them could be deleted and replaced with a symlink to
+        ``.git/hooks`` — which would put the hooks straight back.  ``/tmp`` is
+        sticky, so the untrusted uid cannot remove or replace it.
         """
-        hooks_dir = Path(tempfile.mkdtemp(prefix="openfish-hooks-", dir=root.parent))
+        hooks_dir = Path(tempfile.mkdtemp(prefix="openfish-hooks-"))
         return ["-c", f"core.hooksPath={hooks_dir}"]
 
     @staticmethod
@@ -1500,20 +1542,23 @@ class SubprocessRunnerAdapter:
         return sha256_text(text)
 
     def _assert_config_untouched(self, root: Path) -> None:
-        """Refuse to push when untrusted code rewrote ``.git/config``.
+        """Refuse any post-untrusted git command when ``.git/config`` was rewritten.
 
         That file is read from *inside* the checkout, which repository-supplied
         code runs in before this step.  A rewrite could redirect the push
-        (``url.*.insteadOf``), add an ``http.extraHeader``, or plant a
-        ``credential.helper`` git would hand the token to on ``store``.  Rather
-        than enumerate the dangerous keys, any change from the post-clone
-        digest is a violation.
+        (``url.*.insteadOf``), add an ``http.extraHeader``, plant a
+        ``credential.helper`` git would hand the token to on ``store``, or name a
+        ``core.fsmonitor`` / ``filter.<n>.clean`` program for the worker's own
+        ``git status`` / ``git add`` to execute with the runner token.  Rather
+        than enumerate the dangerous keys, any change from the post-clone digest
+        is a violation.
         """
         current = self._config_hash(root)
         if self._config_digest is None or current != self._config_digest:
             raise AgentRunnerError(
-                "checkout 的 .git/config 在 clone 之后被改写，拒绝 push"
-                "（可能是 url.*.insteadOf / credential.helper / http.extraHeader 注入）"
+                "checkout 的 .git/config 在 clone 之后被改写，拒绝继续执行 git"
+                "（可能是 url.*.insteadOf / credential.helper / http.extraHeader / "
+                "core.fsmonitor / filter.*.clean 注入）"
             )
 
     def _remote_head(self, root: Path, repo_url: str, branch: str) -> str:
@@ -1560,7 +1605,7 @@ class SubprocessRunnerAdapter:
         # ``refs/heads/agent/<name>`` ("您提供的目标不是一个完整的引用名称").
         self._run([
             self._git_binary, "-C", str(root),
-            *self._no_hooks_args(root),
+            *self._no_hooks_args(),
             "push", "--quiet", target, f"HEAD:refs/heads/{branch}",
         ])
 
@@ -1709,6 +1754,29 @@ class AgentRunner:
 
             steps.append("clone")
             adapter.clone(workdir, repo_url=task.repo_url, commit_sha=task.commit_sha)
+
+            # ── Hand the checkout to the sandbox uid (privilege separation) ──
+            # Everything *after* this point that runs repository code — the
+            # gates (``services.gates``) and the headless review command
+            # (``agent_worker.build_review_fn``) — is dropped to
+            # ``AGENT_SANDBOX_UID``/``AGENT_SANDBOX_GID``.  The work tree must
+            # therefore be group-writable *without* changing its owner: git
+            # stays the worker's (no dubious-ownership), while the sandbox uid
+            # can still write the build products a check leaves behind.
+            # ``prepare_untrusted_workdir`` is a no-op without those env vars.
+            # git itself (clone/fetch/commit/push) deliberately never drops: it
+            # carries the credential and is the trusted worker's own process.
+            try:
+                prepare_untrusted_workdir(workdir)
+            except SandboxIdentityError as exc:
+                # Fail the task loudly: a half-configured sandbox must not
+                # silently degrade into "review code as the worker".
+                raise AgentRunnerError(
+                    f"无法为任务 {task.task_id} 准备工作目录的沙箱身份：{exc}"
+                ) from exc
+            logger.info(
+                "agent 任务 %s：%s", task.task_id, describe_identity()
+            )
 
             steps.append("read")
             context = adapter.read_context(workdir)
@@ -2199,9 +2267,12 @@ def _curate(
 
 
 #: Path fragments that a check's own execution leaves behind.  They are not
-#: edits the agent made and must not trip the path guard.
+#: edits the agent made and must not trip the path guard.  ``SANDBOX_HOME_DIRNAME``
+#: is a stale copy from a deployment where the sandbox ``HOME`` lived inside the
+#: checkout; the current implementation puts it outside the work tree entirely.
 _TRANSIENT_MARKERS: tuple[str, ...] = (
     "__pycache__/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
+    f"{SANDBOX_HOME_DIRNAME}/",
 )
 
 

@@ -75,6 +75,11 @@ from services.review_policy import (
     parse_yaml,
 )
 from services.sandbox_env import sandbox_env
+from services.sandbox_identity import (
+    SandboxIdentityError,
+    sandbox_env_overrides,
+    untrusted_popen_kwargs,
+)
 
 logger = logging.getLogger("cpypiserver.agent_worker")
 
@@ -341,6 +346,14 @@ def build_review_fn(
             # P1.4: the role, so a fixer edits files and a reviewer does not.
             ENV_TASK_KIND: str(kind or "review"),
         })
+        # Merged *after* the allowlist, exactly like the gate executor: the
+        # sandbox child gets a worker-owned HOME outside the checkout it can
+        # actually write (the worker's own is mode 0700 and belongs to the
+        # trusted uid) and, when the deployment configures one, is dropped to the
+        # dedicated sandbox uid/gid.  The review command is untrusted — it reads
+        # issue text and repository files — so it must never share the worker's
+        # uid and read its ``/proc/<pid>/environ``.
+        child.update(sandbox_env_overrides())
         try:
             proc = subprocess.run(
                 argv,
@@ -350,7 +363,16 @@ def build_review_fn(
                 env=child,
                 timeout=budget,
                 check=False,
+                # ``{}`` in dev mode; a configured-but-unusable identity raises
+                # ``SandboxIdentityError`` and the task fails loudly rather than
+                # running the headless command as the credentialed worker.
+                **untrusted_popen_kwargs(),
             )
+        except SandboxIdentityError as exc:
+            raise AgentRunnerError(
+                f"review 命令的沙箱身份不可用（{exc}）；任务失败，"
+                "绝不以 worker uid 运行不可信代码"
+            ) from exc
         except subprocess.TimeoutExpired as exc:
             raise AgentRunnerError(
                 f"review 命令超过 {budget:g}s 未结束，任务失败"

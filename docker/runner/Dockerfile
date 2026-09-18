@@ -61,11 +61,32 @@ COPY . /app/backend
 # ── Runtime directories ─────────────────────────────────────────────────
 # /work is the isolated root the platform sweeps 24h after a task finishes
 # (§9.2); /app/data and /app/config are bind-mounted from docker/ by compose.
+#
+# Privilege separation inside the container (slice A): the worker runs as
+# **root** (uid 0) and keeps the git credential, while untrusted repository code
+# (the repo's own check_*.py and the headless review command) is dropped
+# in-child to the dedicated sandbox uid 10002.  Both share gid 10000
+# ("openfish"), so the work tree can be made group-usable by the sandbox without
+# any chown.
+#
+# Why a root worker and not a non-root one: Docker grants effective capabilities
+# only to a root process.  A non-root worker with `cap_add` gets those caps in
+# its *bounding* set only (CapEff=0), so `untrusted_popen_kwargs()` fails closed
+# and every task's gates go red.  Root plus `cap_drop: ALL` and the small set the
+# worker needs is the effective configuration; the drop to uid 10002 clears the
+# child's capabilities (0 → non-zero uid transition).
+#
+# The worker is also a member of the shared group: `prepare_untrusted_workdir()`
+# chgrps the work tree to gid 10000, which a root process may only do for a group
+# it belongs to (CAP_CHOWN is deliberately *not* granted).
 RUN mkdir -p /work /app/data /app/config \
-    && useradd --create-home --uid 10001 runner \
-    && chown -R runner:runner /work /app
-USER runner
+    && groupadd --gid 10000 openfish \
+    && useradd --uid 10002 --gid 10000 --no-create-home \
+        --shell /usr/sbin/nologin sandbox \
+    && usermod -aG openfish root
 WORKDIR /work
+
+USER root
 
 # The runner container runs the queue worker; the API container only enqueues.
 # ``--loop`` is S0's CLI (services/agent_queue.py, §9.1); ``--once`` is what a

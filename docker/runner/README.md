@@ -110,7 +110,7 @@ worker 按任务所属仓库解析一行 `repo_runners`（逻辑 runner），用
 
 | 解析项 | 取值 / 回退 | 说明 |
 | --- | --- | --- |
-| 凭据 | 仓库专属 Fernet 密文；无则 `FORGEJO_RUNNER_TOKEN` | 密文解不开即**失败，不回退**共享 token（fail-closed） |
+| 凭据 | 仓库专属 `RUNNER_CREDENTIAL_KEY` Fernet 密文；无则 `FORGEJO_RUNNER_TOKEN` | worker 用专用密钥在容器内解封；密文解不开即**失败，不回退**共享 token（fail-closed） |
 | 工作区 | 默认 `AGENT_WORK_ROOT/runners/<runner_id>` | 与 `/work/<task_id>` 叠加，仓库与任务两级都不撞车 |
 | 并发 | `repo_runners.max_concurrency`；`0` = `AGENT_MAX_IN_FLIGHT_PER_REPO` | 生产者在**入队**侧抑制超额任务（返回 `0`） |
 | 出网策略 | `egress_policy`（`inherit` / `internal` / `allowlist`） | **只是声明**：平台持久化策略，真正的网络分段仍由部署侧执行（§4） |
@@ -125,11 +125,59 @@ worker 按任务所属仓库解析一行 `repo_runners`（逻辑 runner），用
 物理隔离时才考虑按任务起容器（见上一节末尾），设计与验收见
 [`docs/agent-hub/DESIGN-per-repo-runner.md`](../../docs/agent-hub/DESIGN-per-repo-runner.md)。
 
-> ⚠️ **repo 专属凭据的解密前提**：本容器刻意不带 `GIT_IDENTITY_KEY`（§9），而
-> 仓库专属 token 是 Fernet 密文。`credential()` 取不到 cipher 时会 **fail-closed**
-> （共享 `FORGEJO_RUNNER_TOKEN` 路径不受影响）；解密封装应放在哪个进程尚未定，
-> 见 `DESIGN-per-repo-runner.md` §12.7。**不要**为了「让它能跑」把
+> **repo 专属凭据的解密（切片 A 已闭合）**：本容器**不带**用户身份主密钥
+> `GIT_IDENTITY_KEY`，但带**专用**的 `RUNNER_CREDENTIAL_KEY`——仓库专属 token 就是
+> 用它密封的（`services/repo_runner.py::_require_cipher`），所以 worker 能在容器内
+> 解封。两枚密钥刻意分离：拿到 runner 密钥只能打开**服务凭据**，打不开用户身份密文。
+> 缺 `RUNNER_CREDENTIAL_KEY` 时 repo 凭据仍然 fail-closed。**不要**把
 > `GIT_IDENTITY_KEY` 塞进 runner 环境——那会破坏本节的安全边界。
+
+### 2.5 沙箱 uid（特权分离，切片 A）
+
+worker 以 **root（uid 0，effective 仅 `CAP_SETUID` + `CAP_SETGID` + `CAP_DAC_OVERRIDE`，
+且属于共享组 gid 10000）** 运行，持有
+`FORGEJO_RUNNER_TOKEN` / `RUNNER_CREDENTIAL_KEY`；**仓库自带的 `check_*.py` 与
+headless review 命令是不可信代码**，被降到**沙箱 uid 10002**（与工作树同属共享组
+gid 10000）执行，因此读不到 worker 的 `/proc/<pid>/environ`，偷不到凭据：
+
+| 项 | 值 | 说明 |
+| --- | --- | --- |
+| worker | root（uid 0） | 持凭据、跑 git / 开 PR。**必须**是 root：Docker 只把 `cap_add` 变成 root 进程的 **effective** capability，非 root `USER` 下 CapEff=0，降权直接 fail-closed、所有任务变红 |
+| 沙箱 uid / gid | 10002 / 10000 | `AGENT_SANDBOX_UID` / `AGENT_SANDBOX_GID` |
+| 工作树属主 | **worker（root）** | 只 `chgrp` + `g+rwX` + 目录 setgid，**绝不 `chown`**（owner 不变，worker 的 `git` 不会报 dubious ownership）。工作目录若是符号链接则直接 `SandboxIdentityError`，绝不顺着链接 `chgrp/chmod` |
+| 沙箱 HOME | 系统临时目录下的 worker-owned 目录 | `sandbox_env_overrides()` 用 `tempfile.mkdtemp`（`/tmp`，sticky）创建一次，随后只用 `O_NOFOLLOW` fd 做 `fchown`/`fchmod`（2775）。**不**放在 checkout 里：仓库能写自己的工作树，放在里面等于把 worker 的下一次 chmod 交给它做符号链接攻击 |
+| 所需 capability | `CAP_SETUID` + `CAP_SETGID` + `CAP_DAC_OVERRIDE` | 前两枚在 `cap_drop: ALL` 后加回，用于把子进程降到 10002（只有 root worker 拿得到 effective 位）；`DAC_OVERRIDE` 让**受信任的** worker 能写 `prepare-mounts.sh` 以宿主机用户建的 `/work`、`/app/data` bind mount 并回收沙箱产物——被降权的子进程 CapEff 仍为 0 |
+| worker 组 | gid 10000（`usermod -aG openfish root`） | root 只有属于目标组时才能把工作树 `chgrp` 到 10000（刻意不给 `CAP_CHOWN`） |
+| 子进程 umask | `0o002` | 与共享组一致；`0o022` 会让沙箱建出的目录对 worker 组只读，回收 `rmtree` 删不掉 |
+
+`services/sandbox_identity.py` 是本切片的唯一实现：`untrusted_popen_kwargs()` 给出
+`{"user": 10002, "group": 10000, "extra_groups": [10000], "umask": 0o002}`；
+`sandbox_env_overrides()` 覆盖 `HOME`（调用方在 `sandbox_env()` **之后**合并）；
+`prepare_untrusted_workdir()` 对工作树递归 `chgrp` 到 gid 10000、加 `g+rwX`、给目录
+加 setgid，并把从工作树到 `AGENT_WORK_ROOT` 的父目录放开 traverse。全部 best-effort、
+幂等、**永不 chown**。`services/gates.py`（仓库 `check_*.py`）与
+`services/agent_worker.build_review_fn`（`AGENT_REVIEW_COMMAND`）两条路径都走它。
+
+worker 自己的 `git status` / `git add` / `git push` 在不可信代码之后运行：`.git/config`
+是仓库可写文件，其中的 `core.fsmonitor` 与 `filter.<n>.clean` 会被 git 当程序执行并
+继承 `OPENFISH_GIT_TOKEN`。因此 `agent_runner` 在这三条命令前都重新断言 `.git/config`
+与 clone 后的摘要一致，并对 `git status` / `git add` 显式加 `-c core.fsmonitor=false`；
+hooks 目录建在 `/tmp` 而不是可写工作树里。
+
+**fail-closed**：`AGENT_SANDBOX_UID` / `AGENT_SANDBOX_GID` **两个都设**才启用；只设
+一个或不是正整数时抛 `SandboxIdentityError`；请求了降权但既不是 `euid==0` 又没有
+`CAP_SETUID` / `CAP_SETGID`（`privilege_drop_capable()` 为假）时同样报错——**绝不静默
+地按 worker uid 跑不可信代码**。两个都不设即开发/测试模式（无降权、处处 no-op）。
+
+**残余限制（诚实标注）**：
+
+1. **跨任务 / 跨仓库可读。** 所有任务共用同一个沙箱 uid 10002，`/work` 上另一个任务的
+   checkout 对当前沙箱进程**可读**（工作树组可读）。真正的任务间隔离需要每任务命名
+   空间，或「每任务 / 每仓库一个物理 runner」（见
+   `docs/agent-hub/DESIGN-per-repo-runner.md` §12.2）。
+2. **平台 DB 仍可读（G1）。** `/app/data` 以 rw 挂载（平台 SQLite / 队列库所在），
+   当前文件权限下沙箱 uid 仍读得到；uid 分离只堵住了「读 worker 环境偷凭据」，
+   **没有**隔离数据面。闭合方式见 `docs/agent-hub/DEVELOPMENT.md` §9.2 待补第 2 条。
 
 ## 3. 资源限制
 
@@ -139,8 +187,8 @@ worker 按任务所属仓库解析一行 `repo_runners`（逻辑 runner），用
 | 内存 | `--memory 2g` | 防止某个 checkout 的构建把宿主拖垮 |
 | 进程数 | `--pids-limit 512` | fork 炸弹兜底（npm/编译会起不少进程，给足余量） |
 | 根文件系统 | 只读 + `/tmp` tmpfs | runner 只应写 `/work` 和 `/app/data` |
-| capabilities | `cap_drop: ALL` | 不需要任何 capability |
-| 提权 | `no-new-privileges:true` | setuid 兜底 |
+| capabilities | `cap_drop: ALL` + `cap_add: [SETUID, SETGID, DAC_OVERRIDE]` | 降权两枚 + 写宿主属主 bind mount 一枚；`cap_drop: ALL` 保底。**worker 必须是 root**，否则这些 cap 只进 bounding set（CapEff=0），降权不可用 |
+| 提权 | `no-new-privileges:true` | setuid 兜底（降权是**丢弃**权限，不受影响） |
 
 ## 4. 网络
 
@@ -215,14 +263,20 @@ docker compose --profile runner exec -T runner \
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      # 把不可信子进程降到沙箱 uid 10002 需要这两枚；cap_drop: ALL 之后只加回它们。
+      - SETUID
+      - SETGID
     tmpfs:
       - /tmp:size=512m
     environment:
       # 只挂 runner 专用的 env 锚点（compose 文件里的 x-runner-env）：
-      # 队列数据库 + 模型路由 + FORGEJO_RUNNER_TOKEN + AGENT_* 旋钮。
+      # 队列数据库 + 模型路由 + FORGEJO_RUNNER_TOKEN / RUNNER_CREDENTIAL_KEY
+      # + AGENT_SANDBOX_UID / AGENT_SANDBOX_GID + AGENT_* 旋钮。
       # **不要**在这里写 `<<: *backend-env`：那会把 SECRET_KEY /
       # FORGEJO_ADMIN_TOKEN / GIT_IDENTITY_KEY 交给一个会执行仓库自带
-      # check_*.py 的容器。
+      # check_*.py 的容器。`GIT_IDENTITY_KEY`（用户身份主密钥）永不进 runner；
+      # 仓库凭据只用专用的 `RUNNER_CREDENTIAL_KEY`（§2.4 / §9）。
       <<: *runner-env
     volumes:
       - ./agent-work:/work
@@ -264,13 +318,40 @@ link "$DOCKER_DIR/agent-work" "$PROJECT_DIR/backend/data/agent-work"
 - [ ] runner 不发布宿主端口（`docker compose --profile runner port runner` 为空）；
 - [ ] **runner 的环境里没有** `SECRET_KEY` / `FORGEJO_ADMIN_TOKEN` /
       `GIT_IDENTITY_KEY` / `OAUTH2_CLIENT_SECRET` / 上游口令
-      （`docker inspect` 里逐个确认；`scripts/check_git_boundary.py` 会离线断言）；
+      （`docker inspect` 里逐个确认；`scripts/check_git_boundary.py` 会离线断言）。
+      **注意（有意为之）**：`RUNNER_CREDENTIAL_KEY` **必须**在 runner 环境里（专用
+      密钥，只解 `repo_runners` 的服务凭据）；`GIT_IDENTITY_KEY`（用户身份主密钥）
+      **永不进 runner**；
+- [ ] runner 环境里有 `AGENT_SANDBOX_UID=10002` / `AGENT_SANDBOX_GID=10000`，镜像里
+      有 uid 10002 的沙箱用户与 gid 10000 的共享组（`untrusted_popen_kwargs()` 会把
+      子进程的组显式设为 10000），且 compose 保留了
+      `CAP_SETUID` + `CAP_SETGID` + `CAP_DAC_OVERRIDE`
+      （`cap_drop: ALL` 之后再 `cap_add`）——缺了降权两枚则 fail-closed，任务明确失败，
+      **不会**退回按 worker uid 跑不可信代码；缺 `DAC_OVERRIDE` 时宿主机属主的
+      `/work`、`/app/data` bind mount 写不进去；
+- [ ] **capability 真的 effective**（这条只有真容器能验，`scripts/check_sandbox_uid.py`
+      只能离线断言 `USER root`）：
+      `docker exec <runner> grep -E '^CapEff:' /proc/1/status` 必须是 `c2`
+      （SETUID|SETGID|DAC_OVERRIDE），而不是 `0`。若镜像是非 root `USER`，Docker 只把
+      这些 cap 放进 bounding set，CapEff=0，降权 fail-closed、每个任务都红；
+- [ ] worker 属于共享组：`docker exec <runner> id -G` 含 `10000`（`usermod -aG
+      openfish root`），否则 `prepare_untrusted_workdir()` 无法把工作树 `chgrp` 到
+      10000；
+- [ ] 跑一个仓库自带的 `check_*.py`：子进程 `id -u` 是 `10002`，且读不到
+      `/proc/<worker_pid>/environ`（`FORGEJO_RUNNER_TOKEN` /
+      `RUNNER_CREDENTIAL_KEY`）；
+- [ ] 任务工作树 owner 是 worker（root）、组为 gid 10000、目录带 setgid；
+      worker 的 `git` 不报 dubious ownership（只 `chgrp`，**绝不 `chown`**）；
+- [ ] 沙箱 `HOME` 在 worker-owned 的 `/tmp` 目录（不是 checkout 内）：重复 spawn
+      复用同一个目录，且该目录在容器重启前不会被仓库改写；
 - [ ] runner 实际使用的 token（共享 `FORGEJO_RUNNER_TOKEN` 或 `repo_runners` 中的
       仓库专属凭据，见 §2.4）都是**单独签发、可单独吊销、非 admin** 的；仓库专属
       凭据在 Forgejo 侧应尽量收窄到该仓库/团队（`DESIGN-per-repo-runner.md` §12）；
 - [ ] runner 所在网络无公网出口（`internal: true` 或防火墙等价物）——
       **待补**：当前 compose 仍是普通 bridge，见 §7 上方的说明；
 - [ ] `read_only` 根文件系统下，唯一可写路径是 `/work`、`/app/data` 与 `/tmp`。
+      诚实标注：uid 分离**不**解决「所有任务共用沙箱 uid 10002，`/work` 跨任务/
+      跨仓库可读」，也**不**解决「平台 DB 仍可被不可信代码读取（G1）」——见 §2.5。
 
 ## 10. 结果门控的 PR（`pr_policy`，fix 模式）
 
@@ -312,6 +393,9 @@ AGENT_REVIEW_TIMEOUT=900        # 可选，默认 900s
   日志**；命令自身不要往参数里塞 key。注意：review 命令是**唯一**拿到模型 key 的
   子进程——平台密钥（`SECRET_KEY` / `FORGEJO_ADMIN_TOKEN` / `GIT_IDENTITY_KEY`）
   被 `services/sandbox_env.py` 的白名单挡在外面，仓库自带的 gate 也拿不到模型 key。
+  worker 自己的 `RUNNER_CREDENTIAL_KEY` **同样不进子进程环境**；而且 review 命令被
+  降到沙箱 uid 10002（§2.5），即便环境白名单将来漏了，它也读不到 worker 的
+  `/proc/<pid>/environ`。
 - PR 由 `ForgejoClient.create_pull_request()` 打开，git push 由
   `credential.helper` + `OPENFISH_GIT_TOKEN` 认证；两者默认都用**同一枚**
   `FORGEJO_RUNNER_TOKEN`（`agent_worker.runner_token()`）；若该仓库在

@@ -14,10 +14,18 @@ This module is the only writer of its credential fields:
   behaviour, and the default).
 * ``repo`` — a repository-scoped token sealed with
   :class:`services.git_identity.TokenCipher` (Fernet; key from
-  ``GIT_IDENTITY_KEY``).  **No plaintext token may ever reach the database or a
-  log.**  A missing key is a configuration error: :meth:`RepoRunnerService.
+  ``RUNNER_CREDENTIAL_KEY``).  **No plaintext token may ever reach the database
+  or a log.**  A missing key is a configuration error: :meth:`RepoRunnerService.
   set_credential` stores nothing and :meth:`RepoRunnerService.credential`
   refuses to fall back to the shared token.
+
+Runner credentials use a *dedicated* key, ``RUNNER_CREDENTIAL_KEY``, that is
+deliberately separate from the user-identity master key ``GIT_IDENTITY_KEY``.
+The identity key mints Forgejo users and their tokens and must stay out of the
+runner container; the runner key only opens ``repo_runners`` credentials, so the
+worker can resolve a repo token for a task without ever holding the identity
+master key.  There is no fallback between the two: a missing runner key refuses
+the write rather than sealing with the identity key.
 
 Everything is injectable — the session factory, the environment mapping and the
 cipher — so the service runs under Flask, in a worker and in an offline gate
@@ -62,6 +70,12 @@ RUNNER_EGRESS_POLICIES: tuple[str, ...] = (
     RUNNER_EGRESS_INTERNAL,
     RUNNER_EGRESS_ALLOWLIST,
 )
+
+#: The dedicated key that seals/opens a per-repo runner credential.  It lives in
+#: both the backend (to seal on ``set_credential``) and the runner container (to
+#: open for a task), and is intentionally **not** the user-identity master key
+#: ``GIT_IDENTITY_KEY`` — the runner must never receive the latter.
+RUNNER_CREDENTIAL_KEY_ENV = "RUNNER_CREDENTIAL_KEY"
 
 #: The deployment-wide fallback token.  This module owns the canonical reader
 #: (:func:`shared_runner_token`); ``services/agent_worker.py`` keeps its own
@@ -334,8 +348,11 @@ class RepoRunnerService:
         """Seal *token* for this repository and mark it ``credential_kind='repo'``.
 
         The cipher is required **before** any database write, so a missing
-        ``GIT_IDENTITY_KEY`` stores nothing and leaves the row on the shared
-        credential (never a plaintext fallback).  An empty token is an error.
+        ``RUNNER_CREDENTIAL_KEY`` stores nothing and leaves the row on the shared
+        credential (never a plaintext fallback).  The token is sealed with the
+        dedicated runner key, deliberately **not** ``GIT_IDENTITY_KEY``: the two
+        keys are independent and there is no fallback from one to the other.  An
+        empty token is an error.
         """
         repo_id = _repo_id(repo_id)
         plaintext = (token or "").strip()
@@ -394,9 +411,11 @@ class RepoRunnerService:
         """The credential a task for this repository must use.
 
         ``credential_kind='repo'`` always resolves the sealed token — a missing
-        or empty ciphertext is an error, never a shared fallback.  Otherwise the
-        shared ``FORGEJO_RUNNER_TOKEN`` is returned as ``source='shared'``.
-        ``None`` means neither exists.
+        or empty ciphertext is an error, never a shared fallback.  The token is
+        opened with the dedicated ``RUNNER_CREDENTIAL_KEY`` (never
+        ``GIT_IDENTITY_KEY``), so a runner container can resolve it without the
+        user-identity master key.  Otherwise the shared ``FORGEJO_RUNNER_TOKEN``
+        is returned as ``source='shared'``.  ``None`` means neither exists.
 
         A decrypt failure or an expired ``credential_expires_at`` raises
         :class:`RepoRunnerError` — **fail closed**.  Falling back to the shared
@@ -570,13 +589,34 @@ class RepoRunnerService:
         return row
 
     def _require_cipher(self) -> TokenCipher:
-        """The cipher, translating a missing key into a domain error."""
+        """The dedicated runner-key cipher, translating a missing key into an error.
+
+        The key is read from :data:`RUNNER_CREDENTIAL_KEY_ENV` and passed to
+        ``TokenCipher`` explicitly.  It is **not** read through ``TokenCipher``'s
+        own ``env=`` reader, because that reader falls back to
+        ``GIT_IDENTITY_KEY``: a missing runner key must fail closed, never
+        silently seal or open with the user-identity master key.
+        """
         if self._cipher is None:
+            # An explicit empty mapping means "no key here" and must not fall back
+            # to the process environment (the same convention as
+            # ``services.sandbox_identity._origin``); only ``None`` reads
+            # ``os.environ``.
+            source = self._env if self._env is not None else os.environ
+            raw = str(source.get(RUNNER_CREDENTIAL_KEY_ENV) or "").strip()
+            if not raw:
+                raise RepoRunnerError(
+                    "RUNNER_CREDENTIAL_KEY 未配置：runner 凭据必须用它加密存储；"
+                    "该密钥与 GIT_IDENTITY_KEY（用户身份主密钥）刻意分离，"
+                    "不会回退到身份主密钥，也不会以明文降级"
+                )
             try:
-                self._cipher = TokenCipher(env=self._env)
+                self._cipher = TokenCipher(key=raw)
             except GitIdentityConfigError as exc:
                 raise RepoRunnerError(
-                    "GIT_IDENTITY_KEY 未配置：runner 凭据必须加密存储，不会以明文降级"
+                    "RUNNER_CREDENTIAL_KEY 不可用：runner 凭据必须用它加密存储；"
+                    "该密钥与 GIT_IDENTITY_KEY 刻意分离，"
+                    "不会回退到身份主密钥，也不会以明文降级"
                 ) from exc
         return self._cipher
 
@@ -633,6 +673,7 @@ def _normalize_allowlist(value: str) -> str | None:
 
 __all__ = [
     "DEFAULT_WORKSPACE_SUBDIR",
+    "RUNNER_CREDENTIAL_KEY_ENV",
     "RUNNER_CREDENTIAL_KINDS",
     "RUNNER_CREDENTIAL_REPO",
     "RUNNER_CREDENTIAL_SHARED",

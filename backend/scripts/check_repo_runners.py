@@ -20,10 +20,11 @@ offline (no Flask, no network, no Forgejo, a throwaway SQLite file):
 4. **credential at rest** — a repo token is sealed: no plaintext in any column,
    ``credential()`` decrypts it, and ``to_dict()`` exposes only
    ``has_credential``.
-5. **fail closed** — a missing ``GIT_IDENTITY_KEY`` stores nothing, a
-   corrupted ciphertext makes ``credential()`` raise even when a shared token
-   exists, and so do an empty/absent ciphertext on a ``repo``-kind row and an
-   expired ``credential_expires_at``; it is never a silent fallback.
+5. **fail closed** — a missing ``RUNNER_CREDENTIAL_KEY`` stores nothing even
+   when ``GIT_IDENTITY_KEY`` is present (there is no fallback between the two
+   keys), a corrupted ciphertext makes ``credential()`` raise even when a shared
+   token exists, and so do an empty/absent ciphertext on a ``repo``-kind row and
+   an expired ``credential_expires_at``; it is never a silent fallback.
 6. **shared fallback** — ``FORGEJO_RUNNER_TOKEN`` is returned as
    ``x-access-token``; no token means ``None`` and credentials never create a
    row.
@@ -68,6 +69,7 @@ from services.agent_queue import (  # noqa: E402
 )
 from services.git_identity import TokenCipher  # noqa: E402
 from services.repo_runner import (  # noqa: E402
+    RUNNER_CREDENTIAL_KEY_ENV,
     RUNNER_CREDENTIAL_KINDS,
     RUNNER_CREDENTIAL_REPO,
     RUNNER_CREDENTIAL_SHARED,
@@ -81,7 +83,7 @@ from services.repo_runner import (  # noqa: E402
 )
 
 #: A deterministic high-entropy key for the offline gate.  A deployment reads
-#: ``GIT_IDENTITY_KEY`` from the environment; the gate injects its own so no
+#: ``RUNNER_CREDENTIAL_KEY`` from the environment; the gate injects its own so no
 #: host secret is required.
 _TEST_KEY = "openfish-repo-runner-gate-key-not-for-deployment"
 
@@ -419,6 +421,39 @@ def scenario_credential_at_rest() -> None:
               f"source={getattr(fallback, 'source', None)}")
         check("clearing removes the ciphertext",
               service.get(repo_id).credential_ciphertext is None)
+
+        # The dedicated RUNNER_CREDENTIAL_KEY (not GIT_IDENTITY_KEY) must seal
+        # and open the row all by itself: no injected cipher here, so
+        # ``_require_cipher`` builds one straight from the environment, and a
+        # *different* service instance holding only that key opens it again.
+        dedicated_repo = harness.repo("dedicated-key")
+        dedicated_env = {
+            SHARED_TOKEN_ENV: "shared-token",
+            RUNNER_CREDENTIAL_KEY_ENV: _TEST_KEY,
+        }
+        dedicated_secret = f"SECRET-{uuid.uuid4().hex}"
+        harness.service(env=dedicated_env).set_credential(
+            dedicated_repo, token=dedicated_secret,
+        )
+        reopened = harness.service(env=dedicated_env).credential(dedicated_repo)
+        check("RUNNER_CREDENTIAL_KEY alone seals and opens a repo credential",
+              reopened is not None
+              and reopened.source == RUNNER_CREDENTIAL_REPO
+              and reopened.token == dedicated_secret,
+              f"source={getattr(reopened, 'source', None)}")
+        check("the dedicated-key ciphertext carries no plaintext",
+              dedicated_secret not in _stored_text(harness.engine, dedicated_repo))
+        wrong_key = harness.service(env={
+            SHARED_TOKEN_ENV: "shared-token",
+            RUNNER_CREDENTIAL_KEY_ENV: "a-different-runner-key",
+        })
+        try:
+            wrong_key.credential(dedicated_repo)
+        except RepoRunnerError:
+            check("a different RUNNER_CREDENTIAL_KEY cannot open the credential", True)
+        else:
+            check("a different RUNNER_CREDENTIAL_KEY cannot open the credential", False,
+                  "credential() returned a token sealed under another key")
     finally:
         harness.close()
 
@@ -430,18 +465,24 @@ def scenario_fail_closed() -> None:
     harness = _Harness()
     try:
         repo_id = harness.repo("fail-closed")
-        # A shared token exists, but no GIT_IDENTITY_KEY: the write must refuse.
-        service = harness.service(env={SHARED_TOKEN_ENV: "shared-token"})
+        # A shared token and even the user-identity master key exist, but the
+        # dedicated RUNNER_CREDENTIAL_KEY does not: the write must refuse.  The
+        # runner key is deliberately separate from GIT_IDENTITY_KEY, so a runner
+        # can hold the former without the latter, and there is no fallback.
+        service = harness.service(env={
+            SHARED_TOKEN_ENV: "shared-token",
+            "GIT_IDENTITY_KEY": "identity-master-key-not-for-runner-credentials",
+        })
         service.ensure(repo_id)
         secret = f"SECRET-{uuid.uuid4().hex}"
         try:
             service.set_credential(repo_id, token=secret)
         except RepoRunnerError as exc:
-            check("a missing GIT_IDENTITY_KEY makes set_credential refuse", True)
-            check("the refusal names the missing key", "GIT_IDENTITY_KEY" in str(exc),
-                  str(exc))
+            check("a missing RUNNER_CREDENTIAL_KEY makes set_credential refuse", True)
+            check("the refusal names the missing runner key",
+                  "RUNNER_CREDENTIAL_KEY" in str(exc), str(exc))
         else:
-            check("a missing GIT_IDENTITY_KEY makes set_credential refuse", False,
+            check("a missing RUNNER_CREDENTIAL_KEY makes set_credential refuse", False,
                   "set_credential returned a row")
         row = service.get(repo_id)
         check("nothing was stored",
