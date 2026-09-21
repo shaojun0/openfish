@@ -212,6 +212,18 @@ EXPECTED: dict[tuple[str, str], str] = {
 MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 READING = frozenset({"GET", "HEAD"})
 
+#: Decorators that register a route.  flask-openapi3's ``APIBlueprint`` spells a
+#: route as one decorator per verb (``@bp.get`` / ``@bp.post`` / …) instead of
+#: ``@bp.route(..., methods=[...])``, so both forms must be recognised — miss
+#: one and the route silently drops out of ``EXPECTED`` below.
+ROUTE_VERBS = frozenset({"get", "post", "put", "patch", "delete"})
+
+
+def _route_verb(name: str) -> str | None:
+    """The HTTP verb in a flask-openapi3 method decorator, else ``None``."""
+    leaf = name.rsplit(".", 1)[-1]
+    return leaf if leaf in ROUTE_VERBS else None
+
 
 def _decorator_name(node: ast.expr) -> str:
     """Dotted name of a decorator expression, e.g. ``bp.route`` or ``require_auth``."""
@@ -262,7 +274,8 @@ def collect() -> dict[tuple[str, str], dict]:
             guard: str | None = None
             for dec in node.decorator_list:
                 name = _decorator_name(dec)
-                if name.endswith(".route"):
+                verb = _route_verb(name)
+                if name.endswith(".route") or verb is not None:
                     for arg in dec.args:
                         try:
                             value = ast.literal_eval(arg)
@@ -271,6 +284,8 @@ def collect() -> dict[tuple[str, str], dict]:
                         if isinstance(value, str):
                             rule = value
                     methods |= _route_methods(dec)
+                    if verb is not None:
+                        methods.add(verb.upper())
                 else:
                     guard = guard or _guard_constant(dec)
             if rule is None:

@@ -41,6 +41,7 @@ line, or the guard is applied after registration and never runs.
 
 from __future__ import annotations
 
+import logging
 from urllib.parse import quote
 
 from flask import (
@@ -56,6 +57,8 @@ from openapi import api_operation, binary, errors, json_body, ok
 from routes.hub_common import spa_url, wants_json
 from services import docker_registry as registry
 from services import hub, hub_upload
+
+logger = logging.getLogger("cpypiserver.docker")
 
 docker_bp = Blueprint("docker", __name__)
 
@@ -122,9 +125,23 @@ def _docker_entry_by_filename(filename: str) -> dict | None:
 
 
 def _registry_error(exc: registry.DockerRegistryError) -> Response:
-    """The OCI error body a registry client expects, e.g. ``{"errors": [...]}``."""
-    response = jsonify({"errors": [{"code": exc.code, "message": exc.message}]})
+    """The OCI error body a registry client expects, e.g. ``{"errors": [...]}``.
+
+    A ``5xx`` from this server means the *upstream* failed, and its message can
+    carry the upstream URL, a TLS error or a response body — internals the client
+    has no business seeing.  Those are logged and replaced with the generic OCI
+    ``UNAVAILABLE`` text.  A ``4xx`` is the client's own problem (an unknown
+    repository, a bad reference) and keeps its specific message, which is what a
+    ``docker pull`` shows the user.
+    """
+    if exc.status >= 500:
+        logger.warning("docker upstream failure (%s): %s", exc.code, exc.message)
+        message = "upstream registry unavailable"
+    else:
+        message = exc.message
+    response = jsonify({"errors": [{"code": exc.code, "message": message}]})
     response.status_code = exc.status
+    response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
 

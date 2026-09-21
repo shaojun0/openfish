@@ -244,7 +244,7 @@ dependencies = [
     { name = "cryptography" },
     { name = "flask" },
     { name = "flask-caching" },
-    { name = "flask-pydantic" },
+    { name = "flask-openapi3" },
     { name = "markdown-it-py" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic-settings" },
@@ -270,7 +270,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=42" },
     { name = "flask", specifier = ">=3.1" },
     { name = "flask-caching", specifier = ">=2.4" },
-    { name = "flask-pydantic", specifier = ">=0.14.0" },
+    { name = "flask-openapi3", specifier = ">=4.3.2" },
     { name = "gunicorn", marker = "extra == 'prod'", specifier = ">=22" },
     { name = "markdown-it-py", specifier = ">=3.0" },
     { name = "openapi-spec-validator", marker = "extra == 'dev'", specifier = ">=0.7" },
@@ -366,16 +366,16 @@ wheels = [
 ]
 
 [[package]]
-name = "flask-pydantic"
-version = "0.14.0"
+name = "flask-openapi3"
+version = "4.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "flask" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/03/8b/05c91742c72740fb98e18bc4b0a7645e5df4c0ef9fec868e7343aaea0504/flask_pydantic-0.14.0.tar.gz", hash = "sha256:eb27fa6fd62d952b421df05c72349b5b1dc6fadacbd52879aac80cc519e4eab6", size = 12177, upload-time = "2025-12-22T02:58:52.575Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/45/b3/37ccb1a3923193e35f226befd2f87c5284340b951ea2af731395f5d85398/flask_openapi3-4.3.2.tar.gz", hash = "sha256:a53a74bd71f07f5fa491c9cc928c7fc2c005a62f21e06b6aa27cfc11aa9ae1bc", size = 51480, upload-time = "2026-05-09T03:18:56.861Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/77/60/cab2b0005e076875d869f74dd452cfd81b82a926c52bfff49c401bba0880/flask_pydantic-0.14.0-py3-none-any.whl", hash = "sha256:82a5914d90983f21976c39f97ea2901eba54536ac4b24850e9d52a0676448301", size = 10909, upload-time = "2025-12-22T02:58:51.211Z" },
+    { url = "https://files.pythonhosted.org/packages/86/6a/54cd42aaa14dff3e9f3206f0506e260d3294fc1c1c3b4be282344441f7bf/flask_openapi3-4.3.2-py3-none-any.whl", hash = "sha256:edf118061f4866b973df0810e75915d2f79403b1be9d333851ab5ebb44e85483", size = 46441, upload-time = "2026-05-09T03:18:58.065Z" },
 ]
 
 [[package]]

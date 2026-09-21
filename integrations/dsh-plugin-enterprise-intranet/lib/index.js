@@ -1,7 +1,7 @@
 /**
  * dsh-plugin-enterprise-intranet — DSH「企业内网模式」宿主侧插件。
  *
- * 它把 DSH 接到企业制品/模型平台（openfish，默认 https://47.97.243.86:9443）：
+ * 它把 DSH 接到企业制品/模型平台（openfish，平台地址在启用时填写）：
  *
  *  1. **API key 是必选项。** 没有 key 时不会启用企业内网模式，面板会把用户
  *     送到平台的设备授权页（`/device`）完成登录；登录成功后平台签发一枚 API key
@@ -24,7 +24,8 @@
  *   不到。所有协作都通过 `ctx` 上的服务（webServer / settings / credentials）进行，
  *   这是第三方 DSH 插件能稳定工作的唯一姿势。
  * * **平台用自签证书**（SAN = IP），Node 的 fetch 会拒绝它，所以这里用
- *   `node:https` 直连并允许通过 `verifyTls` / `caFile` 控制校验，而不是把
+ *   `node:https` 直连。默认**校验证书**（`verifyTls: true`）：自签部署请用
+ *   `caFile` 把 CA 钉住，只有在明确接受风险时才把 `verifyTls` 关掉 —— 而不是把
  *   `NODE_TLS_REJECT_UNAUTHORIZED=0` 塞进进程环境。
  * * **插件路由不受 DSH 应用层会话保护**（webServer 路由先于应用鉴权匹配），所以
  *   这里用一个只在 index HTML 里下发的 per-process CSRF token 保护全部读写端点，
@@ -59,16 +60,29 @@ const DEFAULT_MODEL_NS = 'agent-default-model'
 const ROUTE_PREFIX = '/dsh-intranet'
 
 const DEFAULTS = {
-  platformUrl: 'https://47.97.243.86:9443',
+  // No baked-in platform address.  A literal host (still less an IP) in the
+  // plugin source is both a stale default the day the deployment moves and a
+  // capability the operator never chose; the panel asks for it instead.
+  platformUrl: '',
   enterpriseMode: false,
   autoMirrors: true,
   autoGitCredential: true,
   defaultAlias: 'default',
-  verifyTls: false,
+  // TLS verification is **on** unless the operator turns it off.  The platform
+  // may use a self-signed certificate, so the supported answer is `caFile`
+  // (pin the CA) — `verifyTls: false` stays available but has to be chosen on
+  // purpose rather than arriving as the default.
+  verifyTls: true,
   caFile: '',
   requestTimeoutMs: 20000,
   apiKey: '',
 }
+
+/**
+ * 单个平台响应的字节上限。超过就断开：平台不可信时，一个无上限的
+ * `Buffer.concat(chunks)` 就是一条内存耗尽路径（响应体不由本进程控制）。
+ */
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 /**
  * 本插件写系统配置时用的根目录，默认 `/`（即真的写 `/etc/pip.conf` 等）。
@@ -252,6 +266,7 @@ function sendJson(res, status, payload) {
 
 /**
  * 一个 JSON 请求，返回 `{status, body, raw}`。用 node:https 以支持自签证书。
+ * `verifyTls` 默认为 **true**：只有显式传 `false` 才跳过证书校验。
  * @param {string} url
  * @param {{method?: string, headers?: object, body?: any, timeoutMs?: number,
  *          verifyTls?: boolean, caFile?: string}} options
@@ -262,7 +277,7 @@ function requestJson(url, options = {}) {
     headers = {},
     body,
     timeoutMs = DEFAULTS.requestTimeoutMs,
-    verifyTls = false,
+    verifyTls = true,
     caFile = '',
   } = options
 
@@ -300,14 +315,25 @@ function requestJson(url, options = {}) {
           reject(new Error(`读取 caFile 失败：${caFile}（${(err && err.message) || err}）`))
           return
         }
-      } else if (verifyTls !== true) {
+      } else if (verifyTls === false) {
+        // Opt-in only: the default is to verify, and a self-signed deployment
+        // is expected to pin its CA with `caFile` instead.
         requestOptions.rejectUnauthorized = false
       }
     }
 
     const req = transport.request(requestOptions, (res) => {
       const chunks = []
-      res.on('data', (chunk) => chunks.push(chunk))
+      let size = 0
+      res.on('data', (chunk) => {
+        size += chunk.length
+        if (size > MAX_RESPONSE_BYTES) {
+          res.destroy()
+          reject(new Error(`平台响应超过 ${MAX_RESPONSE_BYTES} 字节上限`))
+          return
+        }
+        chunks.push(chunk)
+      })
       res.on('end', () => {
         const raw = Buffer.concat(chunks).toString('utf8')
         let parsed = null
@@ -451,15 +477,26 @@ export function apply(ctx, config) {
     const cfg = configNow()
     return {
       timeoutMs: cfg.requestTimeoutMs,
-      verifyTls: cfg.verifyTls === true,
+      // Only an explicit `false` disables verification; an unset value keeps the
+      // secure default of `requestJson`.
+      verifyTls: cfg.verifyTls !== false,
       caFile: cfg.caFile || '',
       ...extra,
     }
   }
 
-  function platformUrl(pathname) {
+  /**
+   * 平台基址（末尾无 `/`）。未配置时抛一个能指导操作的错误，而不是拼出一个
+   * 相对 URL 再让底层报 "Invalid URL"。
+   */
+  function platformBase() {
     const base = String(configNow().platformUrl || DEFAULTS.platformUrl).replace(/\/+$/, '')
-    return `${base}${pathname}`
+    if (!base) throw new Error('尚未配置平台地址（platformUrl），请在插件面板里填写后重试。')
+    return base
+  }
+
+  function platformUrl(pathname) {
+    return `${platformBase()}${pathname}`
   }
 
   async function platformGet(pathname, key) {
@@ -659,7 +696,7 @@ export function apply(ctx, config) {
    *
    * 必须用 URL 解析器而不是字符串 replace：早先写成
    * `base.replace('://', '://' + auth)` 会得到
-   * `https://__token__:KEY@47.97.243.86:944347.97.243.86:9443/simple/`
+   * `https://__token__:KEY@registry.example.com:9443registry.example.com:9443/simple/`
    * —— 原 host 没有被替换掉，pip 直接解析失败。`URL` 还会顺带把 key 里的
    * 特殊字符按 percent-encoding 处理好。
    */
@@ -683,16 +720,17 @@ export function apply(ctx, config) {
    * 平台不可用时不能让 git 卡死。
    */
   function gitCredentialHelperSource(key) {
-    const platform = JSON.stringify(String(configNow().platformUrl || DEFAULTS.platformUrl).replace(/\/+$/, ''))
+    const base = platformBase()
+    const platform = JSON.stringify(base)
     const apiKey = JSON.stringify(String(key || ''))
-    const verifyTls = configNow().verifyTls === true
+    const verifyTls = configNow().verifyTls !== false
     const caFile = JSON.stringify(String(configNow().caFile || ''))
     // The helper must only ever answer for *this* platform.  Without the host
     // check, git would hand the minted Forgejo token to any https host whose
-    // path looks like <owner>/<name>.
-    const platformHost = (() => {
-      try { return new URL(configNow().platformUrl || DEFAULTS.platformUrl).host.toLowerCase() } catch { return '' }
-    })()
+    // path looks like <owner>/<name>.  `platformBase()` already guarantees a
+    // non-empty value, so a parse failure here is a configuration error worth
+    // throwing rather than a helper generated with an empty host check.
+    const platformHost = new URL(base).host.toLowerCase()
     const platformHostLiteral = JSON.stringify(platformHost)
     return `#!/usr/bin/env node
 // 由 dsh-plugin-enterprise-intranet 自动生成，请勿手改。
@@ -740,14 +778,26 @@ function requestJson(url, headers) {
     }
     if (isHttps) {
       if (CA_FILE) {
-        try { options.ca = fs.readFileSync(CA_FILE) } catch { options.rejectUnauthorized = false }
-      } else if (VERIFY_TLS !== true) {
+        // A CA file that cannot be read is a hard failure: falling back to
+        // "do not verify" would silently downgrade the connection it was
+        // configured to authenticate.
+        try { options.ca = fs.readFileSync(CA_FILE) } catch { fail('cannot read CA_FILE'); return }
+      } else if (VERIFY_TLS === false) {
         options.rejectUnauthorized = false
       }
     }
     const req = transport.request(options, (res) => {
       const chunks = []
-      res.on('data', (chunk) => chunks.push(chunk))
+      let size = 0
+      res.on('data', (chunk) => {
+        size += chunk.length
+        if (size > ${MAX_RESPONSE_BYTES}) {
+          res.destroy()
+          reject(new Error('platform response too large'))
+          return
+        }
+        chunks.push(chunk)
+      })
       res.on('end', () => {
         const raw = Buffer.concat(chunks).toString('utf8')
         let body = null
@@ -820,7 +870,9 @@ main().catch((err) => fail(String((err && err.message) || err)))
     ]
     if (cfg.verifyTls === true && cfg.caFile) {
       lines.push('[http]', `\tsslCAInfo = ${cfg.caFile}`)
-    } else if (cfg.verifyTls !== true) {
+    } else if (cfg.verifyTls === false) {
+      // Opt-in downgrade only; an unset value leaves git on the system trust
+      // store rather than turning verification off.
       lines.push('[http]', '\tsslVerify = false')
     }
     return lines.join('\n') + '\n'
@@ -848,7 +900,7 @@ main().catch((err) => fail(String((err && err.message) || err)))
   }
 
   function mirrorsFor(key, routes) {
-    const base = String(configNow().platformUrl || DEFAULTS.platformUrl).replace(/\/+$/, '')
+    const base = platformBase()
     const host = new URL(base).host
     const bareHost = host.split(':')[0]
     const pipIndex = credentialedUrl(base, '/simple/', key)
@@ -1021,7 +1073,7 @@ main().catch((err) => fail(String((err && err.message) || err)))
   function unmanagedMirrorFiles(written) {
     let host = ''
     try {
-      host = new URL(String(configNow().platformUrl || DEFAULTS.platformUrl)).host
+      host = new URL(platformBase()).host
     } catch {
       return []
     }
@@ -1306,7 +1358,7 @@ main().catch((err) => fail(String((err && err.message) || err)))
       auto_mirrors: cfg.autoMirrors !== false,
       auto_git_credential: cfg.autoGitCredential !== false,
       default_alias: cfg.defaultAlias || 'default',
-      verify_tls: cfg.verifyTls === true,
+      verify_tls: cfg.verifyTls !== false,
       reachable,
       platform_user: platformUser,
       routes_error: routesError,
@@ -1331,7 +1383,7 @@ main().catch((err) => fail(String((err && err.message) || err)))
       platformGet('/api/v1/tools', key).catch(() => null),
       platformGet('/api/v1/docs', key).catch(() => null),
     ])
-    const base = String(configNow().platformUrl || DEFAULTS.platformUrl).replace(/\/+$/, '')
+    const base = platformBase()
     return {
       platform_url: base,
       tools: tools && tools.body ? tools.body : null,

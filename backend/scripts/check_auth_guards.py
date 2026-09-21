@@ -51,6 +51,11 @@ GUARD_NAMES = frozenset({
     "require_package_write",
 })
 
+#: Decorators that register a route.  flask-openapi3's ``APIBlueprint`` replaces
+#: ``@bp.route(...)`` with one decorator per HTTP verb, so the order check must
+#: recognise both or a guard written above ``@bp.get`` would slip through.
+ROUTE_VERBS = frozenset({"get", "post", "put", "patch", "delete"})
+
 #: Endpoints that are anonymous on purpose.  Each needs a reason, because this
 #: list is the only thing standing between "intentionally public" and
 #: "accidentally unguarded".
@@ -135,7 +140,8 @@ def check_decorator_order() -> list[str]:
 
             names = [_decorator_name(d) for d in node.decorator_list]
             route_at = [i for i, n in enumerate(names)
-                        if n.endswith(".route") or n == "route"]
+                        if n.endswith(".route") or n == "route"
+                        or n.rsplit(".", 1)[-1] in ROUTE_VERBS]
             guard_at = [i for i, n in enumerate(names)
                         if n.split(".")[-1] in GUARD_NAMES]
             if not guard_at or not route_at:

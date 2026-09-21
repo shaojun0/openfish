@@ -13,13 +13,11 @@ and friends did exactly that (a dropped `from urllib.parse import quote`), and
 none of the behaviour gates noticed; this one does.
 
 The check is `pyflakes` (the `dev` extra), which reports undefined names,
-unused imports and unused locals without executing anything.  Two deliberate,
-documented exceptions are filtered out rather than silenced in the source:
+unused imports and unused locals without executing anything.  One deliberate,
+documented exception is filtered out rather than silenced in the source:
 
 * ``extensions/database.py`` imports ``models`` purely for its side effect —
   importing the package is what registers every table on ``Base.metadata``.
-* ``routes/pypi.py`` keeps ``FormatQuery`` in its signature for flask-pydantic
-  even when a checker thinks the name is only used in an annotation.
 """
 
 from __future__ import annotations
@@ -44,7 +42,6 @@ TARGETS = (
 #: ``<path>:<line>:<column>: message`` lines that are correct by design.
 ALLOWED = (
     re.compile(r"^extensions/database\.py:\d+:\d+: 'models' imported but unused$"),
-    re.compile(r"^routes/pypi\.py:\d+:\d+: 'FormatQuery' imported but unused$"),
 )
 
 

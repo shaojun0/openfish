@@ -9,7 +9,9 @@ from __future__ import annotations
 import os
 import logging
 
-from flask import Flask
+from flask import Response, jsonify
+from flask_openapi3 import OpenAPI
+from pydantic import ValidationError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import settings
@@ -19,12 +21,38 @@ from extensions.cache import CacheExtension
 from extensions.index_ext import IndexExtension
 from extensions.error_handlers import ErrorHandlersExtension
 from extensions.stats_refresh import StatsRefreshExtension
+from services.logsafe import install as install_log_sanitizer
 
 # ── Logging ──────────────────────────────────────────────────────────
 logging.basicConfig(
     level=getattr(logging, settings.server.log_level.upper(), logging.INFO),
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
+# Escape CR/LF and other control characters in every record before a handler
+# writes it.  Untrusted values (a document id, a role code, an upstream error
+# body) reach `logger.info("%s", value)` all over the tree; one filter at the
+# root is what keeps a crafted value from forging a second log line.
+install_log_sanitizer()
+
+
+# ── Request-binding error envelope ──────────────────────────────────
+# flask-openapi3 hands ``validation_error_callback`` the raw pydantic
+# ``ValidationError`` and passes the return value straight to ``abort()``, so
+# the callback must return a ready ``Response`` — returning a
+# ``(body, status)`` tuple raises ``LookupError`` at abort time.
+#
+# The shape is the one the previous request-binding layer produced, kept
+# deliberately: an invalid query parameter answers ``400`` with a nested
+# ``{"validation_error": {"query_params": [...]}}`` body rather than the
+# library default (``422`` with a bare list).  ``query_params`` is hard-coded
+# because query is the only location bound anywhere in this repository; a
+# second bound location would need the key derived from ``exc.errors()``.
+def _validation_error_response(exc: ValidationError) -> Response:
+    resp = jsonify({"validation_error": {"query_params": exc.errors()}})
+    resp.status_code = 400
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
+
 
 # The machine-facing Jinja templates live under ``static/<ecosystem>/`` — the
 # name is historical.  Pointing Flask's own loader at that folder is what lets
@@ -38,7 +66,23 @@ logging.basicConfig(
 # serves that one directory explicitly.  This also means an unguarded endpoint
 # can no longer hide behind the ``static`` endpoint — see
 # scripts/check_auth_guards.py.
-app = Flask(__name__, static_folder=None, template_folder="static")
+# `OpenAPI` is a `Flask` subclass: every existing blueprint keeps working, and
+# the routes that need request binding live on an `APIBlueprint` (see
+# `routes/pypi.py` and `register_api` in `routes/__init__.py`).
+#
+# `doc_ui=False` deliberately imports only the request-binding half of
+# flask-openapi3.  Its bundled documentation surface (`/openapi/`,
+# `/openapi/openapi.json`, `/openapi/static/…`) would register three more
+# anonymous endpoints — flagged by `scripts/check_auth_guards.py` — and would
+# publish a *second* OpenAPI document next to the repository's own, which stays
+# the single source of truth (`backend/openapi/`, served at `/openapi.json`).
+app = OpenAPI(
+    __name__,
+    static_folder=None,
+    template_folder="static",
+    doc_ui=False,
+    validation_error_callback=_validation_error_response,
+)
 app.config.from_mapping(settings.model_dump())
 app.secret_key = settings.server.secret_key
 app.config["MAX_CONTENT_LENGTH"] = settings.storage.max_content_length

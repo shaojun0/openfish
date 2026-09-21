@@ -116,7 +116,10 @@ def register_all(app):
 
     # ── Machine-facing endpoints ────────────────────────────────────
     app.register_blueprint(health_bp)
-    app.register_blueprint(pypi_bp, url_prefix=prefix)
+    # `pypi_bp` is a flask-openapi3 APIBlueprint — its simple-index views bind
+    # `?format=` through the library — so it goes through `register_api` (the
+    # APIBlueprint-aware entry point) rather than `register_blueprint`.
+    app.register_api(pypi_bp, url_prefix=prefix)
     app.register_blueprint(python_build_bp, url_prefix=prefix)
     app.register_blueprint(node_build_bp, url_prefix=prefix)
     app.register_blueprint(auth_router, url_prefix=prefix)

@@ -303,6 +303,16 @@ class HubConfig(BaseSettings):
             "inference request body."
         ),
     )
+    model_probe_allowed_hosts: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional allow-list of hosts the model-route probe may call "
+            "(exact match; `host` or `host:port`). Empty leaves the default "
+            "policy in services/urlsafety.py: any http(s) host except "
+            "link-local / cloud-metadata addresses. Set this when the panel "
+            "should only be able to probe known endpoints."
+        ),
+    )
     device_codes_file: str = Field(
         default=backend_path("data", "device_codes.json"),
         description=(

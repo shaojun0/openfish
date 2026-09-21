@@ -49,36 +49,47 @@ class ErrorHandlersExtension(Extension):
         # handler, so BadRequestError / UploadConflictError below still win.
         @app.errorhandler(PypiError)
         def _pypi_error(exc: PypiError):
-            return jsonify({"error": exc.message}), exc.status_code
+            return _json_error({"error": exc.message}, exc.status_code)
 
         @app.errorhandler(404)
         def _404(exc):
-            return jsonify({"error": exc.description or "Not found"}), 404
+            return _json_error({"error": exc.description or "Not found"}, 404)
 
         @app.errorhandler(405)
         def _405(exc):
-            return jsonify({"error": exc.description or "Method not allowed"}), 405
+            return _json_error({"error": exc.description or "Method not allowed"}, 405)
 
         @app.errorhandler(413)
         def _413(exc):
-            return jsonify({"error": "Upload file too large"}), 413
+            return _json_error({"error": "Upload file too large"}, 413)
 
         @app.errorhandler(500)
         def _500(exc):
-            return jsonify({"error": "Internal server error"}), 500
+            return _json_error({"error": "Internal server error"}, 500)
 
         @app.errorhandler(BadRequestError)
         def _400(exc):
-            return jsonify({"error": exc.message}), 400
+            return _json_error({"error": exc.message}, 400)
 
         @app.errorhandler(UploadConflictError)
         def _409(exc):
-            return jsonify({"error": exc.message}), 409
+            return _json_error({"error": exc.message}, 409)
+
+
+#: Every error body is JSON, but an error body *quotes* an input (a filename, a
+#: package name, an upstream message).  A browser that sniffs such a response as
+#: HTML would run any markup in it, so the JSON error surface is pinned with
+#: ``nosniff`` here — the one place all of them pass through — rather than
+#: relying on each caller to remember.
+def _json_error(payload: dict, status: int):
+    resp = jsonify(payload)
+    resp.status_code = status
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
 
 
 def _unauthorized_json(exc: UnauthorizedError):
-    resp = jsonify({"error": exc.message})
-    resp.status_code = 401
+    resp = _json_error({"error": exc.message}, 401)
     if exc.www_authenticate:
         resp.headers["WWW-Authenticate"] = exc.www_authenticate
     return resp

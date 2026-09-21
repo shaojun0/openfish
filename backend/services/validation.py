@@ -8,11 +8,11 @@ import struct
 import tarfile
 import zipfile
 from io import BytesIO
-from pathlib import Path
+
 import magic
-from werkzeug.utils import secure_filename
 
 from config import settings
+from services.paths import contained, safe_name
 
 logger = logging.getLogger("cpypiserver.safe")
 
@@ -187,7 +187,20 @@ def _scan_clamav(file_obj) -> tuple[bool, str]:
 # ── Public API ───────────────────────────────────────────────────────
 
 def validate_file(file, filename: str) -> tuple[bool, str]:
-    """Full upload validation pipeline. Returns ``(is_valid, safe_filename_or_error)``."""
+    """Full upload validation pipeline. Returns ``(is_valid, safe_filename_or_error)``.
+
+    The *filename* is reduced to a safe basename **first**, through
+    :func:`services.paths.safe_name`, and every later step — the extension
+    check, the archive messages and the destination path — works on that value.
+    That ordering is what makes the error strings that echo a name
+    (``Extension not allowed: '<name>'``) safe to return to the client, and it
+    is why the destination is built with :func:`services.paths.contained`
+    rather than by joining the raw input.
+    """
+    try:
+        safe = safe_name(filename)
+    except ValueError:
+        return False, "Invalid filename"
 
     file.seek(0, os.SEEK_END)
     size = file.tell()
@@ -199,14 +212,14 @@ def validate_file(file, filename: str) -> tuple[bool, str]:
     if size == 0:
         return False, "Empty file"
 
-    name_lower = filename.lower()
+    name_lower = safe.lower()
     matched_ext = None
     for ext in sorted(settings.storage.allow_extensions, key=len, reverse=True):
         if name_lower.endswith(f".{ext}"):
             matched_ext = ext
             break
     if matched_ext is None:
-        return False, f"Extension not allowed: '{filename}' (allowed: {', '.join(settings.storage.allow_extensions)})"
+        return False, f"Extension not allowed: '{safe}' (allowed: {', '.join(settings.storage.allow_extensions)})"
 
     content = file.read()
     file.seek(0)
@@ -217,9 +230,9 @@ def validate_file(file, filename: str) -> tuple[bool, str]:
     if not ok: return False, err
 
     if matched_ext == "whl":
-        ok, err = _validate_wheel(content, filename)
+        ok, err = _validate_wheel(content, safe)
     elif matched_ext in ("tar.gz", "tar", "zip"):
-        ok, err = _validate_sdist(content, filename, matched_ext)
+        ok, err = _validate_sdist(content, safe, matched_ext)
     if not ok:
         return False, err
 
@@ -227,13 +240,8 @@ def validate_file(file, filename: str) -> tuple[bool, str]:
     if not ok:
         return False, err
 
-    safe = secure_filename(filename)
-    if not safe:
-        return False, "Invalid filename"
-
     try:
-        dest = Path(settings.storage.packages_dir) / safe
-        dest.resolve().relative_to(Path(settings.storage.packages_dir).resolve())
+        contained(settings.storage.packages_dir, safe)
     except ValueError:
         return False, "Invalid file path (path traversal)"
 

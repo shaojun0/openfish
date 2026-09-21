@@ -51,8 +51,10 @@ from urllib.parse import urlsplit
 
 import requests
 
+from config import settings
 from services.fileio import read_json, write_json
 from services.format import utc_now_iso
+from services.urlsafety import UnsafeUrlError, check_outbound_url
 
 logger = logging.getLogger("cpypiserver.model_routes")
 
@@ -264,6 +266,24 @@ def normalize_enabled(value: Any) -> bool:
     return bool(value)
 
 
+def normalize_api_key(value: Any) -> str:
+    """Validate a route's API key as one printable, space-free line.
+
+    The key is sent as an HTTP header (``Authorization: Bearer …`` /
+    ``x-api-key``), and a value carrying CR/LF would otherwise be a request-
+    splitting primitive aimed at the upstream.  Header characters are therefore
+    restricted here rather than at the send site, so every path that stores or
+    resolves a key validates it once (``routes/hub.py`` even approves a key on
+    the device-auth page without ever reading it back).
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if any(ord(char) < 33 or ord(char) == 127 for char in text):
+        raise ValueError("api_key 不能包含空格、制表符或控制字符")
+    return text
+
+
 def resolve_api_key(payload: Mapping[str, Any], existing: Mapping[str, Any]) -> str:
     """Apply the API key's three-state edit rule.
 
@@ -273,7 +293,7 @@ def resolve_api_key(payload: Mapping[str, Any], existing: Mapping[str, Any]) -> 
     """
     if "api_key" not in payload or payload.get("api_key") is None:
         return str(existing.get("api_key") or "")
-    return str(payload.get("api_key") or "").strip()
+    return normalize_api_key(payload.get("api_key"))
 
 
 def normalize_api_key_env(value: Any) -> str:
@@ -737,6 +757,16 @@ def probe(route: Mapping[str, Any], *, timeout: float = 5.0) -> dict[str, Any]:
     except ValueError as exc:
         return _unreachable("", str(exc))
 
+    # The probe runs on the server, so the URL is a request-forgery sink: the
+    # guard rejects non-http(s) schemes, embedded credentials and the
+    # link-local / cloud-metadata ranges (see services/urlsafety.py).  A failure
+    # is reported like any other unreachable endpoint instead of raising, so the
+    # panel shows the reason rather than a 500.
+    try:
+        url = check_outbound_url(url, allowed_hosts=settings.hub.model_probe_allowed_hosts)
+    except UnsafeUrlError as exc:
+        return _unreachable(url, str(exc))
+
     headers = request_headers(route)
     started = time.monotonic()
     try:
@@ -744,7 +774,9 @@ def probe(route: Mapping[str, Any], *, timeout: float = 5.0) -> dict[str, Any]:
             url,
             headers=headers,
             timeout=timeout,
-            allow_redirects=True,
+            # A redirect would move the request to a host the guard never saw;
+            # the probe only needs to know whether the configured URL answers.
+            allow_redirects=False,
         )
     except requests.RequestException as exc:
         latency = int((time.monotonic() - started) * 1000)
@@ -812,6 +844,7 @@ __all__ = [
     "normalize_path",
     "normalize_aliases",
     "normalize_enabled",
+    "normalize_api_key",
     "resolve_api_key",
     "resolve_api_key_env",
     "normalize_api_key_env",

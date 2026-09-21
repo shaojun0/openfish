@@ -38,6 +38,7 @@ this.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from flask import (
@@ -55,6 +56,8 @@ from errors import BadRequestError, PypiError
 from openapi import api_operation, binary, errors, ok
 from routes.hub_common import spa_url, wants_json
 from services import hub, hub_upload, model_routes
+
+logger = logging.getLogger("cpypiserver.hub")
 
 hub_bp = Blueprint("hub", __name__)
 
@@ -544,10 +547,18 @@ def _conflict(exc: model_routes.DuplicateRouteError) -> PypiError:
 
 
 def _write_failed(exc: OSError) -> PypiError:
-    """Surface *why* the document could not be written instead of a bare 500."""
+    """Answer a stable 500 while the OS detail goes to the server log.
+
+    The previous version interpolated ``exc.strerror`` into the response body.
+    That is exactly the "system information disclosure" shape: the reason a
+    write failed (a path, a mount flag, a permission bit) is also the map an
+    attacker would otherwise have to guess.  The operator still gets the detail
+    — from the log, where it belongs.
+    """
+    logger.error("cannot write the model-route file: %s", exc)
     return PypiError(
-        f"无法写入模型路由文件：{exc.strerror or exc}（MODELS_FILE 及其目录需可写，"
-        "容器单文件挂载不能使用 :ro）",
+        "无法写入模型路由文件（MODELS_FILE 及其目录需可写，"
+        "容器单文件挂载不能使用 :ro）；详见服务日志",
         status_code=500,
     )
 

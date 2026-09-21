@@ -55,7 +55,8 @@ class StorageConfig(BaseSettings):
             "SQLAlchemy database URL for API keys, users, RBAC and statistics. "
             "Empty (the default) keeps the historical single-file SQLite "
             "database at API_KEYS_FILE. Set it to a PostgreSQL URL — e.g. "
-            "postgresql+psycopg://user:pass@db:5432/openfish — to run the whole "
+            "postgresql+psycopg://$POSTGRES_USER:$POSTGRES_PASSWORD@db:5432/openfish "
+            "— to run the whole "
             "authorization/API-key/statistics layer on PostgreSQL instead. "
             "A bare postgresql:// URL is upgraded to the psycopg (v3) driver."
         ),

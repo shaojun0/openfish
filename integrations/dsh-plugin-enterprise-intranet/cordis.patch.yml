@@ -14,9 +14,12 @@
 #       - id: enterprise-intranet
 #         name: dsh-plugin-enterprise-intranet
 #         config:
-#           platformUrl: https://47.97.243.86:9443
+#           platformUrl: https://registry.example.com:9443
 #           apiKey: ''            # 留空 = 让用户在 DSH 面板里点「登录获取」
 #           autoMirrors: true
+#           # 自签证书部署：优先用 caFile 钉住 CA；只有明确接受风险时才 verifyTls: false
+#           # caFile: /etc/openfish/ca_chain.pem
+#           # verifyTls: false
 # ============================================================================
 
 - insert:

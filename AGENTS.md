@@ -15,12 +15,18 @@
 3. **从定义处导入。** `from services.docs import read`，不要经 `services/__init__.py`
    门面转一手。
 4. **模块头**：`from __future__ import annotations` 必须在第一行；其后先标准库、
-   再三方、再本仓库，各段内部按字母序。唯一例外是 `routes/pypi.py`（文件头已注明）。
+   再三方、再本仓库，各段内部按字母序。
 5. **类型**：一律 `X | None`，不写 `Optional`；公共函数写全签名。
 6. **日志**：模块级 `logger = logging.getLogger("cpypiserver.<域>")`；不用
-   `log` / `_log`。**密钥永不进日志明文**，用掩码。
+   `log` / `_log`。**密钥永不进日志明文**，用掩码。转义由
+   `services/logsafe.py` 的根过滤器统一完成，不要在调用点自己拼字符串。
 7. **分区注释**：长模块用 `# ── 标题 ────…` 分段。
-8. **门禁必须全绿**：`python scripts/check_*.py` 全过才允许提交。门禁是自证验收，
+8. **安全基元只有一份**：外部名字 → 路径用 `services/paths.py`，出站 URL 用
+   `services/urlsafety.py`，日志转义用 `services/logsafe.py`。不要在这些关注点上
+   手写第二份实现（例如自己写 `resolve()/relative_to()` 代替 `safe_join`）。
+   对应说明与门禁：`docs/security/pypiserver0920-findings.md`、
+   `backend/scripts/check_security.py`。
+9. **门禁必须全绿**：`python scripts/check_*.py` 全过才允许提交。门禁是自证验收，
    不是可选项。
 
 ## 执行流程（固定 6 步）

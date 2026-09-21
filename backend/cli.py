@@ -20,7 +20,7 @@ Or inside Docker::
 historical form) or any SQLAlchemy URL, including a PostgreSQL one::
 
     python cli.py --db data/other.db list-users
-    python cli.py --db postgresql+psycopg://openfish:pass@db:5432/openfish list-users
+    python cli.py --db 'postgresql+psycopg://$POSTGRES_USER:$POSTGRES_PASSWORD@db:5432/openfish' list-users
 
 Every command is idempotent, so running one twice is harmless.
 """
@@ -510,7 +510,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--db", default=None,
         help=(
             "What to operate on: a SQLite file path, or a SQLAlchemy URL such "
-            "as postgresql+psycopg://user:pass@host:5432/openfish.  Defaults to "
+            "as postgresql+psycopg://$POSTGRES_USER:$POSTGRES_PASSWORD@host:5432/openfish.  "
+            "Defaults to "
             "DATABASE_URL, or the SQLite file "
             f"{settings.storage.api_keys_file} when DATABASE_URL is unset."
         ),

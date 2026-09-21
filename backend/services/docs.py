@@ -41,6 +41,7 @@ from urllib.parse import quote
 
 from services.fileio import atomic_write_bytes, read_json, write_json
 from services.format import human_size, iso_from_timestamp, utc_now_iso
+from services.paths import contained
 
 logger = logging.getLogger("cpypiserver.docs")
 
@@ -163,16 +164,10 @@ def resolve_eco_dir(root: str, ecosystem: str) -> Path:
     return _base(root) / ecosystem
 
 
-def _contained(path: Path, base: Path) -> Path:
-    if not path.resolve().is_relative_to(base.resolve()):
-        raise ValueError("文档路径越界")
-    return path
-
-
 def resolve_doc_dir(root: str, ecosystem: str, doc_id: str) -> Path:
     """Return one document's project directory (which may not exist yet)."""
     eco_dir = resolve_eco_dir(root, ecosystem)
-    return _contained(eco_dir / normalize_doc_id(doc_id), eco_dir)
+    return contained(eco_dir, normalize_doc_id(doc_id))
 
 
 def resolve_doc_file(root: str, ecosystem: str, doc_id: str) -> Path:
@@ -190,7 +185,7 @@ def resolve_doc_file(root: str, ecosystem: str, doc_id: str) -> Path:
 def resolve_asset(root: str, ecosystem: str, doc_id: str, name: str) -> Path:
     """Return the on-disk path of one asset of one document."""
     assets_dir = resolve_doc_dir(root, ecosystem, doc_id) / ASSETS_DIRNAME
-    path = _contained(assets_dir / normalize_asset_name(name), assets_dir)
+    path = contained(assets_dir, normalize_asset_name(name))
     if not path.is_file():
         raise FileNotFoundError(name)
     return path
@@ -307,7 +302,7 @@ def save_asset(
 
     filename = normalize_asset_name(name)
     assets_dir = doc_dir / ASSETS_DIRNAME
-    target = _contained(assets_dir / filename, assets_dir)
+    target = contained(assets_dir, filename)
     atomic_write_bytes(target, bytes(data))
     logger.info("asset %s/%s/%s saved (%d bytes)", ecosystem, doc_id, filename, len(data))
     return _asset_entry(

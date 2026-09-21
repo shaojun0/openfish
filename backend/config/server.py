@@ -41,7 +41,7 @@ class ServerConfig(BaseSettings):
         default="",
         description=(
             "Absolute base URL this server is reached at from the public "
-            "internet, e.g. https://47.97.243.86:9443. Used to build the "
+            "internet, e.g. https://registry.example.com:9443. Used to build the "
             "absolute verification_uri the device-authorization flow hands "
             "back to a non-browser client (the DSH enterprise-intranet plugin). "
             "Empty = derive it from the incoming request's Host / "

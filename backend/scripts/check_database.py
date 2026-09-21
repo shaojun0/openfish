@@ -121,11 +121,14 @@ def _dialect_of(url: str) -> str:
 def check_resolution() -> None:
     print("── URL selection ───────────────────────────────────────────────")
     cases = (
-        ("postgres://u:p@h:5432/d", "postgresql+psycopg://u:p@h:5432/d"),
-        ("postgresql://u:p@h:5432/d", "postgresql+psycopg://u:p@h:5432/d"),
+        # No password appears in these fixtures: only the scheme rewrite is
+        # under test, and a `user:secret@` string in a source file is a
+        # credential-shaped literal to every reader and scanner.
+        ("postgres://u@h:5432/d", "postgresql+psycopg://u@h:5432/d"),
+        ("postgresql://u@h:5432/d", "postgresql+psycopg://u@h:5432/d"),
         # An explicit driver is respected: we ship psycopg, but must not
         # silently rewrite somebody who installed psycopg2 / pg8000 on purpose.
-        ("postgresql+psycopg2://u:p@h/d", "postgresql+psycopg2://u:p@h/d"),
+        ("postgresql+psycopg2://u@h/d", "postgresql+psycopg2://u@h/d"),
         ("sqlite:////var/lib/openfish.db", "sqlite:////var/lib/openfish.db"),
         # Backward compatibility: cli.py --db <path> must still mean SQLite.
         ("/tmp/legacy.db", "sqlite:////tmp/legacy.db"),

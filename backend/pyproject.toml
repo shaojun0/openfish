@@ -17,7 +17,10 @@ dependencies = [
     "cryptography>=42",
     "flask-caching>=2.4",
     "flask>=3.1",
-    "flask-pydantic>=0.14.0",
+    # Request binding for the simple-API query parameter. Replaces
+    # ``flask-pydantic``; only its binding half is used (`OpenAPI(doc_ui=False)`),
+    # never its bundled documentation surface.
+    "flask-openapi3>=4.3.2",
     "markdown-it-py>=3.0",
     # PostgreSQL driver (psycopg 3).  The ``binary`` extra bundles libpq, so the
     # image needs no libpq-dev / build toolchain.  Never imported while

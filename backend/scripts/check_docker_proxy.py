@@ -32,6 +32,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import socket
 import sys
 import tempfile
@@ -76,7 +77,13 @@ MANIFEST_TYPE = "application/vnd.docker.distribution.manifest.v2+json"
 
 TOKEN = "fake-bearer-token"
 UPSTREAM_USER = "upuser"
-UPSTREAM_PASS = "uppass"
+#: Both passwords are generated per run rather than written as literals.  A
+#: fixed password in a test is still a credential string in the tree — a
+#: scanner flags it, and a reader may reuse it — while nothing here depends on
+#: the value being stable.
+UPSTREAM_PASS = secrets.token_urlsafe(18)
+CLIENT_USER = "gate-client"
+CLIENT_PASS = secrets.token_urlsafe(18)
 
 
 def _fake_range(header: str, size: int):
@@ -270,8 +277,8 @@ def main() -> int:
         # The proxy reads settings lazily, but pointing them at the fake before
         # the app is imported keeps the test honest about a fresh boot too.
         settings.auth.auth_enabled = True
-        settings.auth.basic_username = "dev"
-        settings.auth.basic_password = "devpass"
+        settings.auth.basic_username = CLIENT_USER
+        settings.auth.basic_password = CLIENT_PASS
         settings.hub.docker_upstream = f"http://127.0.0.1:{fake.port}"
         settings.hub.docker_upstream_username = UPSTREAM_USER
         settings.hub.docker_upstream_password = UPSTREAM_PASS
@@ -284,7 +291,8 @@ def main() -> int:
         from services import docker_registry as registry  # noqa: E402
 
         registry.reset()
-        auth = {"Authorization": "Basic " + base64.b64encode(b"dev:devpass").decode()}
+        credentials = base64.b64encode(f"{CLIENT_USER}:{CLIENT_PASS}".encode()).decode()
+        auth = {"Authorization": f"Basic {credentials}"}
         client = app.test_client()
 
         print()

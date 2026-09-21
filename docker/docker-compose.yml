@@ -28,7 +28,7 @@ x-backend-env: &backend-env
   PACKAGES_DIR: ${PACKAGES_DIR:-/app/share/cpypiserver_public/packages}
   PYTHON_BUILDS_DIR: ${PYTHON_BUILDS_DIR:-/app/share/cpypiserver_public/cpython}
   # 数据库：留空 = 使用 API_KEYS_FILE 指向的 SQLite 文件（默认，见下）。
-  # 设为 PostgreSQL URL（postgresql+psycopg://user:pass@db:5432/openfish）
+  # 设为 PostgreSQL URL（postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/openfish）
   # 即把 API key / 用户 / 角色 / 统计整体切到 db 服务。改这里的同时请用
   # --profile db 启动数据库，参考 docker/README.md。
   DATABASE_URL: ${DATABASE_URL:-}

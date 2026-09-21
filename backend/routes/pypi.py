@@ -1,10 +1,6 @@
 """*** package routes — PEP 503 Simple Repository API."""
 
-# NOTE: no `from __future__ import annotations` in this module.  PEP 563
-# turns the `query: FormatQuery` annotation into the *string* "FormatQuery",
-# and flask-pydantic reads `func.__annotations__["query"]` in preference to
-# the explicit `query=` argument and hands it to `issubclass` — which then
-# raises TypeError on every request.  This is the one module that opts out.
+from __future__ import annotations
 
 import hashlib
 import json as _json
@@ -14,23 +10,24 @@ import tempfile
 from pathlib import Path
 
 from flask import (
-    Blueprint, Response, current_app, g,
+    Response, current_app, g,
     render_template, request, send_from_directory, url_for,
 )
-from flask_pydantic import validate
+from flask_openapi3 import APIBlueprint
 
 from auth.decorators import require_permission
 from auth.permissions import PACKAGE_READ, PACKAGE_WRITE
 from config import settings
 from errors import BadRequestError, PackageNotFoundError, UploadConflictError
-from openapi import api_operation, binary, errors, ref
-from schemas import FormatQuery
-from services.validation import validate_file
-from index.packages import normalize_package_name
 from index.base import store_digest
+from index.packages import normalize_package_name
+from openapi import api_operation, binary, errors, ref
+from schemas import FormatQuery, SimpleProjectPath
+from services.paths import contained
+from services.validation import validate_file
 
 logger = logging.getLogger("cpypiserver")
-pypi_bp = Blueprint("pypi", __name__)
+pypi_bp = APIBlueprint("pypi", __name__, doc_ui=False)
 
 
 _FORMAT_PARAM = {
@@ -44,7 +41,7 @@ _FORMAT_PARAM = {
 _JSON_ACCEPT = "application/vnd.pypi.simple.v1+json"
 
 
-@pypi_bp.route("/simple/")
+@pypi_bp.get("/simple/")
 @require_permission(PACKAGE_READ)
 @api_operation(
     summary="Simple repository index (PEP 503 / PEP 691)",
@@ -67,7 +64,6 @@ _JSON_ACCEPT = "application/vnd.pypi.simple.v1+json"
         **errors("401", "500"),
     },
 )
-@validate(query=FormatQuery)
 def simple_index(query: FormatQuery):
     packages = current_app.extensions["pypi_index"].get_snapshot()
     names = sorted(packages)
@@ -76,7 +72,7 @@ def simple_index(query: FormatQuery):
     return render_template("python/simple_index.html", package_names=names)
 
 
-@pypi_bp.route("/simple/<package_name>/")
+@pypi_bp.get("/simple/<package_name>/")
 @require_permission(PACKAGE_READ)
 @api_operation(
     summary="Files of one project",
@@ -98,8 +94,8 @@ def simple_index(query: FormatQuery):
         **errors("401", "404", "500"),
     },
 )
-@validate(query=FormatQuery)
-def package_page(query: FormatQuery, package_name: str):
+def package_page(path: SimpleProjectPath, query: FormatQuery):
+    package_name = path.package_name
     files = current_app.extensions["pypi_index"].get_files(package_name)
     if files is None:
         raise PackageNotFoundError(package_name)
@@ -221,7 +217,10 @@ def upload():
     if not is_valid:
         raise BadRequestError(result)
     safe_filename = result
-    dest = Path(settings.storage.packages_dir) / safe_filename
+    # `validate_file` has already reduced the upload name to one safe basename;
+    # `contained` proves the join stays under PACKAGES_DIR (Werkzeug's
+    # `safe_join`, not a string prefix test) before anything touches the disk.
+    dest = contained(settings.storage.packages_dir, safe_filename)
 
     # ── Stream to temp file while computing SHA256 ──────────────────
     _CHUNK = 8 << 20  # 8 MB

@@ -30,7 +30,9 @@ device store, the guards or the response shape fails here.
 
 from __future__ import annotations
 
+import base64
 import os
+import secrets
 import sys
 import tempfile
 from pathlib import Path
@@ -39,17 +41,28 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 os.chdir(REPO_ROOT)
 
+#: The gate's throwaway administrator.  The password is generated per run: a
+#: literal one is a credential in the tree even when it only ever exists in a
+#: temporary database, and a scanner cannot tell the two apart.
+ADMIN_USER = "deviceadmin"
+ADMIN_PASS = secrets.token_urlsafe(18)
+
+#: The two upstream keys the fixture route table resolves.  Generated for the
+#: same reason; the assertions below compare against these constants.
+STORED_UPSTREAM_KEY = "sk-" + secrets.token_urlsafe(24)
+ENV_UPSTREAM_KEY = "sk-" + secrets.token_urlsafe(24)
+
 _TMP = Path(tempfile.mkdtemp(prefix="cpypi-device-"))
 os.environ["API_KEYS_FILE"] = str(_TMP / "device.db")
 os.environ["DEVICE_CODES_FILE"] = str(_TMP / "device_codes.json")
 os.environ["MODELS_FILE"] = str(_TMP / "model_routes.json")
 os.environ["MODEL_HEALTH_FILE"] = str(_TMP / "model_health.json")
 os.environ["AUTH_ENABLED"] = "true"
-os.environ["AUTH_USERNAME"] = "deviceadmin"
-os.environ["AUTH_ASSERT"] = "device-gate-secret"
+os.environ["AUTH_USERNAME"] = ADMIN_USER
+os.environ["AUTH_ASSERT"] = ADMIN_PASS
 os.environ["OAUTH2_INTROSPECT_URL"] = ""
 os.environ["OAUTH2_AUTHORIZE_URL"] = ""
-os.environ["ADMIN_USERS"] = '["deviceadmin"]'
+os.environ["ADMIN_USERS"] = f'["{ADMIN_USER}"]'
 os.environ["SERVER__PUBLIC_BASE_URL"] = "https://registry.example.invalid:9443"
 
 import json  # noqa: E402
@@ -62,7 +75,7 @@ import json  # noqa: E402
             "name": "gate-default",
             "provider": "openai",
             "base_url": "https://api.example.invalid",
-            "api_key": "upstream-secret-key",
+            "api_key": STORED_UPSTREAM_KEY,
             "model": "gate-model",
             "aliases": ["default"],
             "path": "/v1/chat/completions",
@@ -103,11 +116,11 @@ import json  # noqa: E402
 
 # Read at request time by model_routes.effective_api_key(), so exporting it here
 # is enough — no reimport needed.
-os.environ["GATE_UPSTREAM_KEY"] = "env-injected-key"
+os.environ["GATE_UPSTREAM_KEY"] = ENV_UPSTREAM_KEY
 
 from app import app  # noqa: E402 - imported late so the env above applies
 
-ADMIN = ("deviceadmin", "device-gate-secret")
+ADMIN = (ADMIN_USER, ADMIN_PASS)
 
 failures: list[str] = []
 
@@ -121,7 +134,8 @@ def check(ok: bool, label: str) -> None:
 def main() -> int:
     anon = app.test_client()
     admin = app.test_client()
-    admin_auth = {"Authorization": "Basic ZGV2aWNlYWRtaW46ZGV2aWNlLWdhdGUtc2VjcmV0"}
+    credentials = base64.b64encode(f"{ADMIN_USER}:{ADMIN_PASS}".encode()).decode()
+    admin_auth = {"Authorization": f"Basic {credentials}"}
 
     print("── 1. start a request (anonymous) ──────────────────────────────")
     started = anon.post("/api/v1/device/code", json={})
@@ -192,7 +206,7 @@ def main() -> int:
     check(len(routes) == 3, "three routes resolved")
     if "gate-default" in by_name:
         check(
-            by_name["gate-default"].get("api_key") == "upstream-secret-key",
+            by_name["gate-default"].get("api_key") == STORED_UPSTREAM_KEY,
             "resolved route carries a stored upstream key",
         )
         check(
@@ -204,7 +218,7 @@ def main() -> int:
     print("── 6b. the key may come from the environment ───────────────────")
     if "gate-env" in by_name:
         check(
-            by_name["gate-env"].get("api_key") == "env-injected-key",
+            by_name["gate-env"].get("api_key") == ENV_UPSTREAM_KEY,
             "resolved route resolves api_key_env to the environment value",
         )
         check(

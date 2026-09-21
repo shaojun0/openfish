@@ -34,7 +34,6 @@ gives a clearer message.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Iterator
 
@@ -42,15 +41,15 @@ from config import settings
 from errors import BadRequestError, PypiError
 from services.fileio import atomic_write_stream
 from services.format import human_size
+from services.paths import MAX_NAME_BYTES, contained, single_segment
 
 #: Read size for an upload stream.  Large enough to keep the syscall count low,
 #: small enough that a broken client cannot make the server allocate much.
 CHUNK_BYTES = 1024 * 1024
 
-#: Longest accepted filename, category or bare Dockerfile name.  A POSIX
-#: filesystem caps one name at 255 bytes; rejecting here turns an
-#: ``ENAMETOOLONG`` from ``os.replace`` into a readable ``400``.
-MAX_NAME_LENGTH = 255
+#: Kept as this module's public name for the ceiling; the rule itself lives in
+#: :mod:`services.paths`, so there is exactly one definition of "too long".
+MAX_NAME_LENGTH = MAX_NAME_BYTES
 
 #: Suffixes a tools upload may use.  Every entry is lowercase and matched
 #: case-insensitively; the catalog itself places no limit on what a tool is, so
@@ -94,28 +93,19 @@ _RESERVED_NAMES: tuple[str, ...] = ("catalog.json",)
 #: decision, this module only refuses to write a file they would hide.
 _HIDDEN_PREFIXES: tuple[str, ...] = ("readme", "license", "changelog")
 
-_PATH_SEPARATORS = ("/", "\\", "\x00")
-
 
 def _single_segment(value: str, *, what: str) -> str:
     """Prove *value* is one safe path segment and return it unchanged.
 
-    Raises :class:`errors.BadRequestError` with a message naming *what* so the
-    tools form and the Docker form can share the implementation.
+    The rule lives in :func:`services.paths.single_segment` — one implementation
+    shared with the documentation and package-upload paths — and this wrapper
+    only maps its ``ValueError`` onto the ``400`` the tools and Docker forms
+    expect, so both ecosystems reject the same inputs with the same wording.
     """
-    if not value:
-        raise BadRequestError(f"{what}不能为空")
-    if len(value) > MAX_NAME_LENGTH:
-        raise BadRequestError(f"{what}过长（最多 {MAX_NAME_LENGTH} 个字符）")
-    if value in {".", ".."} or value.startswith("."):
-        raise BadRequestError(f"{what}不能是 {value!r}，也不能以点开头")
-    if any(sep in value for sep in _PATH_SEPARATORS):
-        raise BadRequestError(f"{what}不能包含路径分隔符")
-    if os.path.basename(value) != value or Path(value).name != value:
-        raise BadRequestError(f"{what}只能是一个文件名或目录名，不能包含路径")
-    if any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise BadRequestError(f"{what}不能包含控制字符")
-    return value
+    try:
+        return single_segment(value, what=what)
+    except ValueError as exc:
+        raise BadRequestError(f"{what}不合法：{exc}") from exc
 
 
 def _check_listed(name: str, *, what: str) -> None:
@@ -155,12 +145,11 @@ def tools_target(root: str, filename: str, category: str = "") -> Path:
     name = _single_segment(filename, what="文件名")
     _check_listed(name, what="文件名")
     _check_suffix(name, TOOL_SUFFIXES)
-    base = Path(root)
     if not category:
-        return base / name
+        return contained(root, name)
     folder = _single_segment(category, what="分类名")
     _check_listed(folder, what="分类名")
-    return base / folder / name
+    return contained(root, folder, name)
 
 
 def docker_target(root: str, filename: str) -> Path:
@@ -168,7 +157,7 @@ def docker_target(root: str, filename: str) -> Path:
     name = _single_segment(filename, what="文件名")
     _check_listed(name, what="文件名")
     _check_suffix(name, DOCKER_SUFFIXES, bare_names=DOCKER_BARE_NAMES)
-    return Path(root) / name
+    return contained(root, name)
 
 
 def _capped(stream, *, limit: int, name: str) -> Iterator[bytes]:

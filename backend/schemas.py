@@ -18,6 +18,17 @@ class FormatQuery(BaseModel):
     format: str | None = Field(default=None, pattern=r"^(json)?$")
 
 
+class SimpleProjectPath(BaseModel):
+    """``<package_name>`` on the per-project simple API.
+
+    flask-openapi3 binds path parameters through a model named ``path`` in the
+    view signature (a plain ``str`` argument would be dropped before the view
+    runs), so the path variable is declared here like any other request input.
+    """
+
+    package_name: str
+
+
 # ── Package file ─────────────────────────────────────────────────────
 
 @dataclass

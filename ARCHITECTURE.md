@@ -60,9 +60,9 @@ app.py                     创建 Flask 应用，禁用内置 static handler
 | 约定 | 说明 |
 | --- | --- |
 | **先找库，再自己写** | 有成熟依赖就不要手写。已落地的替换：Markdown 渲染由约 400 行手写解析器改为 `markdown-it-py`（`html=False` + 收窄的 `link_validator`，安全性是结构性的）；机器面模板由 `services/templates.py` 的 lru 文件缓存改为 Flask/Jinja 自带加载器（`render_template("python/simple_index.html", …)`）。协议代理（npm / Docker Registry v2 / apt）没有对应库，属于业务逻辑，保留自研。 |
-| **一个关注点只有一份实现** | 字节格式化、ISO 时间、原子写 + JSON、SHA-256 缓存分别只有 `services/format.py`、`services/fileio.py`、`services/digest.py` 三处实现；此前它们各有 2–3 份不同写法的副本。 |
+| **一个关注点只有一份实现** | 字节格式化、ISO 时间、原子写 + JSON、SHA-256 缓存分别只有 `services/format.py`、`services/fileio.py`、`services/digest.py` 三处实现；此前它们各有 2–3 份不同写法的副本。安全原语同理：外部名字→路径在 `services/paths.py`（`secure_filename` + `safe_join`），出站 URL 在 `services/urlsafety.py`（`pydantic.AnyHttpUrl` + `ipaddress`），日志转义在 `services/logsafe.py`（`logging.Filter`）。 |
 | **从定义处导入** | `from services.docs import read`，不要经 `services/__init__.py` 之类的门面转一手；`auth/`、`services/` 的包初始化文件只保留 docstring（`index/` 另留唯一的 `register_all`）。 |
-| **模块头** | 每个模块以 `from __future__ import annotations` 开头，其后先标准库、再三方、再本仓库，各段内部按字母序。**唯一例外**是 `routes/pypi.py`：PEP 563 会把 `query: FormatQuery` 变成字符串，而 flask-pydantic 正是读这个注解并交给 `issubclass`，文件头注明了原因。 |
+| **模块头** | 每个模块以 `from __future__ import annotations` 开头，其后先标准库、再三方、再本仓库，各段内部按字母序。 |
 | **类型写法** | 一律 `X \| None`，不使用 `typing.Optional`；公共函数写全签名。 |
 | **日志** | 模块级 `logger = logging.getLogger("cpypiserver.<域>")`，不使用 `log` / `_log`。 |
 | **依赖** | `pyproject.toml` 里只留真正被 import 的包；`cryptography` / `pyjwt` 已因无人使用而删除。`scripts/check_lint.py`（pyflakes）把这套约定变成可执行门禁：未定义名、死导入一律失败。 |

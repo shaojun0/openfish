@@ -246,7 +246,7 @@ Templates are provided at `backend/.env.example` (local development) and
 | `PACKAGES_DIR`          | `<backend>/packages`   | Where uploaded packages live                       |
 | `PYTHON_BUILDS_DIR`     | `<project>/docker/python-build-standalone` | Prebuilt CPython releases    |
 | `NODE_BUILDS_DIR`       | `<project>/docker/node-builds` | Prebuilt Node.js mirror (`nodejs.org/dist` layout) |
-| `DATABASE_URL`          | *(empty)* = SQLite at `API_KEYS_FILE` | SQLAlchemy URL for users / RBAC / API keys / statistics. Set to `postgresql+psycopg://user:pass@host:5432/openfish` to run on PostgreSQL. A bare `postgresql://` is upgraded to the bundled psycopg driver; an explicit `+psycopg2`/`+pg8000` is respected |
+| `DATABASE_URL`          | *(empty)* = SQLite at `API_KEYS_FILE` | SQLAlchemy URL for users / RBAC / API keys / statistics. Set to `postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host:5432/openfish` (password from the environment, never the file) to run on PostgreSQL. A bare `postgresql://` is upgraded to the bundled psycopg driver; an explicit `+psycopg2`/`+pg8000` is respected |
 | `API_KEYS_FILE`         | `<backend>/data/cpypiserver.db` | SQLite database for API keys and stats — used only while `DATABASE_URL` is empty |
 | `FRONTEND_DIST_DIR`     | *(empty)* = `<backend>/static/dist` | Directory holding the built SPA for Flask to serve. In the split Docker deployment the `frontend` container serves it instead, so this stays empty |
 | `STORAGE__OVERWRITE`    | `false`                | Allow re-uploading an existing filename            |
@@ -1134,7 +1134,7 @@ python backend/scripts/check_database.py
 
 # The same round trip against a real PostgreSQL server
 python backend/scripts/check_database.py \
-    --url postgresql+psycopg://openfish:…@127.0.0.1:5432/openfish --yes
+    --url "postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/openfish" --yes
 ```
 
 With no arguments it is an offline gate: it checks that `resolve_database_url`

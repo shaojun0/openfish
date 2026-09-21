@@ -1,7 +1,7 @@
 # dsh-plugin-enterprise-intranet
 
 DSH（DeepSeek Harness）的**企业内网模式**插件。把 DSH 接到企业制品 / 模型平台
-（openfish，默认 `https://47.97.243.86:9443`）。
+（openfish，平台地址在启用时填写，没有内置默认值）。
 
 ## 它解决什么
 
@@ -41,20 +41,23 @@ dsh plugin --profile web add link:<openfish 仓库路径>/integrations/dsh-plugi
     - id: enterprise-intranet
       name: dsh-plugin-enterprise-intranet
       config:
-        platformUrl: https://47.97.243.86:9443
+        platformUrl: https://registry.example.com:9443
         autoMirrors: true
         defaultAlias: default
-        verifyTls: false      # 平台自签证书；装了 CA 后可设 caFile 强校验
+        # 证书校验默认开启。自签部署请用 caFile 钉住 CA：
+        # caFile: /etc/openfish/ca_chain.pem
+        # 只有明确接受中间人风险时才关掉校验：
+        # verifyTls: false
 ```
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `platformUrl` | `https://47.97.243.86:9443` | 企业平台地址 |
+| `platformUrl` | `''`（必填） | 企业平台地址；不配置时启用模式会给出明确报错 |
 | `apiKey` | `''` | 一般不填，让用户在面板里领 |
 | `autoMirrors` | `true` | 自动写包源配置 |
 | `autoGitCredential` | `true` | 自动写 git credential helper 与 `/etc/gitconfig`（同 `autoMirrors` 风格；关掉会删除 helper） |
 | `defaultAlias` | `default` | 认哪个别名是默认模型 |
-| `verifyTls` / `caFile` | `false` / `''` | 平台证书校验（git 侧同步写进 `/etc/gitconfig`） |
+| `verifyTls` / `caFile` | `true` / `''` | 平台证书校验（git 侧同步写进 `/etc/gitconfig`）；默认校验，`caFile` 用于自签 CA，`verifyTls: false` 需显式选择 |
 | `requestTimeoutMs` | `20000` | 平台请求超时 |
 
 ## 宿主侧 HTTP 端点
@@ -142,8 +145,9 @@ cd integrations/dsh-plugin-enterprise-intranet && npm test   # = node test/teard
   用完即弃，插件不落盘。
 * 平台不可达 / 兑换失败时 helper **静默退出**（stdout 为空、exit 0），只在
   stderr 留一行原因——不会把 git 卡死。
-* 平台自签证书用 `node:https` 的 `rejectUnauthorized` / `ca` 处理，
-  不会去动 `NODE_TLS_REJECT_UNAUTHORIZED`；git 侧对应写 `sslVerify` / `sslCAInfo`。
+* 平台证书**默认校验**（`node:https`，`verifyTls: true`）；自签部署用 `caFile`
+  钉住 CA，`verifyTls: false` 需显式选择才会关闭，且不会去动
+  `NODE_TLS_REJECT_UNAUTHORIZED`；git 侧对应写 `sslCAInfo` / `sslVerify`。
 
 ## 依赖
 
