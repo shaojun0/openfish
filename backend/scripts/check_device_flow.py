@@ -19,7 +19,10 @@ driven over HTTP:
 6. the issued key authenticates as a Bearer token and can read
    ``GET /api/v1/models/resolved`` — the endpoint the plugin actually consumes —
    while an anonymous caller is refused;
-7. a ``user_code`` is single-use: approving it twice fails.
+7. a ``user_code`` is single-use: approving it twice fails;
+8. ``?next=`` cannot steer the post-login ``Location`` off-origin — a tab or
+   newline in the value used to collapse ``/\\t/`` into a protocol-relative
+   ``//`` — while the ``/device`` landing still round-trips the ``user_code``.
 
 Every step runs against the real Flask app, so a change that desynchronises the
 device store, the guards or the response shape fails here.
@@ -247,6 +250,40 @@ def main() -> int:
         "/device/approve", data={"user_code": user_code}, headers=admin_auth,
     )
     check(again.status_code in (404, 409, 410), f"second approve -> {again.status_code}")
+
+    print("── 8. ?next= cannot steer the login redirect off-origin ────────")
+    # A same-origin check on the *raw* value is not enough: "/\t/evil.example"
+    # satisfies startswith("/") and defeats startswith("//"), and the tab is
+    # then dropped — by Werkzeug's iri_to_uri on the way out and by the
+    # browser's own URL parser — collapsing the path to "//evil.example", a
+    # protocol-relative URL.  The landing is now a closed set of keys rebuilt
+    # with url_for, so no request argument can name the target.
+    for payload in ("/%09/evil.example", "/%0A/evil.example", "/%0D/evil.example",
+                    "//evil.example", "%2F%2Fevil.example"):
+        resp = admin.get(
+            f"/auth/login?next={payload}", headers=admin_auth,
+            follow_redirects=False,
+        )
+        location = resp.headers.get("Location") or ""
+        seen = (location.replace("\t", "").replace("\n", "")
+                .replace("\r", "").replace("\\", "/"))
+        check(
+            resp.status_code == 302 and not seen.startswith("//")
+            and "://" not in seen,
+            f"?next={payload} lands on-origin ({location or resp.status_code})",
+        )
+
+    # The one non-SPA landing that must survive the hardening: the device page,
+    # rebuilt by url_for so the browser never names the URL.
+    landing = admin.get(
+        f"/auth/login?next=/device?user_code={user_code}", headers=admin_auth,
+        follow_redirects=False,
+    )
+    location = landing.headers.get("Location") or ""
+    check(
+        location.startswith("/device?user_code=") and str(user_code) in location,
+        f"a /device landing still carries the code ({location or landing.status_code})",
+    )
 
     print()
     if failures:

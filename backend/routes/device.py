@@ -137,8 +137,10 @@ def _login_redirect():
     """Send an unauthenticated visitor through the deployment's login flow.
 
     ``next`` points back here *including* the query string, so the user_code the
-    plugin generated survives the round trip.  ``/auth/login`` accepts only a
-    same-origin absolute path (see ``routes.auth_routes._safe_next``).
+    plugin generated survives the round trip.  ``/auth/login`` reduces it to a
+    landing key plus that code and rebuilds this URL with ``url_for`` (see
+    ``routes.auth_routes._remember_landing``), so the browser never names the
+    redirect target.
     """
     target = request.full_path if request.query_string else request.path
     return redirect(url_for("auth.auth_login", next=target))
