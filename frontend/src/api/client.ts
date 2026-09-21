@@ -29,8 +29,11 @@ http.interceptors.response.use(
   (error: AxiosError<ApiErrorBody>) => {
     const status = error.response?.status
     if (status === 401 && flags.authEnabled && !window.location.pathname.startsWith('/auth')) {
-      const next = encodeURIComponent(window.location.pathname + window.location.search)
-      window.location.href = `/auth/login?next=${next}`
+      // The console's own deep links are not carried across as `?next=`: the
+      // login route reduces that parameter to a closed set of landing keys (see
+      // `routes/auth_routes.py`), so for an SPA path it selects nothing — and a
+      // constant destination keeps this line a literal rather than a sink.
+      window.location.href = '/auth/login'
     }
     return Promise.reject(error)
   },
