@@ -77,7 +77,7 @@ def _configure_environment(args: argparse.Namespace) -> str:
     if args.url:
         if not args.url.startswith("sqlite") and not args.yes:
             print(
-                f"refusing to write to non-SQLite target {args.url!r} without --yes.\n"
+                f"refusing to write to non-SQLite target {args.url} without --yes.\n"
                 "This gate seeds a superuser and creates a test account.",
                 file=sys.stderr,
             )
@@ -135,7 +135,7 @@ def check_resolution() -> None:
     )
     for raw, expected in cases:
         check(resolve_database_url(raw) == expected,
-              f"resolve({raw!r}) → {expected}")
+              f"resolve({raw}) → {expected}")
 
     check(_dialect_of(resolve_database_url()) == _dialect_of(TARGET_URL),
           "the configured target resolves to the expected dialect")

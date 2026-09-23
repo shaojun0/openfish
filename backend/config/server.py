@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from config.base import EnvSettings
 from config.paths import backend_path
 
 
-class ServerConfig(BaseSettings):
-    # Read the project-level .env directly so flat names such as HOST / PORT /
-    # SECRET_KEY work for local development as well as inside containers.
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
+class ServerConfig(EnvSettings):
+    """Server identity, network and admin settings.
+
+    Flat names such as ``HOST`` / ``PORT`` / ``SECRET_KEY`` work for local
+    development as well as inside containers; see
+    :class:`config.base.EnvSettings` for the name matching and the
+    blank-means-unset rule.
+    """
 
     host: str = Field(default="0.0.0.0", description="Bind address")
     port: int = Field(default=9090, ge=1, le=65535, description="Bind port")

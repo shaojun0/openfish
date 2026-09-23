@@ -50,13 +50,25 @@ ADMIN_PASS = secrets.token_urlsafe(18)
 #: The two upstream keys the fixture route table resolves.  Generated for the
 #: same reason; the assertions below compare against these constants.
 STORED_UPSTREAM_KEY = "sk-" + secrets.token_urlsafe(24)
-ENV_UPSTREAM_KEY = "sk-" + secrets.token_urlsafe(24)
+PLAINTEXT_UPSTREAM_KEY = "sk-" + secrets.token_urlsafe(24)
+FOREIGN_UPSTREAM_KEY = "sk-" + secrets.token_urlsafe(24)
+
+#: The master key every route's ``api_key`` is sealed under.  Prompt-free and
+#: literal because it is a fixture, never a deployment value — any non-empty
+#: secret works, which is the point of deriving the Fernet key.  Set *before*
+#: ``app`` is imported: ``config.settings`` reads the environment once, so a
+#: value set afterwards would never be seen.
+#:
+#: The name is spelled out because it cannot be imported yet — ``config.keys``
+#: is only reachable through ``config/__init__``, which builds ``settings`` on
+#: import.  The assertion in §6 binds this literal back to
+#: ``services.model_routes.MODEL_ROUTE_KEY_ENV``, so a rename fails the gate
+#: instead of silently sealing under no key at all.
+os.environ["MODEL_ROUTE_KEY"] = "gate-only-model-route-key"
 
 _TMP = Path(tempfile.mkdtemp(prefix="cpypi-device-"))
 os.environ["API_KEYS_FILE"] = str(_TMP / "device.db")
 os.environ["DEVICE_CODES_FILE"] = str(_TMP / "device_codes.json")
-os.environ["MODELS_FILE"] = str(_TMP / "model_routes.json")
-os.environ["MODEL_HEALTH_FILE"] = str(_TMP / "model_health.json")
 os.environ["AUTH_ENABLED"] = "true"
 os.environ["AUTH_USERNAME"] = ADMIN_USER
 os.environ["AUTH_ASSERT"] = ADMIN_PASS
@@ -65,60 +77,79 @@ os.environ["OAUTH2_AUTHORIZE_URL"] = ""
 os.environ["ADMIN_USERS"] = f'["{ADMIN_USER}"]'
 os.environ["SERVER__PUBLIC_BASE_URL"] = "https://registry.example.invalid:9443"
 
-import json  # noqa: E402
-
-# The route table the plugin resolves; one enabled default route with a key.
-(_TMP / "model_routes.json").write_text(json.dumps({
-    "version": 1,
-    "routes": [
-        {
-            "name": "gate-default",
-            "provider": "openai",
-            "base_url": "https://api.example.invalid",
-            "api_key": STORED_UPSTREAM_KEY,
-            "model": "gate-model",
-            "aliases": ["default"],
-            "path": "/v1/chat/completions",
-            "enabled": True,
-            "description": "gate fixture",
-        },
-        {
-            # Key injected through the environment: the committed document names
-            # a variable, never a value. This is the shape a version-controlled
-            # route table must have, so the gate covers it.
-            "name": "gate-env",
-            "provider": "openai",
-            "base_url": "https://api.example.invalid",
-            "api_key": "",
-            "api_key_env": "GATE_UPSTREAM_KEY",
-            "model": "gate-env-model",
-            "aliases": ["env"],
-            "path": "/v1/chat/completions",
-            "enabled": True,
-            "description": "gate fixture (env-injected key)",
-        },
-        {
-            # Names a variable that is not set: must report itself as broken
-            # rather than looking authenticated.
-            "name": "gate-env-missing",
-            "provider": "openai",
-            "base_url": "https://api.example.invalid",
-            "api_key": "",
-            "api_key_env": "GATE_KEY_THAT_IS_NOT_SET",
-            "model": "gate-missing-model",
-            "aliases": ["missing"],
-            "path": "/v1/chat/completions",
-            "enabled": True,
-            "description": "gate fixture (unset env key)",
-        },
-    ],
-}, ensure_ascii=False), encoding="utf-8")
-
-# Read at request time by model_routes.effective_api_key(), so exporting it here
-# is enough — no reimport needed.
-os.environ["GATE_UPSTREAM_KEY"] = ENV_UPSTREAM_KEY
+# The route table the plugin resolves.  One enabled default route with a sealed
+# key, seeded through the service (so the gate exercises the same validation —
+# including the sealing — the panel does), plus two rows written straight to the
+# table to pin the states a real deployment can be in: one whose key predates
+# sealing, and one sealed under a *different* master key.
+ROUTE_FIXTURES: list[dict] = [
+    {
+        "name": "gate-default",
+        "provider": "openai",
+        "base_url": "https://api.example.invalid",
+        "api_key": STORED_UPSTREAM_KEY,
+        "model": "gate-model",
+        "aliases": ["default"],
+        "path": "/v1/chat/completions",
+        "enabled": True,
+        "description": "gate fixture",
+    },
+]
 
 from app import app  # noqa: E402 - imported late so the env above applies
+from extensions.database import Session  # noqa: E402
+from models.model_route import API_KEY_PREFIX, ModelRoute  # noqa: E402
+from services import model_routes  # noqa: E402
+from services.sealing import SecretSealer  # noqa: E402
+
+for _fixture in ROUTE_FIXTURES:
+    model_routes.create(Session, _fixture)
+
+
+def _seed_raw_routes() -> None:
+    """Insert the two rows that only a *pre-existing* database would have.
+
+    Written through the model rather than the service on purpose: the service
+    seals what it is given, and neither of these is sealable — one is a bare key
+    from before sealing existed, the other an envelope this deployment has no
+    key for.  They are the fixtures for ``api_key_source``'s two "act on this"
+    states, which replaced the retired ``api_key_env`` cases.
+    """
+    foreign = SecretSealer("a-different-deployments-master-key", prefix=API_KEY_PREFIX)
+    assert foreign.seal(FOREIGN_UPSTREAM_KEY).startswith(API_KEY_PREFIX)
+    session = Session()
+    try:
+        legacy = ModelRoute(
+            name="gate-plaintext",
+            provider="openai",
+            kind="chat",
+            base_url="https://api.example.invalid",
+            path="/v1/chat/completions",
+            model="gate-plaintext-model",
+            api_key=PLAINTEXT_UPSTREAM_KEY,
+            enabled=True,
+            description="gate fixture (key predates sealing)",
+        )
+        legacy.set_aliases(["plaintext"])
+        sealed_elsewhere = ModelRoute(
+            name="gate-unreadable",
+            provider="openai",
+            kind="chat",
+            base_url="https://api.example.invalid",
+            path="/v1/chat/completions",
+            model="gate-unreadable-model",
+            api_key=foreign.seal(FOREIGN_UPSTREAM_KEY),
+            enabled=True,
+            description="gate fixture (sealed under a key this deployment lacks)",
+        )
+        sealed_elsewhere.set_aliases(["unreadable"])
+        session.add_all([legacy, sealed_elsewhere])
+        session.commit()
+    finally:
+        session.close()
+
+
+_seed_raw_routes()
 
 ADMIN = (ADMIN_USER, ADMIN_PASS)
 
@@ -204,39 +235,47 @@ def main() -> int:
     routes = (resolved.get_json() or {}).get("routes") or []
     by_name = {r.get("name"): r for r in routes}
     check(len(routes) == 3, "three routes resolved")
+    check(
+        by_name.get("gate-default", {}).get("endpoint_url")
+        == "https://api.example.invalid/v1/chat/completions",
+        "resolved route carries a pre-joined endpoint_url",
+    )
+
+    print("── 6b. a sealed key is opened for the client ───────────────────")
+    check(
+        model_routes.MODEL_ROUTE_KEY_ENV == "MODEL_ROUTE_KEY",
+        "the gate exported the variable the application actually reads",
+    )
     if "gate-default" in by_name:
         check(
             by_name["gate-default"].get("api_key") == STORED_UPSTREAM_KEY,
-            "resolved route carries a stored upstream key",
+            "resolved route carries the key decrypted from its envelope",
         )
         check(
-            by_name["gate-default"].get("endpoint_url")
-            == "https://api.example.invalid/v1/chat/completions",
-            "resolved route carries a pre-joined endpoint_url",
+            by_name["gate-default"].get("api_key_source") == "stored",
+            "resolved route reports api_key_source=stored",
         )
 
-    print("── 6b. the key may come from the environment ───────────────────")
-    if "gate-env" in by_name:
+    print("── 6c. a key that predates sealing still authenticates ─────────")
+    if "gate-plaintext" in by_name:
         check(
-            by_name["gate-env"].get("api_key") == ENV_UPSTREAM_KEY,
-            "resolved route resolves api_key_env to the environment value",
+            by_name["gate-plaintext"].get("api_key") == PLAINTEXT_UPSTREAM_KEY,
+            "a legacy plaintext row still yields its key",
         )
         check(
-            by_name["gate-env"].get("api_key_source") == "env",
-            "resolved route reports api_key_source=env",
+            by_name["gate-plaintext"].get("api_key_source") == "plaintext",
+            "and reports api_key_source=plaintext so the operator can seal it",
+        )
+
+    print("── 6d. an envelope this deployment cannot open is reported ─────")
+    if "gate-unreadable" in by_name:
+        check(
+            by_name["gate-unreadable"].get("api_key") == "",
+            "a foreign envelope resolves to no key rather than a guess",
         )
         check(
-            by_name["gate-env"].get("api_key_env") == "GATE_UPSTREAM_KEY",
-            "resolved route names the variable it read",
-        )
-    if "gate-env-missing" in by_name:
-        check(
-            by_name["gate-env-missing"].get("api_key") == "",
-            "a route naming an unset variable resolves to no key",
-        )
-        check(
-            by_name["gate-env-missing"].get("api_key_source") == "env-missing",
-            "and reports api_key_source=env-missing rather than looking configured",
+            by_name["gate-unreadable"].get("api_key_source") == "unreadable",
+            "and reports api_key_source=unreadable rather than looking configured",
         )
 
     masked = bearer.get("/api/v1/models", headers={"Authorization": f"Bearer {api_key}"})
@@ -248,13 +287,18 @@ def main() -> int:
         "the browsing view still masks every key",
     )
     check(
-        masked_by_name.get("gate-env", {}).get("has_api_key") is True
-        and masked_by_name.get("gate-env", {}).get("api_key_source") == "env",
-        "the browsing view shows the env-backed route as configured",
+        masked_by_name.get("gate-default", {}).get("has_api_key") is True
+        and masked_by_name.get("gate-default", {}).get("api_key_source") == "stored",
+        "the browsing view shows the sealed route as configured",
     )
     check(
-        masked_by_name.get("gate-env-missing", {}).get("has_api_key") is False,
-        "and shows the unset-variable route as NOT configured",
+        masked_by_name.get("gate-plaintext", {}).get("api_key_hint")
+        == "••••" + PLAINTEXT_UPSTREAM_KEY[-4:],
+        "and still hints at a not-yet-sealed key's last four characters",
+    )
+    check(
+        masked_by_name.get("gate-unreadable", {}).get("has_api_key") is False,
+        "and shows the unopenable envelope as NOT configured",
     )
     refused = anon.get("/api/v1/models/resolved")
     check(refused.status_code in (401, 403), f"anonymous resolved read -> {refused.status_code}")

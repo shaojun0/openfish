@@ -12,13 +12,13 @@ class PypiError(Exception):
 
 class PackageNotFoundError(PypiError):
     def __init__(self, package_name: str) -> None:
-        super().__init__(f"Package '{package_name}' not found", status_code=404)
+        super().__init__("Package not found", status_code=404)
 
 
 class UploadConflictError(PypiError):
     def __init__(self, filename: str) -> None:
         super().__init__(
-            f"Package '{filename}' already exists (set overwrite=1 to allow)",
+            "Package already exists (set overwrite=1 to allow)",
             status_code=409,
         )
 
@@ -32,8 +32,7 @@ class PublishConflictError(PypiError):
 
     def __init__(self, name: str, version: str) -> None:
         super().__init__(
-            f"You cannot publish over the previously published versions: "
-            f"{name}@{version} already exists",
+            "You cannot publish over a previously published version",
             status_code=409,
         )
 

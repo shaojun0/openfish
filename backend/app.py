@@ -42,13 +42,58 @@ install_log_sanitizer()
 # ``(body, status)`` tuple raises ``LookupError`` at abort time.
 #
 # The shape is the one the previous request-binding layer produced, kept
-# deliberately: an invalid query parameter answers ``400`` with a nested
-# ``{"validation_error": {"query_params": [...]}}`` body rather than the
-# library default (``422`` with a bare list).  ``query_params`` is hard-coded
-# because query is the only location bound anywhere in this repository; a
-# second bound location would need the key derived from ``exc.errors()``.
+# deliberately: an invalid bound request answers ``400`` with a nested
+# ``{"validation_error": {"<location>": [...]}}`` body rather than the library
+# default (``422`` with a bare list).
+#
+# The location key comes from the model that failed, because that is all the
+# exception carries: pydantic reports *field* locations and never which part of
+# the request the model was binding, and field names collide across locations
+# (``format`` is a query field on one route, ``content`` a form field on another).
+# A model bound to a route but absent from this table still answers ``400``; it is
+# filed under the generic ``body_params``, so a forgotten entry degrades the key
+# rather than the status.
+_BOUND_MODEL_LOCATION: dict[str, str] = {
+    "FormatQuery": "query_params",
+    "SimpleProjectPath": "path_params",
+    "PyPIUploadForm": "form_params",
+    "NpmPublishDocument": "body_params",
+    "NpmSearchQuery": "query_params",
+    "CreateKeyRequest": "body_params",
+    "CreateRoleRequest": "body_params",
+    "SetRolePermissionsRequest": "body_params",
+    "GrantRoleRequest": "body_params",
+    "SetSuperuserRequest": "body_params",
+    "UserListQuery": "query_params",
+    "ToolUploadForm": "form_params",
+    "ModelRouteRequest": "body_params",
+    "ModelRouteProbeRequest": "body_params",
+    "DockerTagsQuery": "query_params",
+    "DockerUploadForm": "form_params",
+    "DebianSnapshotQuery": "query_params",
+    "DebianBundleUploadForm": "form_params",
+    "DocsContentRequest": "body_params",
+    "DocsAssetUploadForm": "form_params",
+    "DocsDownloadQuery": "query_params",
+    "RepoListQuery": "query_params",
+    "RepoIssueListQuery": "query_params",
+    "RepoCreateRequest": "body_params",
+    "RepoImportRequest": "body_params",
+    "RepoSyncRequest": "body_params",
+    "RunnerPatchRequest": "body_params",
+    "RunnerCredentialRequest": "body_params",
+    "RepoContextSearchQuery": "query_params",
+    "FindingListQuery": "query_params",
+    "FindingDecisionRequest": "body_params",
+    "ReviewPolicyRequest": "body_params",
+    "AgentTaskListQuery": "query_params",
+    "AgentTaskCreateRequest": "body_params",
+}
+
+
 def _validation_error_response(exc: ValidationError) -> Response:
-    resp = jsonify({"validation_error": {"query_params": exc.errors()}})
+    location = _BOUND_MODEL_LOCATION.get(exc.title or "", "body_params")
+    resp = jsonify({"validation_error": {location: exc.errors()}})
     resp.status_code = 400
     resp.headers["X-Content-Type-Options"] = "nosniff"
     return resp

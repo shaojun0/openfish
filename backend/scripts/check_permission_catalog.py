@@ -151,14 +151,14 @@ def _resolve(node: ast.expr) -> tuple[str | None, str | None]:
     """
     if isinstance(node, ast.Constant):
         if isinstance(node.value, str):
-            return node.value, f"bare string {node.value!r} (declare a constant instead)"
-        return None, f"non-string argument {ast.unparse(node)!r}"
+            return node.value, f"bare string {node.value} (declare a constant instead)"
+        return None, f"non-string argument {ast.unparse(node)}"
     source = ast.unparse(node).strip()
     name = source.split(".")[-1]
     value = getattr(P, name, None)
     if isinstance(value, str):
         return value, None
-    return None, f"unresolvable reference {source!r}"
+    return None, f"unresolvable reference {source}"
 
 
 def collect_guard_codes() -> tuple[dict[str, set[str]], list[str]]:
@@ -205,7 +205,7 @@ def read_readme_codes() -> tuple[set[str], list[str]]:
     problems: list[str] = []
     start = text.find(marker)
     if start < 0:
-        return set(), [f"README.md: could not find the permission table marker {marker!r}"]
+        return set(), [f"README.md: could not find the permission table marker {marker}"]
     rest = text[start:]
     end = rest.find("\n### ")
     section = rest if end < 0 else rest[:end]
@@ -228,7 +228,7 @@ def check() -> tuple[list[str], list[str]]:
     unregistered = sorted(set(referenced) - builtin)
     for code in unregistered:
         failures.append(
-            f"{code!r} is checked by a guard but is not declared in "
+            f"{code} is checked by a guard but is not declared in "
             f"auth/permissions.BUILTIN — add the constant, put it in BUILTIN and "
             f"__all__, and classify it below.  It currently ships with its code "
             f"as its display name and is absent from README."
@@ -237,35 +237,35 @@ def check() -> tuple[list[str], list[str]]:
     # 2. Every built-in point is actually enforced by some guard.
     for code in sorted(builtin - set(referenced)):
         failures.append(
-            f"{code!r} is declared in BUILTIN but no guard checks it — remove the "
+            f"{code} is declared in BUILTIN but no guard checks it — remove the "
             f"point, or attach the guard it was meant for."
         )
 
     # 3. The classification is a partition of BUILTIN.
     both = sorted(AUTHENTICATED_SEEDED & ADMIN_ONLY)
     for code in both:
-        failures.append(f"{code!r} is classified as both authenticated-seeded and admin-only.")
+        failures.append(f"{code} is classified as both authenticated-seeded and admin-only.")
     uncovered = sorted(builtin - AUTHENTICATED_SEEDED - ADMIN_ONLY)
     for code in uncovered:
         failures.append(
-            f"{code!r} is a built-in point with no classification. Decide whether "
+            f"{code} is a built-in point with no classification. Decide whether "
             f"an ordinary signed-in user should get it and add it to "
             f"AUTHENTICATED_SEEDED or ADMIN_ONLY here."
         )
     unknown = sorted((AUTHENTICATED_SEEDED | ADMIN_ONLY) - builtin)
     for code in unknown:
-        failures.append(f"{code!r} is classified here but is not a BUILTIN point (typo?).")
+        failures.append(f"{code} is classified here but is not a BUILTIN point (typo?).")
 
     # 4. The classification agrees with the seed the code actually applies.
     seeded = set(_AUTHENTICATED_SEED)
     for code in sorted(seeded - AUTHENTICATED_SEEDED):
         failures.append(
-            f"{code!r} is in services.authz._AUTHENTICATED_SEED but classified as "
+            f"{code} is in services.authz._AUTHENTICATED_SEED but classified as "
             f"admin-only here — one of the two is wrong."
         )
     for code in sorted(AUTHENTICATED_SEEDED - seeded):
         failures.append(
-            f"{code!r} is classified as authenticated-seeded here but is missing "
+            f"{code} is classified as authenticated-seeded here but is missing "
             f"from services.authz._AUTHENTICATED_SEED — a fresh deployment would "
             f"not grant it, which is the nodebuild:* bug."
         )
@@ -273,17 +273,17 @@ def check() -> tuple[list[str], list[str]]:
     # 5. The anonymous seed matches its declared policy.
     anonymous = set(_ANONYMOUS_SEED)
     for code in sorted(anonymous - builtin):
-        failures.append(f"{code!r} is in _ANONYMOUS_SEED but is not a BUILTIN point.")
+        failures.append(f"{code} is in _ANONYMOUS_SEED but is not a BUILTIN point.")
     for code in sorted(anonymous - ANONYMOUS_SEEDED):
         failures.append(
-            f"{code!r} is granted to the `anonymous` role in "
+            f"{code} is granted to the `anonymous` role in "
             f"services.authz._ANONYMOUS_SEED but is not declared in "
             f"ANONYMOUS_SEEDED here — an anonymous caller is a stranger on the "
             f"network, so widening that set must be a reviewed decision."
         )
     for code in sorted(ANONYMOUS_SEEDED - anonymous):
         failures.append(
-            f"{code!r} is declared ANONYMOUS_SEEDED here but is missing from "
+            f"{code} is declared ANONYMOUS_SEEDED here but is missing from "
             f"services.authz._ANONYMOUS_SEED, so anonymous callers do not "
             f"actually get it."
         )
@@ -292,9 +292,9 @@ def check() -> tuple[list[str], list[str]]:
     documented, readme_problems = read_readme_codes()
     failures.extend(readme_problems)
     for code in sorted(builtin - documented):
-        failures.append(f"{code!r} is a built-in point but is missing from README's permission table.")
+        failures.append(f"{code} is a built-in point but is missing from README's permission table.")
     for code in sorted(documented - builtin):
-        failures.append(f"README's permission table documents {code!r}, which is not a built-in point.")
+        failures.append(f"README's permission table documents {code}, which is not a built-in point.")
 
     notes.append(f"built-in points            : {len(builtin)}")
     notes.append(f"checked by a guard         : {len(referenced)}")

@@ -99,7 +99,7 @@ def main() -> int:
             failures.append(f"GET {path} (anonymous) -> {response.status_code}, expected 200")
         elif expect not in response.headers.get("Content-Type", ""):
             failures.append(
-                f"GET {path} Content-Type is {response.headers.get('Content-Type')!r}, expected {expect!r}"
+                f"GET {path} Content-Type is {response.headers.get('Content-Type')}, expected {expect}"
             )
         else:
             print(f"✅ GET {path:<26} 200  {expect}  ({len(response.content):,} bytes)")
@@ -108,7 +108,7 @@ def main() -> int:
     if 'rel="service-desc"' in link:
         print("✅ every response advertises the spec via Link: rel=\"service-desc\"")
     else:
-        failures.append(f"Link header missing service-desc relation: {link!r}")
+        failures.append(f"Link header missing service-desc relation: {link}")
 
     spec = requests.get(f"{base}/openapi.json", timeout=20).json()
 
@@ -122,7 +122,7 @@ def main() -> int:
         elif "application/json" not in response.headers.get("Content-Type", ""):
             failures.append(
                 f"GET {path} unauthenticated returned "
-                f"{response.headers.get('Content-Type')!r}, expected JSON (an HTML "
+                f"{response.headers.get('Content-Type')}, expected JSON (an HTML "
                 f"redirect would be followed silently by XHR)"
             )
         else:
@@ -206,7 +206,7 @@ def main() -> int:
     body = requests.get(f"{base}/llms.txt", timeout=20).text
     for required in ("## Authentication", "openapi.json", "/simple/", "Bearer"):
         if required not in body:
-            failures.append(f"llms.txt is missing {required!r}")
+            failures.append(f"llms.txt is missing {required}")
 
     print()
     if failures:

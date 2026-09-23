@@ -733,7 +733,7 @@ def check_route(client) -> None:
         f"证据条目排在结果前部并带 relation（{first.get('origin')}/{first.get('relation')}）",
     )
     check(payload.get("slug") == "example/repo",
-          f"响应带 slug（{payload.get('slug')!r}）")
+          f"响应带 slug（{payload.get('slug')}）")
     check("<untrusted-issue" in (payload.get("text") or ""),
           "返回文本仍由 <untrusted- 包装")
     check(_find_forbidden_keys(payload) == [],
@@ -742,7 +742,7 @@ def check_route(client) -> None:
     both = client.get(f"{base}?finding_id=1&q=logger")
     error = (both.get_json() or {}).get("error") or ""
     check(both.status_code == 400, f"finding_id 与 q 同时给出 → 400（{both.status_code}）")
-    check("finding_id" in error, f"400 说明互斥原因（{error[:90]!r}）")
+    check("finding_id" in error, f"400 说明互斥原因（{error[:90]}）")
 
     cross = client.get(f"{base}?finding_id=3")
     missing = client.get(f"{base}?finding_id=424242")

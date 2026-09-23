@@ -203,10 +203,10 @@ def _stored_filename(name: str, version: str) -> str:
     """npm's flat tarball name: the scope is stripped, ``@`` never survives."""
     short = name.split("/")[-1]
     if not short or short.startswith(".") or not _TARBALL_STEM_RE.match(short):
-        raise BadRequestError(f"package name {name!r} cannot be stored as a filename")
+        raise BadRequestError(f"package name {name} cannot be stored as a filename")
     filename = f"{short}-{version}.tgz"
     if Path(filename).name != filename:
-        raise BadRequestError(f"refusing unsafe tarball name {filename!r}")
+        raise BadRequestError(f"refusing unsafe tarball name {filename}")
     return filename
 
 
@@ -225,14 +225,14 @@ def _validate(
     name = raw_name.strip()
     if not _NAME_RE.match(name):
         raise BadRequestError(
-            f"invalid package name {name!r} — npm names are lowercase, optionally "
+            f"invalid package name {name} — npm names are lowercase, optionally "
             f"scoped as @scope/name"
         )
     # The route already decoded %2F, but a client may double-encode.
     requested = unquote(path_name or "")
     if requested and requested != name:
         raise BadRequestError(
-            f"body name {name!r} does not match the request path {requested!r}"
+            f"body name {name} does not match the request path {requested}"
         )
 
     versions = document.get("versions")
@@ -287,15 +287,15 @@ def publish(
     published: list[PublishedVersion] = []
     for key, attachment in attachments.items():
         if not isinstance(attachment, dict):
-            raise BadRequestError(f"attachment {key!r} is not an object")
+            raise BadRequestError(f"attachment {key} is not an object")
         version = _version_for_attachment(str(key), name, versions)
         if version is None:
             raise BadRequestError(
-                f"attachment {key!r} does not match any version of {name!r}"
+                f"attachment {key} does not match any version of {name}"
             )
         manifest = versions.get(version)
         if not isinstance(manifest, dict):
-            raise BadRequestError(f"version {version!r} of {name!r} is not an object")
+            raise BadRequestError(f"version {version} of {name} is not an object")
         published.append(
             _store_attachment(
                 root, name, version, manifest, attachment, overwrite=overwrite,
@@ -350,7 +350,7 @@ def _store_attachment(
         actual = inner.get(field)
         if isinstance(actual, str) and actual and actual != expected:
             raise BadRequestError(
-                f"tarball declares {field} {actual!r} but is being published as {expected!r}"
+                f"tarball declares {field} {actual} but is being published as {expected}"
             )
 
     shasum, integrity = _digests(data)

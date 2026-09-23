@@ -47,6 +47,9 @@ from typing import Callable, Mapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from config import settings
+from config.forgejo import ForgejoConfig
+from config.keys import KeysConfig
 from models.agent_hub import Repo, RepoRunner
 from models.base import utcnow
 from services.agent_runner import mask_secrets
@@ -75,13 +78,15 @@ RUNNER_EGRESS_POLICIES: tuple[str, ...] = (
 #: The dedicated key that seals/opens a per-repo runner credential.  It lives in
 #: both the backend (to seal on ``set_credential``) and the runner container (to
 #: open for a task), and is intentionally **not** the user-identity master key
-#: ``GIT_IDENTITY_KEY`` — the runner must never receive the latter.
-RUNNER_CREDENTIAL_KEY_ENV = "RUNNER_CREDENTIAL_KEY"
+#: ``GIT_IDENTITY_KEY`` — the runner must never receive the latter.  The name is
+#: derived from :class:`config.keys.KeysConfig`, which owns the variable.
+RUNNER_CREDENTIAL_KEY_ENV = KeysConfig.env_name("runner_credential_key")
 
 #: The deployment-wide fallback token.  This module owns the canonical reader
 #: (:func:`shared_runner_token`); ``services/agent_worker.py`` keeps its own
-#: thin wrapper for backwards compatibility.
-SHARED_TOKEN_ENV = "FORGEJO_RUNNER_TOKEN"
+#: thin wrapper for backwards compatibility.  Derived from
+#: :class:`config.forgejo.ForgejoConfig`, the one place the variable is declared.
+SHARED_TOKEN_ENV = ForgejoConfig.env_name("forgejo_runner_token")
 
 #: Root directory name under ``AGENT_WORK_ROOT`` for per-runner workspaces.
 DEFAULT_WORKSPACE_SUBDIR = "runners"
@@ -131,17 +136,17 @@ def safe_workspace_subdir(value: str | None, *, runner_id: int | None = None) ->
         return f"{DEFAULT_WORKSPACE_SUBDIR}/{int(runner_id)}"
 
     if raw.startswith("/") or raw.startswith("\\"):
-        raise RepoRunnerError(f"workspace_subdir 不能是绝对路径：{value!r}")
+        raise RepoRunnerError(f"workspace_subdir 不能是绝对路径：{value}")
     if "\\" in raw:
-        raise RepoRunnerError(f"workspace_subdir 不能包含反斜杠：{value!r}")
+        raise RepoRunnerError(f"workspace_subdir 不能包含反斜杠：{value}")
     if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw):
-        raise RepoRunnerError(f"workspace_subdir 不能包含控制字符：{value!r}")
+        raise RepoRunnerError(f"workspace_subdir 不能包含控制字符：{value}")
 
     for segment in raw.split("/"):
         if segment in ("", ".", ".."):
-            raise RepoRunnerError(f"workspace_subdir 含非法路径段：{value!r}")
+            raise RepoRunnerError(f"workspace_subdir 含非法路径段：{value}")
         if not _SEGMENT_RE.match(segment):
-            raise RepoRunnerError(f"workspace_subdir 含非法字符：{value!r}")
+            raise RepoRunnerError(f"workspace_subdir 含非法字符：{value}")
     return raw
 
 
@@ -205,13 +210,13 @@ def _create_workspace_root(base: Path, subdir: str) -> Path:
                 pass
             except OSError as exc:
                 raise RepoRunnerError(
-                    f"无法在工作区路径中创建 {segment!r}（工作根 {base}）：{exc}"
+                    f"无法在工作区路径中创建 {segment}（工作根 {base}）：{exc}"
                 ) from exc
             try:
                 child = os.open(segment, _OPEN_REAL_DIR, dir_fd=fd)
             except OSError as exc:
                 raise RepoRunnerError(
-                    f"工作区路径段 {segment!r} 不是真实目录（lstat 结果为符号链接"
+                    f"工作区路径段 {segment} 不是真实目录（lstat 结果为符号链接"
                     f"或非目录，工作根 {base}）；拒绝跟随"
                 ) from exc
             os.close(fd)
@@ -229,8 +234,13 @@ def shared_runner_token(*, env: Mapping[str, str] | None = None) -> str:
     ``""`` when the variable is unset or empty — never ``None`` — so a caller
     can branch on truthiness without a second None check.  The value is stripped
     the same way ``services.agent_worker.runner_token`` does.
+
+    *env* is for a caller with its own mapping (the offline gate); ``None`` reads
+    the deployment's settings, which are resolved once at start-up rather than
+    per call.
     """
-    return ((env or os.environ).get(SHARED_TOKEN_ENV) or "").strip()
+    source = settings.forgejo.forgejo_runner_token if env is None else env.get(SHARED_TOKEN_ENV)
+    return (source or "").strip()
 
 
 # ── Credential value ─────────────────────────────────────────────────
@@ -367,7 +377,7 @@ class RepoRunnerService:
             try:
                 concurrency = int(max_concurrency)
             except (TypeError, ValueError) as exc:
-                raise RepoRunnerError(f"max_concurrency 必须是整数：{max_concurrency!r}") from exc
+                raise RepoRunnerError(f"max_concurrency 必须是整数：{max_concurrency}") from exc
             if concurrency < 0:
                 raise RepoRunnerError(f"max_concurrency 不能为负数：{concurrency}")
 
@@ -376,7 +386,7 @@ class RepoRunnerService:
             policy = str(egress_policy).strip()
             if policy not in RUNNER_EGRESS_POLICIES:
                 raise RepoRunnerError(
-                    f"未知的 egress_policy：{egress_policy!r}（可选 {RUNNER_EGRESS_POLICIES}）"
+                    f"未知的 egress_policy：{egress_policy}（可选 {RUNNER_EGRESS_POLICIES}）"
                 )
 
         subdir: str | None = None
@@ -405,7 +415,7 @@ class RepoRunnerService:
                 conflict = self._workspace_conflict(session, repo_id, effective)
                 if conflict is not None:
                     raise RepoRunnerError(
-                        f"workspace_subdir {effective!r} 与仓库 {conflict.repo_id} "
+                        f"workspace_subdir {effective} 与仓库 {conflict.repo_id} "
                         "的 runner 工作区相同：两个仓库不能共享同一个工作区根"
                     )
                 row.workspace_subdir = effective
@@ -658,7 +668,7 @@ class RepoRunnerService:
             if conflict is not None:
                 session.rollback()
                 raise RepoRunnerError(
-                    f"默认工作区 {effective!r} 已被仓库 {conflict.repo_id} 的 runner "
+                    f"默认工作区 {effective} 已被仓库 {conflict.repo_id} 的 runner "
                     "占用：两个仓库不能共享同一个工作区根"
                 )
             session.commit()
@@ -682,11 +692,13 @@ class RepoRunnerService:
         """
         if self._cipher is None:
             # An explicit empty mapping means "no key here" and must not fall back
-            # to the process environment (the same convention as
-            # ``services.sandbox_identity._origin``); only ``None`` reads
-            # ``os.environ``.
-            source = self._env if self._env is not None else os.environ
-            raw = str(source.get(RUNNER_CREDENTIAL_KEY_ENV) or "").strip()
+            # to the deployment's key (the same convention as
+            # ``services.sandbox_identity._origin``); only ``None`` reads the
+            # settings.
+            if self._env is None:
+                raw = settings.keys.runner_credential_key.strip()
+            else:
+                raw = str(self._env.get(RUNNER_CREDENTIAL_KEY_ENV) or "").strip()
             if not raw:
                 raise RepoRunnerError(
                     "RUNNER_CREDENTIAL_KEY 未配置：runner 凭据必须用它加密存储；"
@@ -741,7 +753,7 @@ def _repo_id(repo_id: int) -> int:
     try:
         return int(repo_id)
     except (TypeError, ValueError) as exc:
-        raise RepoRunnerError(f"repo_id 必须是整数：{repo_id!r}") from exc
+        raise RepoRunnerError(f"repo_id 必须是整数：{repo_id}") from exc
 
 
 def _normalize_allowlist(value: str) -> str | None:

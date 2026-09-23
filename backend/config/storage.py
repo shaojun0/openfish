@@ -3,18 +3,13 @@
 from __future__ import annotations
 
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from config.base import EnvSettings
 from config.paths import backend_path, catalog_path
 
 
-class StorageConfig(BaseSettings):
-    # See ServerConfig.model_config — flat .env names are supported.
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
+class StorageConfig(EnvSettings):
+    """Package storage, upload limits and the database location."""
 
     packages_dir: str = Field(
         default=backend_path("packages"),

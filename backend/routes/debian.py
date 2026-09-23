@@ -33,9 +33,26 @@ Catalog
 ``GET /debian/``                      browsable index (HTML or JSON)
 ``GET /api/v1/debian``                catalog document for the SPA
 
-⚠ Decorator order is load-bearing: ``@debian_bp.route`` must be the topmost
-line, or the guard is applied after registration and never runs.
-``scripts/check_auth_guards.py`` enforces this.
+⚠ Decorator order is load-bearing: the route decorator — ``@debian_bp.route``,
+or ``@debian_bp.get``/``@debian_bp.post`` where the view binds request input —
+must be the topmost line, or the guard is applied after registration and never
+runs. ``scripts/check_auth_guards.py`` enforces this.
+
+``GET /debian/offline/snapshot`` binds its ``?suites=``/``?components=``/
+``?arches=``/``?fresh=`` query and ``POST /debian/offline/import`` binds its
+``bundle`` part as view parameters instead of reading ``request`` by hand, which
+is what ``@validate_request()`` — placed *below* the guard, so an unauthorized
+request is answered ``401``/``403`` and never by the binder — installs.
+
+The other two relay POSTs deliberately keep reading the request by hand: `plan`
+and `bundle` take their artifact as a file part, a same-named text form field
+**or** the raw body (`_artifact_text`), which no single model can describe, and
+`plan`'s flags are read from the form *or* the query with a tri-state
+``_tri_flag`` — a model would pin them to one location and lose the "absent is
+not false" distinction.  ``pool`` likewise hands ``request.method`` to
+``services/debian_apt.pool_response`` so a ``HEAD`` never downloads a body (the
+``Range`` half of that exchange is read inside that service), which no request
+model describes.
 """
 
 from __future__ import annotations
@@ -45,9 +62,10 @@ import tempfile
 from pathlib import Path
 
 from flask import (
-    Blueprint, Response, jsonify, render_template, request,
+    Response, jsonify, render_template, request,
     send_from_directory, url_for,
 )
+from flask_openapi3 import APIBlueprint, validate_request
 
 from auth.decorators import require_permission
 from auth.permissions import (
@@ -57,9 +75,10 @@ from config import settings
 from errors import BadRequestError
 from openapi import api_operation, binary, errors, ok
 from routes.hub_common import spa_url, wants_json
+from schemas import DebianBundleUploadForm, DebianSnapshotQuery
 from services import debian_apt, debian_offline, hub
 
-debian_bp = Blueprint("debian", __name__)
+debian_bp = APIBlueprint("debian", __name__)
 
 _DEBIAN_SCHEMA = {
     "type": "object",
@@ -359,8 +378,9 @@ def debian_offline_status():
     return jsonify(debian_offline.status_payload())
 
 
-@debian_bp.route("/debian/offline/snapshot")
+@debian_bp.get("/debian/offline/snapshot")
 @require_permission(DEBIAN_OFFLINE)
+@validate_request()
 @api_operation(
     summary="Export the internet-side package snapshot",
     description=(
@@ -389,12 +409,12 @@ def debian_offline_status():
         **errors("400", "401", "403", "500", "502"),
     },
 )
-def debian_offline_snapshot():
+def debian_offline_snapshot(query: DebianSnapshotQuery):
     snapshot = debian_offline.build_snapshot(
-        suites=debian_offline.split_list(request.args.get("suites")) or None,
-        components=debian_offline.split_list(request.args.get("components")) or None,
-        arches=debian_offline.split_list(request.args.get("arches")) or None,
-        fresh=_truthy(request.args.get("fresh")),
+        suites=debian_offline.split_list(query.suites) or None,
+        components=debian_offline.split_list(query.components) or None,
+        arches=debian_offline.split_list(query.arches) or None,
+        fresh=_truthy(query.fresh),
     )
     return _artifact_response(snapshot.text, snapshot.filename, snapshot.sha256)
 
@@ -531,8 +551,9 @@ def debian_offline_download_bundle(filename: str):
     )
 
 
-@debian_bp.route("/debian/offline/import", methods=["POST"])
+@debian_bp.post("/debian/offline/import")
 @require_permission(DEBIAN_UPLOAD)
+@validate_request()
 @api_operation(
     summary="Import an offline update bundle",
     description=(
@@ -569,9 +590,16 @@ def debian_offline_download_bundle(filename: str):
         **errors("400", "401", "403", "413", "500"),
     },
 )
-def debian_offline_import():
-    upload = request.files.get("bundle")
-    if upload is None or not upload.filename:
+def debian_offline_import(form: DebianBundleUploadForm):
+    # `form.bundle` is the `bundle` part, read out of `request.files` by the
+    # binder — see `schemas.DebianBundleUploadForm` for why the field must be a
+    # `flask_openapi3.FileStorage` and not an optional one.  `filename` is also
+    # what tells a real part from a *text* field of the same name, which the
+    # binder's "extra keys" pass copies into the model as a plain `str`: this
+    # check is what keeps that from becoming an `AttributeError` 500 instead of
+    # the 400 this route has always answered.
+    upload = form.bundle
+    if not getattr(upload, "filename", None):
         raise BadRequestError("multipart/form-data 需要一个 bundle 字段")
     workdir = tempfile.mkdtemp(prefix="openfish-upload-")
     try:

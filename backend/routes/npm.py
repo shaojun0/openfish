@@ -26,25 +26,32 @@ Sources are layered, cheapest first: tarballs and ``catalog.json`` entries in
 unknown package is fetched from it and cached, so a client that can reach this
 server can install anything the upstream mirror has.
 
-⚠ Decorator order is load-bearing: ``@npm_bp.route`` must be the topmost line,
-or the guard is applied after registration and never runs.
+⚠ Decorator order is load-bearing: the route decorator must be the topmost
+line, or the guard is applied after registration and never runs.
 ``scripts/check_auth_guards.py`` enforces this.
+
+``PUT /npm/<package>`` is the one view registered through flask-openapi3's
+``@npm_bp.put``: its body is bound as a view parameter (``body:
+NpmPublishDocument``) rather than read from ``request`` by hand, which is what
+``@validate_request()`` — placed *below* the guard, so an unauthenticated
+publish is answered ``401`` and never by the binder — installs.
+``scripts/check_npm_proxy.py`` pins that ordering and the error envelope.
 """
 
 from __future__ import annotations
 
 from flask import (
-    Blueprint, jsonify, render_template, request, send_file,
-    send_from_directory, url_for,
+    jsonify, render_template, request, send_file, send_from_directory, url_for,
 )
+from flask_openapi3 import APIBlueprint, validate_request
 from werkzeug.routing import BaseConverter
 
 from auth.decorators import require_permission
 from auth.permissions import NPM_DOWNLOAD, NPM_PUBLISH, NPM_READ
 from config import settings
-from errors import BadRequestError
 from openapi import api_operation, binary, errors, json_body, ok
 from routes.hub_common import spa_url, wants_json
+from schemas import NpmPublishDocument, NpmSearchQuery
 from services import hub
 from services.npm_publish import publish as publish_package
 from services.npm_registry import (
@@ -70,7 +77,7 @@ class _PackageConverter(BaseConverter):
     regex = r"@[^/@]+/[^/@]+|[^/@][^/]*"
 
 
-npm_bp = Blueprint("npm", __name__)
+npm_bp = APIBlueprint("npm", __name__)
 
 
 @npm_bp.record_once
@@ -250,11 +257,11 @@ def _package_url(package: str) -> str:
     return url_for("npm.npm_packument", package=package, _external=True)
 
 
-def _lookup_error(what: str, reason: str | None):
+def _lookup_error(reason: str | None):
     """404 for a genuine miss, 502 for an upstream outage — never a 500."""
     if reason in (None, "notfound", "proxy-disabled"):
-        return jsonify({"error": f"{what} not found"}), 404
-    return jsonify({"error": f"upstream npm registry unavailable: {reason}"}), 502
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"error": "upstream npm registry unavailable"}), 502
 
 
 def _npm_payload() -> dict:
@@ -350,8 +357,9 @@ def npm_ping():
 
 # ── Registry protocol: packuments, manifests, tarballs, search ───────
 
-@npm_bp.route("/npm/-/v1/search")
+@npm_bp.get("/npm/-/v1/search")
 @require_permission(NPM_READ)
+@validate_request()
 @api_operation(
     summary="npm search (/-/v1/search)",
     description=(
@@ -369,14 +377,17 @@ def npm_ping():
         **errors("401", "403", "500"),
     },
 )
-def npm_search():
+def npm_search(query: NpmSearchQuery):
+    # The three values stay strings in the model on purpose: this route has always
+    # *tolerated* a bad `from` (0) and *clamped* a bad `size`, and an `int` field
+    # would turn both into a 400 — see `schemas.NpmSearchQuery`.
     try:
-        offset = int(request.args.get("from", 0))
+        offset = int(query.from_ or 0)
     except (TypeError, ValueError):
         offset = 0
     document = _registry().search(
-        request.args.get("text", ""),
-        size=clamp_search_size(request.args.get("size")),
+        query.text or "",
+        size=clamp_search_size(query.size),
         from_=offset,
         package_url=_package_url,
         publisher=settings.server.server_name,
@@ -414,7 +425,7 @@ def npm_packument(package: str):
         package, tarball_url=_tarball_url, abbreviated=abbreviated,
     )
     if document is None:
-        return _lookup_error(f"package '{package}'", reason)
+        return _lookup_error(reason)
     return jsonify(document)
 
 
@@ -437,12 +448,13 @@ def npm_packument(package: str):
 def npm_version(package: str, version: str):
     manifest = _registry().version_manifest(package, version, tarball_url=_tarball_url)
     if manifest is None:
-        return _lookup_error(f"package '{package}' version '{version}'", "notfound")
+        return _lookup_error("notfound")
     return jsonify(manifest)
 
 
-@npm_bp.route("/npm/<pkg:package>", methods=["PUT"])
+@npm_bp.put("/npm/<pkg:package>")
 @require_permission(NPM_PUBLISH)
+@validate_request()
 @api_operation(
     summary="Publish an npm package (npm publish)",
     description=(
@@ -466,58 +478,23 @@ def npm_version(package: str, version: str):
     parameters=[_PACKAGE_PARAM],
     request_body={
         "required": True,
-        "content": {
-            "application/json": {
-                "schema": {
-                    "type": "object",
-                    "required": ["name", "versions", "_attachments"],
-                    "properties": {
-                        "name": {"type": "string", "description": "`left-pad`, or `@scope/name`"},
-                        "_id": {"type": "string"},
-                        "description": {"type": "string"},
-                        "dist-tags": {
-                            "type": "object",
-                            "additionalProperties": {"type": "string"},
-                            "description": 'Tags to set, e.g. `{"latest": "1.0.0"}`',
-                        },
-                        "versions": {
-                            "type": "object",
-                            "additionalProperties": {"type": "object"},
-                            "description": "Version manifests; each `dist` states shasum/integrity",
-                        },
-                        "_attachments": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "object",
-                                "properties": {
-                                    "content_type": {"type": "string"},
-                                    "length": {"type": "integer"},
-                                    "data": {
-                                        "type": "string",
-                                        "format": "byte",
-                                        "description": "The `.tgz`, base64-encoded",
-                                    },
-                                },
-                            },
-                        },
-                        "access": {"type": ["string", "null"]},
-                    },
-                },
-            }
-        },
+        "description": "npm's publish document — a packument delta plus `_attachments`",
+        "content": json_body("NpmPublishDocument"),
     },
     responses={
         "201": ok("The version(s) were stored", _NPM_PUBLISH_SCHEMA),
         **errors("400", "401", "403", "409", "413"),
     },
 )
-def npm_publish(package: str):
-    document = request.get_json(silent=True, force=True)
-    if document is None:
-        raise BadRequestError("Request body must be a JSON npm publish document")
+def npm_publish(body: NpmPublishDocument, package: str):
+    # `body` is bound by flask-openapi3 from the JSON request body (see
+    # `schemas.NpmPublishDocument`), so the document arrives as a parameter; it
+    # is dumped back to a plain dict, under the wire spellings, for the service
+    # that owns every publish rule. A body that is not a JSON object never gets
+    # this far — the binder answers it with the 400 envelope.
     published = publish_package(
         settings.hub.npm_dir,
-        document,
+        body.model_dump(by_alias=True),
         path_name=package,
         overwrite=settings.storage.overwrite,
         publisher=settings.server.server_name,
@@ -555,7 +532,7 @@ def npm_tarball(package: str, filename: str):
         return send_file(local, mimetype="application/octet-stream", conditional=True)
     path, reason = registry.upstream_tarball(package, filename)
     if path is None:
-        return _lookup_error(f"tarball '{filename}'", reason)
+        return _lookup_error(reason)
     return send_file(path, mimetype="application/octet-stream", conditional=True)
 
 

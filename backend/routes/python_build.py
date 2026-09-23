@@ -103,7 +103,7 @@ def release_page(release_tag: str):
         return "<h1>Python builds not configured</h1>", 404
     files = idx.get_files_for_release(release_tag)
     if files is None:
-        return f"<h1>Release '{release_tag}' not found</h1>", 404
+        return "<h1>Release not found</h1>", 404
     return render_template(
         "python/build_release.html",
         server_name=settings.server.server_name,
@@ -130,7 +130,7 @@ def download(release_tag: str, filename: str):
         return jsonify({"error": "Python builds not configured"}), 404
     f = idx.get_file(release_tag, filename)
     if f is None:
-        return jsonify({"error": f"Build '{filename}' not found in {release_tag}"}), 404
+        return jsonify({"error": "Build not found in that release"}), 404
     builds_dir = Path(settings.storage.python_builds_dir) / release_tag
     resp = send_from_directory(str(builds_dir), filename)
     resp.headers.pop("Content-Encoding", None)
@@ -177,7 +177,7 @@ def sha256(release_tag: str, filename: str):
         return jsonify({"error": "Python builds not configured"}), 404
     f = idx.get_file(release_tag, filename)
     if f is None:
-        return jsonify({"error": f"Build '{filename}' not found"}), 404
+        return jsonify({"error": "Build not found"}), 404
     digest = idx.get_sha256(f)
     return jsonify({"filename": f.filename, "release_tag": f.release_tag, "version": f.version, "sha256": digest, "size": f.size})
 

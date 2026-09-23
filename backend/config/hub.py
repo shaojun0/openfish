@@ -2,7 +2,7 @@
 
 The server started life as a Python-only package index.  It is now growing into
 an intranet artifact hub with a handful of sibling catalogs, each backed by a
-directory on disk (or a small JSON file) rather than a database:
+directory on disk rather than a database:
 
 * ``tools_dir``    — a directory tree whose sub-directories are *categories*
   and whose files are the downloadable tools themselves.
@@ -17,30 +17,31 @@ directory on disk (or a small JSON file) rather than a database:
   snippets an offline host needs.
 * ``debian_dir``   — local ``.deb`` files plus the ``sources.list`` snippet for
   the intranet mirror.
-* ``models_file``  — the JSON description of the model routes a downstream
-  DSH deployment may point at.
 
-Everything is deliberately file-based and configuration-driven: adding a tool
-is ``cp``-ing a file into ``tools/<category>/``, and adding a model route is
-editing one JSON file.  No schema migration, no restart.
+Model routing is the one catalog that is **not** here: it is a table
+(``model_routes``), because an administrator edits it from the panel and a
+downstream DSH reads it with real credentials.  See
+:mod:`services.model_routes`.
+
+Everything below is deliberately file-based and configuration-driven: adding a
+tool is ``cp``-ing a file into ``tools/<category>/``.  No schema migration, no
+restart.
 """
 
 from __future__ import annotations
 
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from config.base import EnvSettings
 from config.paths import backend_path, catalog_path
 
 
-class HubConfig(BaseSettings):
-    # Flat .env names (TOOLS_DIR, NPM_DIR, MODELS_FILE, ...) work as well as
-    # the nested HUB__* form — see ServerConfig.model_config.
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
+class HubConfig(EnvSettings):
+    """The artifact catalogs, their upstreams and their caches.
+
+    Flat .env names (``TOOLS_DIR``, ``NPM_DIR``, ``DOCS_DIR``, …) work as well as
+    the nested ``HUB__*`` form; see :class:`config.base.EnvSettings`.
+    """
 
     tools_dir: str = Field(
         default=catalog_path("tools"),
@@ -272,26 +273,6 @@ class HubConfig(BaseSettings):
             "plan. Off by default: a mirror's job is to satisfy `Depends`/"
             "`Pre-Depends`, and following recommends turns a small update into a "
             "large fraction of the archive."
-        ),
-    )
-    models_file: str = Field(
-        default=backend_path("config", "model_routes.json"),
-        description=(
-            "JSON file describing the model routes for downstream DSH. Read by "
-            "everyone holding `model:read`; written by administrators holding "
-            "`model:write` through the routing panel, so the file (and the "
-            "directory holding it) must be writable by the server process. "
-            "Each route is classified by `provider` (wire format) and `kind` "
-            "(model function — chat / completion / embedding / rerank / ocr / "
-            "asr / tts)."
-        ),
-    )
-    model_health_file: str = Field(
-        default=backend_path("data", "model_health.json"),
-        description=(
-            "Where the result of the last connectivity probe of each model "
-            "route is remembered, keyed by route name. Kept out of models_file "
-            "so the document downstream DSH reads stays a pure route table."
         ),
     )
     model_probe_timeout: float = Field(

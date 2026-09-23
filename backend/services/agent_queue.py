@@ -73,6 +73,8 @@ from sqlalchemy import and_, create_engine, event, func, select, update
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session, aliased
 
+from config import settings
+from config.agent import AgentConfig
 from models.agent_hub import TASK_KIND, TASK_STATUS, AgentTask, RepoRunner
 
 logger = logging.getLogger("cpypiserver.agent_queue")
@@ -89,11 +91,6 @@ DEFAULT_LEASE_SECONDS = 60.0
 #: (``base * 2**attempts``) and capped.  Prevents a broken task from spinning.
 DEFAULT_BACKOFF_SECONDS = 30.0
 MAX_BACKOFF_SECONDS = 900.0
-
-#: The fallback database when neither ``--db`` nor ``DATABASE_URL`` is set —
-#: the same file ``config`` defaults to, so `python -m services.agent_queue`
-#: outside Docker hits the deployment's own database.
-DEFAULT_SQLITE_PATH = "data/cpypiserver.db"
 
 #: Statuses that count as "this work is still pending".  Producer-side dedup and
 #: the per-repo in-flight ceiling both look at exactly this set.
@@ -115,16 +112,13 @@ RUNNING_TASK_STATUSES: tuple[str, ...] = ("leased", "running")
 #: (the library default) means unlimited; a deployment sets a small number so one
 #: noisy repository cannot fill the single global queue and starve the rest.  A
 #: repository whose runner sets ``max_concurrency > 0`` overrides this value.
-ENV_MAX_IN_FLIGHT_PER_REPO = "AGENT_MAX_IN_FLIGHT_PER_REPO"
+#: The name comes from the settings model rather than being re-typed here.
+ENV_MAX_IN_FLIGHT_PER_REPO = AgentConfig.env_name("max_in_flight_per_repo")
 
 
 def configured_max_in_flight_per_repo() -> int:
-    """``AGENT_MAX_IN_FLIGHT_PER_REPO`` as a non-negative integer (0 = no cap)."""
-    try:
-        value = int(os.environ.get(ENV_MAX_IN_FLIGHT_PER_REPO, "") or 0)
-    except ValueError:
-        return 0
-    return max(0, value)
+    """The configured per-repository in-flight ceiling (0 = no cap)."""
+    return max(0, int(settings.agent.max_in_flight_per_repo))
 
 
 def _runner_runnable():
@@ -333,17 +327,19 @@ def worker_id() -> str:
 def resolve_database_url(database: str | None = None) -> str:
     """Turn ``--db`` / ``DATABASE_URL`` into a SQLAlchemy URL.
 
-    Deliberately narrower than ``extensions.database.resolve_database_url``: it
-    resolves the two inputs the CLI has and stops, because importing
-    ``config.settings`` here would make the queue unusable without the app's
-    environment (and would drag pydantic-settings into the gate).  The rules are
-    the same: a bare path is SQLite, ``postgres://`` is upgraded to the psycopg
-    driver this project ships, anything with an explicit driver is left alone.
+    Deliberately narrower than ``extensions.database.resolve_database_url``: that
+    module imports the auth stack and the ORM session, so importing it here would
+    make the queue CLI depend on the whole application.  The *rules* are the
+    same because the *source* is the same — both read ``settings.storage``, so
+    the CLI and the server can no longer disagree about which database they mean
+    (the CLI used to read the raw environment while the server read ``.env``).
+    A bare path is SQLite, ``postgres://`` is upgraded to the psycopg driver this
+    project ships, anything with an explicit driver is left alone.
     """
-    raw = (database if database is not None else os.environ.get("DATABASE_URL", "")) or ""
-    value = raw.strip()
+    configured = database if database is not None else settings.storage.database_url
+    value = (configured or "").strip()
     if not value:
-        return f"sqlite:///{DEFAULT_SQLITE_PATH}"
+        return f"sqlite:///{settings.storage.api_keys_file}"
     if "://" not in value:
         return f"sqlite:///{value}"
     if value.startswith("postgres://"):
@@ -493,7 +489,7 @@ class AgentQueue:
         the queue — but a retry storm from one producer collapses to one row.
         """
         if kind not in TASK_KIND:
-            raise ValueError(f"unknown task kind {kind!r}; expected one of {TASK_KIND}")
+            raise ValueError(f"unknown task kind {kind}; expected one of {TASK_KIND}")
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
         key = str(dedup_key or "").strip()
@@ -1202,7 +1198,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--db", default=None,
         help=(
             "SQLite file path or SQLAlchemy URL.  Defaults to DATABASE_URL, or "
-            f"the SQLite file {DEFAULT_SQLITE_PATH} when that is unset."
+            f"the SQLite file {settings.storage.api_keys_file} when that is unset."
         ),
     )
     parser.add_argument("--echo", action="store_true", help="Log every SQL statement.")

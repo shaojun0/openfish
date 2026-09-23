@@ -155,7 +155,7 @@ def check_decorator_order() -> list[str]:
                 rel = path.relative_to(REPO_ROOT)
                 problems.append(
                     f"{rel}:{node.lineno} {node.name}() — "
-                    f"{names[misordered[0]]!r} is written above the route decorator, "
+                    f"{names[misordered[0]]} is written above the route decorator, "
                     f"so it is applied after registration and never runs. "
                     f"Move it below @{names[topmost_route]}."
                 )
@@ -205,7 +205,7 @@ def check_endpoints_deny_anonymous() -> list[str]:
         if status not in DENIED:
             problems.append(
                 f"{method} {path} returned {status} without credentials "
-                f"(endpoint {endpoint!r}). Either attach a guard, or declare it "
+                f"(endpoint {endpoint}). Either attach a guard, or declare it "
                 f"public with @api_operation(security=[]) / add it to PUBLIC_ENDPOINTS."
             )
 

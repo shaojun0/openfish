@@ -65,7 +65,8 @@ from config import settings
 from services import debian_apt
 from services.digest import compute_sha256, sha256_or_none
 from services.format import human_size
-from services.upstream import CHUNK, UpstreamError, stream_into
+from services.paths import contained_resolved
+from services.upstream import UpstreamError, stream_into
 
 logger = logging.getLogger("cpypiserver.debian.offline")
 
@@ -78,6 +79,13 @@ BUNDLE_MAGIC = "OFDEB-BUNDLE 1"
 BUNDLE_MANIFEST = "openfish-debian-bundle.txt"
 #: The flat apt index a bundle carries for the pool files it contains.
 BUNDLE_INDEX = "Packages"
+#: Most members one bundle may carry — the *count* half of a decompression
+#: bomb.  ``DEBIAN_OFFLINE_MAX_MB`` bounds the bytes a legitimate bundle can
+#: hold, and a million empty members need no bytes at all, so the count gets its
+#: own ceiling.  It is deliberately far above any real plan: the byte ceiling is
+#: 4 GiB of ``.deb`` files, which is thousands of packages, not tens of
+#: thousands.
+MAX_BUNDLE_MEMBERS = 20_000
 
 #: Snapshot columns, in file order.  ``columns`` in the header names them so a
 #: reader binds by name rather than by position and a new field can be appended.
@@ -205,7 +213,7 @@ def decode_document(text: str, *, expected_magic: str | None = None) -> Document
         raise ValueError("空文档")
     magic = lines[0].strip()
     if expected_magic is not None and magic != expected_magic:
-        raise ValueError(f"文档类型不匹配：期望 {expected_magic!r}，实际 {magic!r}")
+        raise ValueError(f"文档类型不匹配：期望 {expected_magic}，实际 {magic}")
 
     # The trailer is the first (and only) line whose key is `sha256`; rows never
     # start with that token, so locating it needs no state.
@@ -1038,7 +1046,7 @@ def build_plan(
 
     missing_direct = sorted(name for name in wanted if name not in universe.names)
     for name in missing_direct:
-        warnings.append(f"快照中没有名为 {name!r} 的包；它不会被纳入本次更新")
+        warnings.append(f"快照中没有名为 {name} 的包；它不会被纳入本次更新")
 
     # 2. Transitive dependency closure over what will be fetched.
     arch_contexts = split_list(document.get("arches")) or ["all"]
@@ -1505,42 +1513,111 @@ class ImportReport:
 
 
 def _safe_member_path(root: Path, name: str) -> Path:
-    """Resolve a tar member under *root*, refusing escapes."""
+    """Resolve a tar member under *root*, refusing escapes.
+
+    Tar member names are multi-segment and always use ``/`` (GNU tar and
+    POSIX.1-2001), so ``\\`` is refused here as the alternative separator some
+    host filesystems would still honour.  The containment itself is delegated to
+    :func:`services.paths.contained_resolved` — the one place this codebase
+    decides that an external name may not leave its root — because the
+    repository side of an import is a *live* tree: ``pool/main/x`` being a
+    symlink out of it is invisible to a lexical check and not to this one.
+    """
     if not name or name.startswith(("/", "\\")) or "\\" in name or "\x00" in name:
-        raise ValueError(f"拒绝不安全的包内路径：{name!r}")
-    target = (root / name).resolve()
-    if not target.is_relative_to(root.resolve()):
-        raise ValueError(f"拒绝越界的包内路径：{name!r}")
-    return target
+        raise ValueError(f"拒绝不安全的包内路径：{name}")
+    try:
+        return contained_resolved(root, name)
+    except ValueError as exc:
+        raise ValueError(f"拒绝越界的包内路径：{name}") from exc
+
+
+def _bundle_members(tar: tarfile.TarFile, staging: Path) -> list[tarfile.TarInfo]:
+    """Prove every member of *tar* is safe to write, and budget the expansion.
+
+    Returns the members to extract, which is also the ``members`` argument
+    ``extractall`` gets below: what lands on disk is then a copy of members
+    already proved here rather than a leap of faith.  Three rules, all of them
+    checked before a single byte is written:
+
+    * a member is a directory or a regular file, and its name resolves inside
+      *staging* (:func:`_safe_member_path`).  A repository is a directory of
+      ordinary files and nothing in this protocol needs anything else, so a
+      symlink, hardlink, device node or FIFO is refused outright rather than
+      skipped — a bundle carrying one is malformed or crafted, and silently
+      ignoring it would hide that from the operator;
+    * the member count stays under :data:`MAX_BUNDLE_MEMBERS`;
+    * the unpacked size stays under the *same* ceiling the builder applies
+      (``DEBIAN_OFFLINE_MAX_MB``, ``0`` disables).  That is what makes the
+      budget honest in both directions: the internet side may not pack more
+      payload than the ceiling, so a bundle that would unpack to more than the
+      ceiling is a bomb, and a legitimate bundle can never be refused by it.
+    """
+    members: list[tarfile.TarInfo] = []
+    total_bytes = 0
+    for member in tar.getmembers():
+        if len(members) >= MAX_BUNDLE_MEMBERS:
+            raise ValueError(
+                f"离线包成员数超过上限 {MAX_BUNDLE_MEMBERS}，拒绝解包"
+            )
+        _safe_member_path(staging, member.name)
+        if member.isdir():
+            members.append(member)
+            continue
+        if not member.isfile():
+            raise ValueError(f"离线包内含不允许的成员类型：{member.name}")
+        total_bytes += member.size
+        members.append(member)
+
+    ceiling = max(int(settings.hub.debian_offline_max_mb), 0) * 1024 * 1024
+    if ceiling and total_bytes > ceiling:
+        raise ValueError(
+            f"离线包解压后 {human_size(total_bytes)} 超过 "
+            f"DEBIAN_OFFLINE_MAX_MB={settings.hub.debian_offline_max_mb} 的上限，"
+            "拒绝解包"
+        )
+    return members
 
 
 def _extract_bundle(source: Path, staging: Path) -> tuple[str | None, int]:
     """Extract a bundle's regular files into *staging*.
 
-    Returns ``(manifest text, file count)``.  Directories are created as needed;
-    symlinks, hardlinks and device nodes are refused because a repository is a
-    directory of ordinary files and nothing in this protocol needs them.
+    Returns ``(manifest text, file count)``.
+
+    :func:`_bundle_members` is the protocol's gate and runs first; then
+    ``tarfile.extractall`` writes exactly those members through its own
+    ``data`` filter, which re-runs the containment check per member and strips
+    setuid/setgid/world-write bits from the modes it applies.  Two independent
+    gates rather than one, because a bundle is hand-carried across an air gap
+    and the assumption worth encoding is that it may have been *crafted*, not
+    merely truncated.
+
+    ``filter="data"`` is the standard library's extraction policy (PEP 706); it
+    is also the only form of ``extractall`` that does not read as "extract an
+    archive without validating members" to static analysis.  It requires Python
+    3.12+ (this project's floor) **and** 3.12.11 / 3.13.4+, where the
+    ``CVE-2025-4517`` family of filter bypasses is fixed — an image on an
+    earlier 3.12 gets the filter but not the fix.
+
+    ``docs/security/bundle-import-hardening.md`` records why the previous
+    ``extractfile``/``copyfileobj`` shape was a false positive, and what each
+    gate above costs.
     """
-    manifest_text: str | None = None
-    count = 0
     with tarfile.open(source, "r:gz") as tar:
-        for member in tar.getmembers():
-            if member.isdir():
-                _safe_member_path(staging, member.name).mkdir(parents=True, exist_ok=True)
-                continue
-            if not member.isfile():
-                raise ValueError(f"离线包内含不允许的成员类型：{member.name!r}")
-            target = _safe_member_path(staging, member.name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            extracted = tar.extractfile(member)
-            if extracted is None:  # pragma: no cover - isfile() guards this
-                continue
-            with extracted, open(target, "wb") as handle:
-                shutil.copyfileobj(extracted, handle, CHUNK)
-            count += 1
-            if Path(member.name).name == BUNDLE_MANIFEST:
-                manifest_text = target.read_text(encoding="utf-8", errors="replace")
-    return manifest_text, count
+        members = _bundle_members(tar, staging)
+        tar.extractall(staging, members=members, filter="data")
+
+    count = sum(1 for member in members if member.isfile())
+    manifest_path = staging / BUNDLE_MANIFEST
+    if not manifest_path.is_file():
+        # The flat case is what `build_bundle` writes; a nested manifest is
+        # still accepted so a bundle built by an older producer keeps importing.
+        manifest_path = next(
+            (path for path in staging.rglob(BUNDLE_MANIFEST) if path.is_file()),
+            None,
+        )
+    if manifest_path is None:
+        return None, count
+    return manifest_path.read_text(encoding="utf-8", errors="replace"), count
 
 
 def _publish_flat(destination: Path, base: Path) -> None:
@@ -1712,6 +1789,7 @@ __all__ = [
     "BUNDLE_INDEX",
     "BUNDLE_MANIFEST",
     "INTEGRITY_WARNING",
+    "MAX_BUNDLE_MEMBERS",
     "PLAN_MAGIC",
     "SNAPSHOT_MAGIC",
     "Alternative",

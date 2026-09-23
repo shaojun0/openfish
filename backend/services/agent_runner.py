@@ -54,6 +54,12 @@ from typing import Any, Callable, Iterable, Literal, Mapping, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from config import settings
+from config.agent import (
+    DEFAULT_MAX_FINDINGS,
+    DEFAULT_RETENTION_SECONDS,
+    DEFAULT_WORK_ROOT,
+)
 from services.check_curator import CuratorReport, proposal_body, proposal_title
 from services.check_suite import (
     CHECK_DIR_RELPATH,
@@ -75,7 +81,6 @@ from services.digest import sha256_text
 from services.fileio import write_json
 from services.format import utc_now_iso
 from services.gates import (
-    DEFAULT_GATE_TIMEOUT,
     SOURCE_AGENT_CHECKS,
     STATUS_UNVERIFIED,
     CheckSuite,
@@ -127,18 +132,6 @@ RESULT_FILENAME = "result.json"
 AGENTS_FILENAME = "AGENTS.md"
 POLICY_RELPATH = Path(".agent") / "review-policy.yml"
 
-#: Environment variable names the platform may set; these are the S4 slice's
-#: knobs and are documented for promotion into ``config/hub.py``.
-ENV_WORK_ROOT = "AGENT_WORK_ROOT"
-ENV_WORK_RETENTION = "AGENT_WORK_RETENTION_SECONDS"
-ENV_GATE_TIMEOUT = "AGENT_GATE_TIMEOUT"
-ENV_MAX_FINDINGS = "AGENT_MAX_FINDINGS"
-#: §9.3 step 6 / result-gated PR creation knobs.  ``pr_policy`` may also come
-#: from ``.agent/review-policy.yml`` (``defaults.pr_policy``); the environment
-#: is the deployment-wide override.
-ENV_PR_POLICY = "AGENT_PR_POLICY"
-ENV_AUTO_FIX = "AGENT_AUTO_FIX"
-
 #: Values ``pr_policy`` accepts.  Deliberately duplicated (not imported) from
 #: ``services.review_policy``: the runner must stay importable in the offline
 #: gate without a policy file, and these are the runner's own contract.
@@ -147,11 +140,6 @@ PR_POLICY_ALWAYS = "always"
 PR_POLICY_NEVER = "never"
 PR_POLICIES: tuple[str, ...] = (PR_POLICY_ON_GREEN, PR_POLICY_ALWAYS, PR_POLICY_NEVER)
 DEFAULT_PR_POLICY = PR_POLICY_ON_GREEN
-
-#: Defaults mirroring §9.2 (``/work/<task_id>``, 24h) and §9.4 (120s).
-DEFAULT_WORK_ROOT = "/work"
-DEFAULT_RETENTION_SECONDS = 24 * 60 * 60
-DEFAULT_MAX_FINDINGS = 50
 
 #: Marker written when a task ends; ``sweep_workdirs`` only ever removes a
 #: directory that carries one, so an in-flight task is never swept.
@@ -199,14 +187,14 @@ def assert_pushable(branch: str) -> str:
     plain = name[len("refs/heads/"):] if name.startswith("refs/heads/") else name
     if plain in PROTECTED_BRANCHES:
         raise ProtectedBranchError(
-            f"禁止推送保护分支 {plain!r}（I4：只能推 {AGENT_BRANCH_PREFIX}* 分支并开 PR）"
+            f"禁止推送保护分支 {plain}（I4：只能推 {AGENT_BRANCH_PREFIX}* 分支并开 PR）"
         )
     if not name.startswith(AGENT_BRANCH_PREFIX):
         raise ProtectedBranchError(
-            f"只允许推送 {AGENT_BRANCH_PREFIX}* 前缀分支，得到 {name!r}（I4）"
+            f"只允许推送 {AGENT_BRANCH_PREFIX}* 前缀分支，得到 {name}（I4）"
         )
     if any(ch in _FORBIDDEN_BRANCH_CHARS or ord(ch) < 0x20 for ch in name):
-        raise ProtectedBranchError(f"分支名含非法字符：{name!r}")
+        raise ProtectedBranchError(f"分支名含非法字符：{name}")
     if (
         ".." in name
         or "@{" in name
@@ -214,9 +202,9 @@ def assert_pushable(branch: str) -> str:
         or name.endswith("/")
         or name.endswith(".lock")
     ):
-        raise ProtectedBranchError(f"分支名不是合法的 git ref：{name!r}")
+        raise ProtectedBranchError(f"分支名不是合法的 git ref：{name}")
     if not _BRANCH_RE.match(name):
-        raise ProtectedBranchError(f"分支名不符合 {AGENT_BRANCH_PREFIX}<name> 形式：{name!r}")
+        raise ProtectedBranchError(f"分支名不符合 {AGENT_BRANCH_PREFIX}<name> 形式：{name}")
     return name
 
 
@@ -365,7 +353,7 @@ def workdir_for(root: str | Path, task_id: str, attempt: int = 0) -> Path:
         or "\\" in component
         or any(ord(ch) < 0x20 for ch in component)
     ):
-        raise AgentRunnerError(f"非法任务 id：{task_id!r}")
+        raise AgentRunnerError(f"非法任务 id：{task_id}")
     if int(attempt) > 0:
         component = f"{component}-attempt{int(attempt)}"
     return Path(root) / component
@@ -434,7 +422,7 @@ def _epoch(now: float | int | None) -> float:
     timestamp = getattr(now, "timestamp", None)
     if callable(timestamp):
         return float(timestamp())
-    raise AgentRunnerError(f"无法理解的时间参数：{now!r}")
+    raise AgentRunnerError(f"无法理解的时间参数：{now}")
 
 
 def sweep_workdirs(
@@ -479,36 +467,26 @@ def remove_workdirs(paths: Iterable[Path]) -> int:
     return removed
 
 
-# ── Configuration (promote these into config/hub.py, see S4.md) ──────
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, "") or default)
-    except ValueError:
-        return default
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, "") or default)
-    except ValueError:
-        return default
-
+# ── Configuration (owned by config/agent.py) ─────────────────────────
 
 def configured_work_root() -> Path:
-    return Path(os.environ.get(ENV_WORK_ROOT) or DEFAULT_WORK_ROOT)
+    """The configured ``AGENT_WORK_ROOT`` — where each task gets its checkout."""
+    return Path(settings.agent.work_root)
 
 
 def configured_retention_seconds() -> int:
-    return _env_int(ENV_WORK_RETENTION, DEFAULT_RETENTION_SECONDS)
+    """How long a finished work directory is kept before :func:`sweep_workdirs`."""
+    return int(settings.agent.work_retention_seconds)
 
 
 def configured_gate_timeout() -> float:
-    return _env_float(ENV_GATE_TIMEOUT, DEFAULT_GATE_TIMEOUT)
+    """The per-gate wall-clock budget, in seconds."""
+    return float(settings.agent.gate_timeout)
 
 
 def configured_max_findings() -> int:
-    return _env_int(ENV_MAX_FINDINGS, DEFAULT_MAX_FINDINGS)
+    """The deployment-wide ceiling on findings per run."""
+    return int(settings.agent.max_findings)
 
 
 # ── Result-gated PR policy (§9.3 step 6) ─────────────────────────────
@@ -528,16 +506,19 @@ def normalize_pr_policy(value: Any) -> str | None:
 
 
 def configured_pr_policy() -> str | None:
-    """``AGENT_PR_POLICY`` when it names a known policy, else ``None``."""
-    return normalize_pr_policy(os.environ.get(ENV_PR_POLICY))
+    """The deployment-wide ``AGENT_PR_POLICY``, when it names a known policy.
+
+    ``None`` (the default) means the setting is unset — the per-repository
+    ``.agent/review-policy.yml`` then decides, which is what a mixed deployment
+    wants.  An unrecognised value is logged and treated as unset by
+    :func:`normalize_pr_policy`, never guessed at.
+    """
+    return normalize_pr_policy(settings.agent.pr_policy)
 
 
 def configured_auto_fix() -> bool | None:
     """``AGENT_AUTO_FIX`` as an optional boolean; ``None`` when unset."""
-    raw = os.environ.get(ENV_AUTO_FIX)
-    if raw is None or not str(raw).strip():
-        return None
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    return settings.agent.auto_fix
 
 
 def _failed_gate_names(gates: Sequence[GateEntry]) -> list[str]:
@@ -574,7 +555,7 @@ def select_route(
             }
             if route in names:
                 return item
-        raise AgentRunnerError(f"模型路由表里找不到 {route!r}")
+        raise AgentRunnerError(f"模型路由表里找不到 {route}")
     return enabled[0]
 
 
@@ -613,13 +594,18 @@ def build_model_env(
 
 
 def resolve_model_env(
-    models_file: str | Path,
+    session: Any,
     *,
     route: str | None = None,
-    health_path: str | Path | None = None,
 ) -> dict[str, str]:
-    """Read the route table through ``model_routes.resolve`` and build the env."""
-    table = resolve(models_file, health_path=health_path)
+    """Read the route table through ``model_routes.resolve`` and build the env.
+
+    *session* is a SQLAlchemy session (or the app's ``scoped_session``) — the
+    route table is the ``model_routes`` table, so a caller that has no database
+    has no route table either and should pass a pre-resolved ``model_env`` to
+    :class:`AgentRunner` instead of calling this.
+    """
+    table = resolve(session)
     chosen = select_route(table.get("routes") or [], route=route)
     return build_model_env(chosen)
 
@@ -1710,9 +1696,8 @@ class AgentRunner:
         adapter: RunnerAdapter | None = None,
         sink: TaskSink | None = None,
         work_root: str | Path | None = None,
-        models_file: str | Path | None = None,
+        model_session: Any | None = None,
         model_route: str | None = None,
-        health_path: str | Path | None = None,
         model_env: Mapping[str, str] | None = None,
         gate_timeout: float | None = None,
         retention_seconds: int | None = None,
@@ -1754,7 +1739,7 @@ class AgentRunner:
             bool(auto_fix) if auto_fix is not None else configured_auto_fix()
         )
         self._model_env: dict[str, str] = self._resolve_model_env(
-            models_file, model_route=model_route, health_path=health_path, fallback=model_env
+            model_session, model_route=model_route, fallback=model_env
         )
         # The model credential plus whatever the adapter holds (its git token):
         # the token rides in the git subprocess environment, so it must be in the
@@ -1770,18 +1755,19 @@ class AgentRunner:
 
     @staticmethod
     def _resolve_model_env(
-        models_file: str | Path | None,
+        model_session: Any | None,
         *,
         model_route: str | None,
-        health_path: str | Path | None,
         fallback: Mapping[str, str] | None,
     ) -> dict[str, str]:
         if fallback is not None:
             return {str(key): str(value) for key, value in fallback.items()}
-        if models_file is None:
+        if model_session is None:
+            # No session, no route table: a caller that wants a model env from
+            # the database passes one (or hands over ``model_env`` directly).
             return {}
         try:
-            return resolve_model_env(models_file, route=model_route, health_path=health_path)
+            return resolve_model_env(model_session, route=model_route)
         except Exception as exc:
             # A broken route table must not fail the task before it starts; the
             # review step will fail loudly if it actually needed a model.
@@ -2479,8 +2465,6 @@ __all__ = [
     "DEFAULT_PR_POLICY",
     "DEFAULT_RETENTION_SECONDS",
     "DEFAULT_WORK_ROOT",
-    "ENV_AUTO_FIX",
-    "ENV_PR_POLICY",
     "FINISHED_MARKER",
     "MODEL_ENV_PREFIX",
     "POLICY_RELPATH",

@@ -410,7 +410,7 @@ def enqueue_task(
     action = QueuedAction(kind=kind, repo_id=repo_id, priority=priority,
                           payload=payload, dedup_key=dedup_key)
     if kind not in TASK_KIND:
-        action.reason = f"未知任务类型 {kind!r}（TASK_KIND={TASK_KIND}）"
+        action.reason = f"未知任务类型（TASK_KIND={TASK_KIND}）"
         logger.warning("webhook will not queue %s for repo %s: %s",
                        kind, repo_id, action.reason)
         return action
@@ -433,7 +433,7 @@ def enqueue_task(
             logger.info("webhook suppressed %s for repo %s: %s",
                         kind, repo_id, action.reason)
     except Exception as exc:  # noqa: BLE001 - a queue fault must not 500 a webhook
-        action.reason = f"{type(exc).__name__}: {exc}"
+        action.reason = type(exc).__name__
         logger.exception("webhook could not queue %s for repo %s", kind, repo_id)
     return action
 
@@ -577,7 +577,7 @@ def plan_actions(
                 "trigger": "issue-label",
                 "sender": event.sender,
             },
-            reason=f"issue carries the {AGENT_LABEL!r} label",
+            reason=f"issue carries the {AGENT_LABEL} label",
             dedup_key=f"issue:{event.issue_number}" if event.issue_number else "",
         ))
         return actions
@@ -757,7 +757,7 @@ _WEBHOOK_SCHEMA = {
 
 
 def _secret() -> str:
-    return ImportConfig.from_env().webhook_secret
+    return ImportConfig.from_settings().webhook_secret
 
 
 def _session():
@@ -1000,7 +1000,7 @@ def forgejo_webhook():
             "queued": [],
             "findings_updated": 0,
             "note": (
-                f"平台没有镜像仓库 {event.forgejo_repo or event.repo_slug!r}；"
+                "平台没有镜像仓库；"
                 "先用 POST /api/v1/repos/import 导入（返回 200 以免 Forgejo 反复重试）"
             ),
         })

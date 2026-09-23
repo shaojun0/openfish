@@ -354,7 +354,7 @@ def check_seed_points() -> list[str]:
     builtin = set(P.BUILTIN)
     unknown = sorted(code for code in _AUTHENTICATED_SEED if code not in builtin)
     return [
-        f"services.authz._AUTHENTICATED_SEED grants {code!r}, which is not in "
+        f"services.authz._AUTHENTICATED_SEED grants {code}, which is not in "
         f"auth.permissions.BUILTIN."
         for code in unknown
     ]

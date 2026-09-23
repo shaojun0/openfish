@@ -499,12 +499,12 @@ def validate_document(
     moment = _today(today)
     if document.defaults.pr_policy not in PR_POLICIES:
         raise PolicyValidationError(
-            f"defaults.pr_policy={document.defaults.pr_policy!r}; "
+            f"defaults.pr_policy={document.defaults.pr_policy}; "
             f"expected one of {', '.join(PR_POLICIES)}"
         )
     if document.defaults.curator not in CURATOR_MODES:
         raise PolicyValidationError(
-            f"defaults.curator={document.defaults.curator!r}; "
+            f"defaults.curator={document.defaults.curator}; "
             f"expected one of {', '.join(CURATOR_MODES)}"
         )
     known = {entry.id for entry in document.rules}
@@ -517,30 +517,30 @@ def validate_document(
             )
         if exception.status not in EXCEPTION_STATUSES:
             raise PolicyValidationError(
-                f"exceptions[{index}] ({exception.rule}) has status={exception.status!r}; "
+                f"exceptions[{index}] ({exception.rule}) has status={exception.status}; "
                 f"expected one of {', '.join(EXCEPTION_STATUSES)}"
             )
         if exception.rule not in known:
             warnings.append(
-                f"exceptions[{index}] references rule {exception.rule!r}, which this "
+                f"exceptions[{index}] references rule {exception.rule}, which this "
                 "policy does not define (unknown rule — the exception is inert "
                 "until the rule exists)"
             )
     seen: set[str] = set()
     for entry in document.rules:
         if entry.id in seen:
-            raise PolicyValidationError(f"rules declares {entry.id!r} more than once")
+            raise PolicyValidationError(f"rules declares {entry.id} more than once")
         seen.add(entry.id)
         if entry.level not in LEVELS:
             raise PolicyValidationError(
-                f"rules[{entry.id}].level={entry.level!r}; expected one of {', '.join(LEVELS)}"
+                f"rules[{entry.id}].level={entry.level}; expected one of {', '.join(LEVELS)}"
             )
     check_ids: set[str] = set()
     for index, check in enumerate(document.checks):
         if not check.id.strip():
             raise PolicyValidationError(f"checks[{index}] has an empty id")
         if check.id in check_ids:
-            raise PolicyValidationError(f"checks declares {check.id!r} more than once")
+            raise PolicyValidationError(f"checks declares {check.id} more than once")
         check_ids.add(check.id)
         if not check.command.strip():
             raise PolicyValidationError(f"checks[{check.id}].command is empty")

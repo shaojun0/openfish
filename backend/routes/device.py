@@ -300,6 +300,14 @@ def device_code():
     },
 )
 def device_token():
+    # Deliberately *not* bound as a view parameter, unlike every other JSON body
+    # in this tree: this route's 400 body is part of the device-flow protocol
+    # (`DeviceTokenError` — `{"error": …, "error_description": …}`, which
+    # `integrations/dsh-plugin-enterprise-intranet` renders to the user), and
+    # binding `DeviceTokenRequest` would answer a malformed poll with the generic
+    # `{"validation_error": {"body_params": […]}}` envelope instead.  The
+    # `schemas.DeviceTokenRequest` model still describes the body in
+    # `/openapi.json`; `scripts/check_request_binding.py` records the exemption.
     payload = request.get_json(silent=True) or {}
     device_code_value = str(payload.get("device_code") or "").strip()
     if not device_code_value:

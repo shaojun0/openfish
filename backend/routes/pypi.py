@@ -13,7 +13,7 @@ from flask import (
     Response, current_app, g,
     render_template, request, send_from_directory, url_for,
 )
-from flask_openapi3 import APIBlueprint
+from flask_openapi3 import APIBlueprint, validate_request
 
 from auth.decorators import require_permission
 from auth.permissions import PACKAGE_READ, PACKAGE_WRITE
@@ -22,7 +22,7 @@ from errors import BadRequestError, PackageNotFoundError, UploadConflictError
 from index.base import store_digest
 from index.packages import normalize_package_name
 from openapi import api_operation, binary, errors, ref
-from schemas import FormatQuery, SimpleProjectPath
+from schemas import FormatQuery, PyPIUploadForm, SimpleProjectPath
 from services.paths import contained
 from services.validation import validate_file
 
@@ -43,6 +43,7 @@ _JSON_ACCEPT = "application/vnd.pypi.simple.v1+json"
 
 @pypi_bp.get("/simple/")
 @require_permission(PACKAGE_READ)
+@validate_request()
 @api_operation(
     summary="Simple repository index (PEP 503 / PEP 691)",
     description=(
@@ -74,6 +75,7 @@ def simple_index(query: FormatQuery):
 
 @pypi_bp.get("/simple/<package_name>/")
 @require_permission(PACKAGE_READ)
+@validate_request()
 @api_operation(
     summary="Files of one project",
     description=(
@@ -159,9 +161,10 @@ def serve_package_from_simple(package_name: str, filename: str):
     return resp
 
 
-@pypi_bp.route("/", methods=["POST"])
-@pypi_bp.route("/legacy/", methods=["POST"])
+@pypi_bp.post("/")
+@pypi_bp.post("/legacy/")
 @require_permission(PACKAGE_WRITE)
+@validate_request()
 @api_operation(
     summary="Upload a distribution (twine)",
     description=(
@@ -169,12 +172,17 @@ def serve_package_from_simple(package_name: str, filename: str):
         "--username __token__ --password <API-key> dist/*` speaks exactly this "
         "endpoint.\n\n"
         "The file is validated before it is stored: extension allow-list, MIME "
-        "sniffing, executable-signature scan, archive structure (a wheel must "
-        "contain `WHEEL` and `METADATA` in its `.dist-info`), and an optional "
-        "ClamAV scan. SHA-256 is computed while streaming to a temporary file, so "
-        "the whole body is never held in memory."
+        "sniffing, a wheel's own `RECORD` hashes (or a source distribution's "
+        "PEP 625 filename), an archive-safety check plus a GuardDog malware scan "
+        "of the extracted contents, and an optional ClamAV scan. SHA-256 is "
+        "computed while streaming to a temporary file, so the whole body is "
+        "never held in memory."
     ),
     tags=["Upload"],
+    # The contract below is the whole twine wire format; `schemas.PyPIUploadForm`
+    # binds the one part the server acts on (`content`).  Kept separate on
+    # purpose: this is what a client may send, the model is what is read, and the
+    # remaining fields are documented rather than bound.
     request_body={
         "required": True,
         "content": {
@@ -207,11 +215,23 @@ def serve_package_from_simple(package_name: str, filename: str):
         **errors("400", "401", "409", "413"),
     },
 )
-def upload():
-    if "content" not in request.files:
-        raise BadRequestError("Missing 'content' field")
-    file = request.files["content"]
-    if not file or not file.filename:
+def upload(form: PyPIUploadForm):
+    # `form` is filled by flask-openapi3 from the multipart body, so the file part
+    # arrives as a view parameter instead of a `request.files[...]` lookup.  A body
+    # without the `content` part is refused by the binding — a 400 in the same
+    # envelope an invalid `?format=` gets — and never reaches this view.
+    #
+    # The decorators are ordered for that binding to work *and* to stay behind the
+    # guard: `@pypi_bp.route` would register this view unchanged (only the per-verb
+    # decorators install the binding wrapper), and `@validate_request()` must sit
+    # below `@require_permission` so the route-level wrapper hands validation — and
+    # the multipart body it reads — to the inner decorator, after the permission
+    # check.  `functools.wraps` is what copies the `__delay_validate_request__` flag
+    # outward and makes that hand-off work.
+    file = form.content
+    # A part with an empty filename still parses as a file, so this is not dead:
+    # the binding only proves the part exists.
+    if not file.filename:
         raise BadRequestError("No file selected")
     is_valid, result = validate_file(file, file.filename)
     if not is_valid:
@@ -239,7 +259,7 @@ def upload():
             # other clients (pip, setuptools) get the standard 409 Conflict.
             ua = request.headers.get("User-Agent", "")
             if "twine" in ua:
-                raise BadRequestError(f"Package '{safe_filename}' already exists (set overwrite=1 to allow)")
+                raise BadRequestError("Package already exists (set overwrite=1 to allow)")
             raise UploadConflictError(safe_filename)
         tmp_path.rename(dest)
         store_digest(dest, digester.hexdigest())

@@ -315,7 +315,7 @@ def check_fingerprint() -> None:
         "backend.logger-name", "backend/services/foo.py", "Foo.bar"
     )
     expect(canonical == "backend.logger-name\x00backend/services/foo.py\x00Foo.bar\x00",
-           f"the hashed string must be the §4.4 tuple, got {canonical!r}")
+           f"the hashed string must be the §4.4 tuple, got {canonical}")
     for forbidden, label in (
         ("line", "a line number"),
         ("sha", "a commit sha"),
@@ -323,7 +323,7 @@ def check_fingerprint() -> None:
         ("42", "the line hint value"),
     ):
         expect(forbidden not in canonical,
-               f"{label} must not reach the fingerprint input ({forbidden!r} found)")
+               f"{label} must not reach the fingerprint input ({forbidden} found)")
 
     # The digest must be over exactly the §4.4 string, computed through the
     # project's single SHA-256 implementation.  models/agent_hub.py states the

@@ -145,7 +145,7 @@ class Upstream:
         clean = path.lstrip("/")
         parts = [p for p in clean.split("/") if p not in ("", ".")]
         if any(p == ".." for p in parts):
-            raise UpstreamError(f"refusing traversal in upstream path: {path!r}")
+            raise UpstreamError(f"refusing traversal in upstream path: {path}")
         quoted = "/".join(quote(p, safe="@:+~") for p in parts)
         return f"{self.base_url}/{quoted}"
 

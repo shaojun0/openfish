@@ -163,7 +163,7 @@ def _capture_claim(dialect: str) -> _Captured:
     # are the production code under test.
     queue.session = lambda: _CaptureSession(captured, driver)  # type: ignore[method-assign]
     claimed = queue.claim(worker="gate-scaling")
-    assert claimed is None, f"a fake session must report no task, got {claimed!r}"
+    assert claimed is None, f"a fake session must report no task, got {claimed}"
     captured.driver.extend(driver.statements)
     return captured
 
@@ -189,7 +189,7 @@ def check_compose() -> None:
     check(
         "runner 没有固定 container_name（否则 --scale 会失败）",
         "container_name" not in runner,
-        f"container_name={runner.get('container_name')!r}",
+        f"container_name={runner.get('container_name')}",
     )
     check(
         "runner 仍然只在 profile runner 下启动",
@@ -246,7 +246,7 @@ def check_worker_identity() -> None:
         )
         outputs.append((proc.stdout or "").strip())
     check("子进程都能打印 worker id", all(outputs) and proc.returncode == 0,
-          f"outputs={outputs!r} stderr={proc.stderr[-120:]!r}")
+          f"outputs={outputs} stderr={proc.stderr[-120:]}")
     check("跨进程（N 副本）身份彼此不同且不同于父进程",
           len(set(outputs)) == len(outputs) and not (set(outputs) & set(mine)),
           repr(outputs))

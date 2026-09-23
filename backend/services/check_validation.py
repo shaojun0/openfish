@@ -155,7 +155,7 @@ def _flip_comparison_seed(root: Path, path: Path, comparisons: Sequence[tuple[st
         return FaultSeed(
             id=f"{rel}:flip-{old_op}",
             language=language,
-            description=f"把 {rel} 里的 {old_op} 翻转成 {new_op}（上下文：{context.strip()!r}）",
+            description=f"把 {rel} 里的 {old_op} 翻转成 {new_op}（上下文：{context.strip()}）",
             edits=(SeedEdit(rel, text[index:index + len(old_op)], new_op),),
         )
     return None
@@ -178,7 +178,7 @@ def _python_faults(root: Path) -> list[FaultSeed]:
                 seeds.append(FaultSeed(
                     id=f"{rel}:remove-guard",
                     language="python",
-                    description=f"把 {rel} 的守卫 {line.strip()!r} 永假化",
+                    description=f"把 {rel} 的守卫 {line.strip()} 永假化",
                     edits=(SeedEdit(rel, line, f"{match.group('indent')}if False:  # fault seed"),),
                 ))
                 break
@@ -188,7 +188,7 @@ def _python_faults(root: Path) -> list[FaultSeed]:
                 seeds.append(FaultSeed(
                     id=f"{rel}:delete-return",
                     language="python",
-                    description=f"删掉 {rel} 的 {line.strip()!r}",
+                    description=f"删掉 {rel} 的 {line.strip()}",
                     edits=(SeedEdit(rel, line, f"{match.group('indent')}pass  # fault seed"),),
                 ))
                 break
@@ -212,7 +212,7 @@ def _javascript_faults(root: Path) -> list[FaultSeed]:
                 seeds.append(FaultSeed(
                     id=f"{rel}:remove-guard",
                     language="javascript",
-                    description=f"把 {rel} 的守卫 {line.strip()!r} 永假化",
+                    description=f"把 {rel} 的守卫 {line.strip()} 永假化",
                     edits=(SeedEdit(rel, line, f"{match.group('indent')}if (false) {{"),),
                 ))
                 break
@@ -366,7 +366,7 @@ def validate_check(
             faults_attempted=attempted,
             faults_detected=len(detected),
             detected_by=tuple(detected),
-            reason=f"当前修订通过，且在已知坏修订 {detected[0]!r} 上失败",
+            reason=f"当前修订通过，且在已知坏修订 {detected[0]} 上失败",
         )
     return CheckValidation(
         check_id=check.id,

@@ -51,16 +51,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from config import settings
+from config.agent import AgentConfig
+
 logger = logging.getLogger("cpypiserver.sandbox_identity")
 
 # ── Configuration ────────────────────────────────────────────────────
+# The names are derived from :mod:`config.agent`, which owns these variables, so
+# a message or a log line cannot name one the settings no longer read.
 
 #: Environment variable naming the uid untrusted subprocesses run as.
-SANDBOX_UID_ENV = "AGENT_SANDBOX_UID"
+SANDBOX_UID_ENV = AgentConfig.env_name("sandbox_uid")
 
 #: Environment variable naming the gid untrusted subprocesses run as.  Also the
 #: sandbox uid's primary group, so a group-writable work tree is enough for it.
-SANDBOX_GID_ENV = "AGENT_SANDBOX_GID"
+SANDBOX_GID_ENV = AgentConfig.env_name("sandbox_gid")
 
 #: Legacy name of the sandbox ``HOME`` directory.  It used to live *inside* the
 #: checkout, which both polluted ``git status`` and let a repository replace it
@@ -77,7 +82,7 @@ SANDBOX_HOME_PREFIX = "openfish-sandbox-home-"
 #: The root every work directory lives under.  Parent directories from a work
 #: tree up to (and including) this root are relaxed so the sandbox uid can
 #: traverse in; the walk never goes above it.
-WORK_ROOT_ENV = "AGENT_WORK_ROOT"
+WORK_ROOT_ENV = AgentConfig.env_name("work_root")
 
 #: Linux capability bit numbers (``linux/capability.h``): ``CAP_SETGID`` = 6,
 #: ``CAP_SETUID`` = 7.  Dropping the child from the worker's uid to the sandbox
@@ -124,9 +129,34 @@ class SandboxIdentity:
 
 # ── Identity resolution ──────────────────────────────────────────────
 
+def _configured_env() -> dict[str, str]:
+    """The deployed sandbox knobs, in the string form the parsers below read.
+
+    :mod:`config.agent` is the only reader of the environment; this module never
+    touches ``os.environ``, so a value cannot be swapped under a running worker.
+    Only the three names this module asks about are projected, which keeps the
+    settings-to-parser bridge small enough to read at a glance.
+    """
+    return {
+        SANDBOX_UID_ENV: _as_text(settings.agent.sandbox_uid),
+        SANDBOX_GID_ENV: _as_text(settings.agent.sandbox_gid),
+        WORK_ROOT_ENV: str(settings.agent.work_root or ""),
+    }
+
+
+def _as_text(value: int | None) -> str:
+    """``""`` for an unset (``None``) knob, else its decimal text."""
+    return "" if value is None else str(value)
+
+
 def _origin(env: Mapping[str, str] | None) -> Mapping[str, str]:
-    """The environment to read; an explicit empty mapping is not replaced."""
-    return os.environ if env is None else env
+    """The mapping to read; an explicit empty mapping is not replaced.
+
+    ``None`` means "the deployment's configuration"; ``{}`` keeps meaning "this
+    caller has nothing configured", which is how the offline gates exercise the
+    unconfigured and half-configured paths without touching the environment.
+    """
+    return _configured_env() if env is None else env
 
 
 def _raw(name: str, env: Mapping[str, str] | None) -> str:
@@ -142,6 +172,12 @@ def configured_identity(
     positive integers is the only configured state.  A partial or unparseable
     setting raises :class:`SandboxIdentityError` (fail closed): guessing the
     missing half would spawn untrusted code as the trusted worker.
+
+    *env* is for callers that have their own mapping — the offline gate, which
+    must be able to present a half-configured pair without changing what the
+    rest of the process is configured with.  ``None`` reads the deployment's
+    settings, which are resolved once at start-up (see
+    :class:`config.base.EnvSettings`).
     """
     uid_raw = _raw(SANDBOX_UID_ENV, env)
     gid_raw = _raw(SANDBOX_GID_ENV, env)

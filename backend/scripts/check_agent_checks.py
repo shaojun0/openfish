@@ -45,6 +45,7 @@ os.chdir(REPO_ROOT)
 from sqlalchemy import inspect, text  # noqa: E402
 from sqlalchemy.schema import CreateTable  # noqa: E402
 
+from config import settings  # noqa: E402
 from models.agent_hub import (  # noqa: E402
     TASK_KIND,
     AgentTask,
@@ -1320,13 +1321,18 @@ def check_curator_loop() -> None:
             encoding="utf-8",
         )
 
-        previous_env = {
-            name: os.environ.get(name)
-            for name in ("FORGEJO_GIT_BASE_URL", "FORGEJO_BASE_URL", "AGENT_WORK_ROOT")
-        }
-        os.environ["FORGEJO_GIT_BASE_URL"] = f"file://{git_root}"
-        os.environ["FORGEJO_BASE_URL"] = f"file://{git_root}"
-        os.environ["AGENT_WORK_ROOT"] = str(base / "work")
+        # The deployment knobs are configured on the settings object, not through
+        # ``os.environ``: the settings are resolved once at start-up and are the
+        # only reader of the environment, so there is no per-call re-read for
+        # anything in this process to re-point.
+        previous_work_root = settings.agent.work_root
+        previous_forgejo = (
+            settings.forgejo.forgejo_git_base_url,
+            settings.forgejo.forgejo_base_url,
+        )
+        settings.agent.work_root = str(base / "work")
+        settings.forgejo.forgejo_git_base_url = f"file://{git_root}"
+        settings.forgejo.forgejo_base_url = f"file://{git_root}"
         try:
             engine = build_engine(f"sqlite:///{base / 'hub.db'}")
             ensure_schema(engine)
@@ -1398,11 +1404,11 @@ def check_curator_loop() -> None:
                   repr([row.to_dict() for row in runs]))
             engine.dispose()
         finally:
-            for name, value in previous_env.items():
-                if value is None:
-                    os.environ.pop(name, None)
-                else:
-                    os.environ[name] = value
+            settings.agent.work_root = previous_work_root
+            (
+                settings.forgejo.forgejo_git_base_url,
+                settings.forgejo.forgejo_base_url,
+            ) = previous_forgejo
 
 
 def main() -> int:

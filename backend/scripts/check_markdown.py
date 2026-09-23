@@ -113,7 +113,7 @@ def main() -> int:
         leaked = [frag for frag in forbidden if frag in html]
         if missing or leaked:
             failures.append(
-                f"{label}: missing={missing or '—'} leaked={leaked or '—'} -> {html!r}"
+                f"{label}: missing={missing or '—'} leaked={leaked or '—'} -> {html}"
             )
             print(f"❌ {label}")
         else:

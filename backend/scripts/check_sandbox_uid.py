@@ -58,6 +58,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from services import sandbox_identity  # noqa: E402
 from services.agent_runner import SubprocessRunnerAdapter  # noqa: E402
+from services.repo_runner import RUNNER_CREDENTIAL_KEY_ENV  # noqa: E402
 from services.sandbox_env import ALLOWED_NAMES, PLATFORM_SECRETS  # noqa: E402
 from services.sandbox_identity import (  # noqa: E402
     SANDBOX_GID_ENV,
@@ -530,8 +531,14 @@ def check_source_wiring() -> None:
           prepared >= 0 and 0 <= prepared < run.find("adapter.review("))
 
     repo_runner = _source(REPO_ROOT / "services" / "repo_runner.py")
+    # The key's *name* now comes from ``config.keys`` rather than being spelled
+    # out in repo_runner, so the check names the constant the module reads and
+    # pins that constant to the documented variable — stronger than matching a
+    # string literal, which a rename would have satisfied just as well.
     check("repo_runner reads the dedicated RUNNER_CREDENTIAL_KEY",
-          _references(repo_runner, "RUNNER_CREDENTIAL_KEY") > 0)
+          _references(repo_runner, "RUNNER_CREDENTIAL_KEY_ENV") > 0
+          and RUNNER_CREDENTIAL_KEY_ENV == "RUNNER_CREDENTIAL_KEY",
+          f"{RUNNER_CREDENTIAL_KEY_ENV}")
     check("repo_runner never reads the user-identity master key",
           _references(repo_runner, "GIT_IDENTITY_KEY") == 0,
           "repo_runner references GIT_IDENTITY_KEY")

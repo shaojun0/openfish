@@ -32,6 +32,11 @@ What is asserted
   *nothing*; a good archive is imported into ``DEBIAN_DIR`` (pool layout + flat
   copy), the flat ``/debian/Packages`` index lists the new packages, and a
   second import is a no-op;
+* the importer refuses a *crafted* archive before writing a byte — a ``..`` or
+  absolute member name, a symlink / hardlink / FIFO / device member, more
+  members than ``MAX_BUNDLE_MEMBERS``, or a payload that would unpack past
+  ``DEBIAN_OFFLINE_MAX_MB`` — and the setuid/setgid bits an archive carries do
+  not reach the repository;
 * anonymous access is a ``401``;
 * the pure helpers — Debian version comparison, ``.deb`` name parsing and
   dependency-clause parsing — behave as documented.
@@ -46,7 +51,9 @@ import hashlib
 import io
 import os
 import shutil
+import stat
 import sys
+import tarfile
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -227,7 +234,7 @@ def check_helpers() -> None:
     for left, right, expected in pairs:
         actual = relay.compare_versions(left, right)
         check(
-            f"version {left!r} vs {right!r} → {expected}",
+            f"version {left} vs {right} → {expected}",
             actual == expected,
             f"got {actual}",
         )
@@ -301,7 +308,7 @@ def check_helpers() -> None:
 
 # ── The HTTP protocol ────────────────────────────────────────────────
 
-def check_protocol(client) -> None:
+def check_protocol(client) -> bytes:
     repo = Path(settings.hub.debian_dir)
     _plant(repo, "libc6_2.36-9_amd64.deb")
     _plant(repo, "oldpkg_2.0-1_amd64.deb")
@@ -339,7 +346,7 @@ def check_protocol(client) -> None:
         "snapshot carries a matching digest header",
         response.headers.get("X-Openfish-Sha256")
         == hashlib.sha256(response.data).hexdigest(),
-        f"header={response.headers.get('X-Openfish-Sha256')!r}",
+        f"header={response.headers.get('X-Openfish-Sha256')}",
     )
     snapshot_doc = _document(snapshot)
     check(
@@ -384,7 +391,7 @@ def check_protocol(client) -> None:
     check(
         "an unsatisfiable dependency is reported, not dropped",
         "ghostlib" in plan_doc.get("unresolved_1", ""),
-        f"unresolved={plan_doc.get('unresolved')!r}",
+        f"unresolved={plan_doc.get('unresolved')}",
     )
     check(
         "the header records the source snapshot digest",
@@ -464,7 +471,7 @@ def check_protocol(client) -> None:
         response.status_code == 200
         and _document(_text(response)).get("snapshot_integrity") == "mismatch",
         f"status={response.status_code} header="
-        f"{_document(_text(response)).get('snapshot_integrity')!r}",
+        f"{_document(_text(response)).get('snapshot_integrity')}",
     )
     response = client.post(
         "/debian/offline/plan", headers=dict(AUTH), data=b""
@@ -552,6 +559,187 @@ def check_protocol(client) -> None:
         and report.get("skipped") == 5,
         f"body={report}",
     )
+    return bundle_bytes
+
+
+# ── Bundle import hardening ──────────────────────────────────────────
+#
+# The import side is the half that must not trust the artifact: a bundle is
+# hand-carried across an air gap, so every shape below is something an operator
+# could be handed.  Each has to be refused *before* anything is written, with
+# the repository left byte-identical — and a legitimate bundle has to keep
+# importing, or the gates would be a blanket refusal rather than a policy.
+
+
+def _member(name: str, kind: str = "file", *, size: int = 0, link: str = "", mode: int = 0o644):
+    """A tar member of the given shape.  Payloads are supplied by ``_repack``."""
+    info = tarfile.TarInfo(name)
+    info.mode, info.size = mode, size
+    if kind == "dir":
+        info.type, info.size = tarfile.DIRTYPE, 0
+    elif kind == "symlink":
+        info.type, info.linkname, info.size = tarfile.SYMTYPE, link, 0
+    elif kind == "hardlink":
+        info.type, info.linkname, info.size = tarfile.LNKTYPE, link, 0
+    elif kind == "fifo":
+        info.type, info.size = tarfile.FIFOTYPE, 0
+    elif kind == "device":
+        info.type, info.devmajor, info.devminor, info.size = tarfile.CHRTYPE, 1, 3, 0
+    return info
+
+
+def _repack(bundle_bytes: bytes, *, extra=(), modes=None) -> bytes:
+    """Re-pack a legitimate bundle, keeping every payload byte identical.
+
+    Copying the payloads verbatim keeps the manifest's own SHA256 lines valid,
+    so a refusal below is the *extraction* policy talking and never a document
+    that failed its integrity check.  *modes* overrides one member's mode (the
+    setuid case) and *extra* appends the hostile members.
+    """
+    with tarfile.open(fileobj=io.BytesIO(bundle_bytes), mode="r:gz") as src:
+        members = src.getmembers()
+        blobs = {
+            member.name: src.extractfile(member).read()
+            for member in members
+            if member.isfile()
+        }
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w:gz") as dst:
+        for member in members:
+            if not member.isfile():
+                dst.addfile(member)
+                continue
+            if modes and member.name in modes:
+                member.mode = modes[member.name]
+            dst.addfile(member, io.BytesIO(blobs[member.name]))
+        for member, blob in extra:
+            dst.addfile(member, io.BytesIO(blob) if blob is not None else None)
+    return out.getvalue()
+
+
+def _import(bundle_bytes: bytes, repo: Path, name: str) -> str | None:
+    """Import *bundle_bytes* into *repo*; return the refusal message, if any."""
+    path = _TMP / name
+    path.write_bytes(bundle_bytes)
+    try:
+        relay.import_bundle(path, root=repo)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def check_bundle_hardening(bundle_bytes: bytes) -> None:
+    print()
+    print("── bundle import hardening ─────────────────────────────────────")
+    repo = _TMP / "hardening"
+    repo.mkdir()
+
+    with tarfile.open(fileobj=io.BytesIO(bundle_bytes), mode="r:gz") as archive:
+        archived = archive.getmembers()
+    base_members = len(archived)
+    base_bytes = sum(member.size for member in archived if member.isfile())
+
+    hostile = [
+        (
+            "a member that climbs out of the staging directory",
+            [(_member("../escape.txt", size=1), b"x")],
+            "拒绝越界",
+        ),
+        (
+            "an absolute member name",
+            [(_member("/tmp/openfish-escape.txt", size=1), b"x")],
+            "拒绝不安全的包内路径",
+        ),
+        (
+            "a symlink member",
+            [(_member("pool/main/c/evil.deb", kind="symlink", link="../../../../etc/passwd"), None)],
+            "不允许的成员类型",
+        ),
+        (
+            "a hardlink member",
+            [(_member("pool/main/c/hard.deb", kind="hardlink", link="../../../../etc/passwd"), None)],
+            "不允许的成员类型",
+        ),
+        (
+            "a FIFO member",
+            [(_member("pool/main/c/pipe", kind="fifo"), None)],
+            "不允许的成员类型",
+        ),
+        (
+            "a device-node member",
+            [(_member("pool/main/c/dev", kind="device"), None)],
+            "不允许的成员类型",
+        ),
+    ]
+    for index, (label, extra, expected) in enumerate(hostile):
+        message = _import(_repack(bundle_bytes, extra=extra), repo, f"hostile-{index}.tar.gz")
+        check(
+            f"{label} is refused",
+            message is not None and expected in message,
+            f"message={message}",
+        )
+
+    # The count ceiling is a policy number, so the check drives it instead of
+    # building twenty thousand members: one member over the ceiling must refuse.
+    previous_members = relay.MAX_BUNDLE_MEMBERS
+    relay.MAX_BUNDLE_MEMBERS = base_members + 1
+    try:
+        filler = [(_member(f"junk/{index}.txt", size=1), b"x") for index in range(2)]
+        message = _import(_repack(bundle_bytes, extra=filler), repo, "hostile-many.tar.gz")
+    finally:
+        relay.MAX_BUNDLE_MEMBERS = previous_members
+    check(
+        f"a bundle over MAX_BUNDLE_MEMBERS ({base_members + 1}) is refused",
+        message is not None and "成员数超过上限" in message,
+        f"message={message}",
+    )
+
+    # The size ceiling is the builder's own number, and the check sets it just
+    # above this bundle so that the refusal is caused by the added 4 MiB and not
+    # by the fixture: what unpacked size the *archive* declares is what is
+    # budgeted, before a byte of it is written.
+    previous_max = settings.hub.debian_offline_max_mb
+    settings.hub.debian_offline_max_mb = base_bytes // (1024 * 1024) + 1
+    try:
+        bomb = [(_member("pool/main/c/bomb.deb", size=4 << 20), b"\0" * (4 << 20))]
+        message = _import(_repack(bundle_bytes, extra=bomb), repo, "hostile-bomb.tar.gz")
+    finally:
+        settings.hub.debian_offline_max_mb = previous_max
+    check(
+        "a bundle that would unpack past DEBIAN_OFFLINE_MAX_MB is refused",
+        message is not None and "DEBIAN_OFFLINE_MAX_MB" in message,
+        f"message={message}",
+    )
+
+    check(
+        "every refusal left the repository untouched and no staging behind",
+        _deb_count(repo) == 0 and not list(repo.glob("openfish-import-*")),
+        f"debs={_deb_count(repo)} leftovers={[p.name for p in repo.glob('openfish-import-*')]}",
+    )
+
+    # A legitimate bundle still imports, and the mode bits the archive carries
+    # do not survive: `tarfile`'s data filter clears setuid/setgid (and, on
+    # POSIX, group/other write) before it applies a mode at all.
+    payload = _FILENAMES["curl"]
+    message = _import(_repack(bundle_bytes, modes={payload: 0o4755}), repo, "setuid.tar.gz")
+    check(
+        "a bundle whose member carries setuid still imports",
+        message is None,
+        f"message={message}",
+    )
+    published = repo / payload
+    mode = stat.S_IMODE(published.stat().st_mode) if published.is_file() else None
+    check(
+        "no setuid/setgid bit reaches the repository",
+        mode is not None and not mode & 0o6000,
+        f"mode={mode}",
+    )
+    if os.name == "posix":
+        check(
+            "group/other write is stripped from an imported file",
+            mode is not None and not mode & 0o022,
+            f"mode={mode}",
+        )
 
 
 def main() -> int:
@@ -565,7 +753,8 @@ def main() -> int:
 
     try:
         check_helpers()
-        check_protocol(client)
+        bundle_bytes = check_protocol(client)
+        check_bundle_hardening(bundle_bytes)
     finally:
         server.shutdown()
         server.server_close()

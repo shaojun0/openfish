@@ -203,7 +203,7 @@ def embedding_search(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
     """
     raise NotImplementedError(
         "语义检索本轮不实现（规格 §8.3 只要求 EMBEDDING_ROUTE 钩子）："
-        f"本轮只做关键词 + 结构化过滤 + 关联扩展；接入时用 {EMBEDDING_ROUTE!r} "
+        f"本轮只做关键词 + 结构化过滤 + 关联扩展；接入时用 {EMBEDDING_ROUTE} "
         "别名走 services.model_routes.resolve()，再把召回结果交给 _assemble()。"
     )
 
@@ -463,7 +463,7 @@ def build_candidates_query(
         )
     if kind == "finding":
         return build_finding_query(repo_id=repo_id, q=q, any_term=any_term)
-    raise ValueError(f"未知的检索类型 {kind!r}（支持 {(*KINDS, ALL_KINDS)}）")
+    raise ValueError(f"未知的检索类型 {kind}（支持 {(*KINDS, ALL_KINDS)}）")
 
 
 # ── Row → candidate ──────────────────────────────────────────────────
@@ -747,7 +747,7 @@ def search(
     selected = KINDS if kind in ("", None, ALL_KINDS) else (kind,)
     for one in selected:
         if one not in KINDS:
-            raise ValueError(f"kind 只支持 issue/commit/finding/all（收到 {kind!r}）")
+            raise ValueError(f"kind 只支持 issue/commit/finding/all（收到 {kind}）")
 
     candidates: list[_Candidate] = []
     matched = 0

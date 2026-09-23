@@ -37,9 +37,22 @@ themselves (``require_permission`` calls ``auth.permissions.declare``), which
 is how a new point is introduced without editing ``auth/permissions.py`` — S0
 owns the catalogue rows; S1 owns the guards that use them.
 
-⚠ Decorator order is load-bearing, as everywhere else: ``@repo_bp.route`` must
-be the topmost line so the guard is applied before registration.  ``scripts/
-check_auth_guards.py`` fails the build otherwise.
+⚠ Decorator order is load-bearing, as everywhere else: the route decorator —
+``@repo_bp.route`` for a view that binds nothing, ``@repo_bp.get``/``post``/
+``patch``/``put`` where the view binds request input — must be the topmost line
+so the guard is applied before registration.  ``scripts/check_auth_guards.py``
+fails the build otherwise.
+
+Seven views bind their request input as view parameters instead of reading
+``request`` by hand, which is what ``@validate_request()`` — placed *below* the
+guard, so an unauthorized request is answered ``401``/``403`` and never by the
+binder — installs: ``list_repos`` and ``list_issues`` bind their query string,
+and ``create_repo``, ``import_repo``, ``sync_repo``, ``update_runner`` and
+``put_runner_credential`` bind their JSON body.  Those bodies are capped by
+``routes.hub_common.body_ceiling`` *before* the binder reads them, and the
+clamping and parsing helpers (``_paging``, ``_int_arg``, ``_bool_arg``) stay in
+this module: the query models carry the raw values, so no clamp and no tolerated
+value can become the binding's ``400``.
 """
 
 from __future__ import annotations
@@ -48,7 +61,8 @@ import json
 import logging
 from datetime import datetime
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import current_app, jsonify, request
+from flask_openapi3 import APIBlueprint, validate_request
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 
@@ -56,12 +70,24 @@ from auth.decorators import current_sub, current_user_id, require_permission
 from auth.permissions import REPO_PUSH, REPO_READ, REPO_WRITE
 from errors import BadRequestError, PypiError
 from openapi import api_operation, errors, json_body, ok
+from routes.hub_common import body_ceiling
+from schemas import (
+    RepoCreateRequest,
+    RepoImportRequest,
+    RepoIssueListQuery,
+    RepoListQuery,
+    RepoSyncRequest,
+    RunnerCredentialRequest,
+    RunnerPatchRequest,
+)
 from services import git_identity, repo_import, repo_runner
-from services.agent_runner import mask_secrets
 
 logger = logging.getLogger("cpypiserver.routes.repos")
 
-repo_bp = Blueprint("repos", __name__)
+# `doc_ui=False` for the same reason `app.py` passes it: the request-binding half
+# of flask-openapi3 is all this module uses, and the library's own document is
+# never served — `/openapi.json` is built from `@api_operation` in `openapi/`.
+repo_bp = APIBlueprint("repos", __name__, doc_ui=False)
 
 #: §5.1 permission points come from ``auth.permissions`` — one definition, one
 #: import.  ``check_permission_catalog.py`` resolves a guard argument by name
@@ -468,7 +494,7 @@ def _runner_service() -> repo_runner.RepoRunnerService:
 def _repo_or_404(slug: str):
     repo = _service().repo_by_slug(slug)
     if repo is None:
-        raise PypiError(f"仓库 {slug!r} 不存在", status_code=404)
+        raise PypiError("仓库不存在", status_code=404)
     return repo
 
 
@@ -573,42 +599,49 @@ def _render_markdown(body: str) -> str | None:
 
 # ── Request helpers ──────────────────────────────────────────────────
 
-def _json_body() -> dict:
-    if request.content_length and request.content_length > _MAX_BODY_BYTES:
-        raise BadRequestError("请求体过大")
-    payload = request.get_json(silent=True)
-    if payload is None:
-        return {}
-    if not isinstance(payload, dict):
-        raise BadRequestError("请求体必须是 JSON 对象")
-    return payload
+#: Ceiling on an import/sync/runner body.  The gate itself is
+#: `routes.hub_common.body_ceiling` (shared with the model-route writes) and has
+#: to sit between the guard and the binder — see its docstring.
+_BODY_CEILING = body_ceiling(_MAX_BODY_BYTES, "请求体过大")
 
 
-def _int_arg(name: str, default: int) -> int:
-    raw = (request.args.get(name) or "").strip()
-    if not raw:
+def _int_arg(raw: str | None, name: str, default: int) -> int:
+    """A query value read the way this module has always read it.
+
+    The raw string comes from the bound query model, but the *decision* stays
+    here: an absent or empty value means the default, and anything that is not
+    an integer is this route's own prose ``400``.  A typed model field would
+    turn ``?page=`` into the binding's error instead.
+    """
+    value = (raw or "").strip()
+    if not value:
         return default
     try:
-        return int(raw)
+        return int(value)
     except ValueError as exc:
         raise BadRequestError(f"参数 {name} 必须是整数") from exc
 
 
-def _bool_arg(name: str) -> bool | None:
-    """``?flag=true`` → True.  ``"false"`` is not truthy here, unlike a raw str."""
-    raw = (request.args.get(name) or "").strip().lower()
-    if not raw:
+def _bool_arg(raw: str | None, name: str) -> bool | None:
+    """``?flag=true`` → True.  ``"false"`` is not truthy here, unlike a raw str.
+
+    An empty value means "not set" and anything unrecognised is the prose
+    ``400`` below — both of which a bound ``bool`` field would decide
+    differently.
+    """
+    value = (raw or "").strip().lower()
+    if not value:
         return None
-    if raw in {"1", "true", "yes", "on"}:
+    if value in {"1", "true", "yes", "on"}:
         return True
-    if raw in {"0", "false", "no", "off"}:
+    if value in {"0", "false", "no", "off"}:
         return False
     raise BadRequestError(f"参数 {name} 必须是布尔值")
 
 
-def _paging() -> tuple[int, int]:
-    page = max(1, _int_arg("page", 1))
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
+def _paging(page_raw: str | None, per_page_raw: str | None) -> tuple[int, int]:
+    page = max(1, _int_arg(page_raw, "page", 1))
+    per_page = _int_arg(per_page_raw, "per_page", DEFAULT_PER_PAGE)
     per_page = max(1, min(per_page, MAX_PER_PAGE))
     return page, per_page
 
@@ -632,7 +665,7 @@ def _credential_expiry(raw: object) -> datetime | None:
 
 
 def _conflict(exc: IntegrityError, slug: str) -> PypiError:
-    return PypiError(f"仓库 {slug!r} 已存在", status_code=409)
+    return PypiError("仓库已存在", status_code=409)
 
 
 def _import_failed(exc: Exception) -> PypiError:
@@ -648,8 +681,9 @@ def _import_failed(exc: Exception) -> PypiError:
 
 # ── Repos ────────────────────────────────────────────────────────────
 
-@repo_bp.route("/api/v1/repos")
+@repo_bp.get("/api/v1/repos")
 @require_permission(REPO_READ)
+@validate_request()
 @api_operation(
     summary="List repositories",
     description=(
@@ -672,27 +706,29 @@ def _import_failed(exc: Exception) -> PypiError:
         **errors("400", "401", "403", "500"),
     },
 )
-def list_repos():
+def list_repos(query: RepoListQuery):
+    # The bound `query` model owns the request parameter name; the SQLAlchemy
+    # statement below is a local, so it is called `stmt` here.
     type_repo = _models()["Repo"]
-    page, per_page = _paging()
-    query = _session().query(type_repo)
+    page, per_page = _paging(query.page, query.per_page)
+    stmt = _session().query(type_repo)
 
-    kind = (request.args.get("kind") or "").strip()
+    kind = (query.kind or "").strip()
     if kind:
-        query = query.filter(type_repo.kind == kind)
+        stmt = stmt.filter(type_repo.kind == kind)
 
-    term = (request.args.get("q") or "").strip()
+    term = (query.q or "").strip()
     if term:
         like = f"%{term}%"
         clauses = [type_repo.slug.ilike(like)]
         for column in ("source_url", "forgejo_repo"):
             if hasattr(type_repo, column):
                 clauses.append(getattr(type_repo, column).ilike(like))
-        query = query.filter(or_(*clauses))
+        stmt = stmt.filter(or_(*clauses))
 
-    total = query.count()
+    total = stmt.count()
     rows = (
-        query.order_by(type_repo.id.desc())
+        stmt.order_by(type_repo.id.desc())
         .offset((page - 1) * per_page)
         .limit(per_page)
         .all()
@@ -706,8 +742,10 @@ def list_repos():
     })
 
 
-@repo_bp.route("/api/v1/repos", methods=["POST"])
+@repo_bp.post("/api/v1/repos")
 @require_permission(REPO_WRITE)
+@_BODY_CEILING
+@validate_request()
 @api_operation(
     summary="Create a local workspace repository",
     description=(
@@ -725,26 +763,28 @@ def list_repos():
         **errors("400", "401", "403", "409", "500"),
     },
 )
-def create_repo():
-    payload = _json_body()
-    slug = str(payload.get("slug") or "").strip().strip("/")
+def create_repo(body: RepoCreateRequest):
+    # `body` is the bound JSON body — see `schemas.RepoCreateRequest`, which
+    # declares every field optional so the checks below (and the service behind
+    # them) keep answering with the prose 400/409 this route has always sent.
+    slug = (body.slug or "").strip().strip("/")
     if "/" not in slug:
         raise BadRequestError("slug 必须是 \"<owner>/<name>\" 形式")
-    kind = str(payload.get("kind") or "workspace").strip()
+    kind = (body.kind or "workspace").strip()
     if kind not in REPO_KINDS:
         raise BadRequestError(f"kind 必须是 {', '.join(REPO_KINDS)} 之一")
 
     type_repo = _models()["Repo"]
     service = _service()
     if service.repo_by_slug(slug) is not None:
-        raise PypiError(f"仓库 {slug!r} 已存在", status_code=409)
+        raise PypiError("仓库已存在", status_code=409)
 
     repo = type_repo()
     repo_import.assign_fields(repo, {
         "slug": slug,
         "source": "local",
         "source_url": None,
-        "default_branch": str(payload.get("default_branch") or "main").strip() or "main",
+        "default_branch": (body.default_branch or "main").strip() or "main",
         "forgejo_repo": None,
         "kind": kind,
         "sync_state": "pending",
@@ -761,8 +801,10 @@ def create_repo():
     return jsonify(repo_to_dict(repo, include_last_import=False)), 201
 
 
-@repo_bp.route("/api/v1/repos/import", methods=["POST"])
+@repo_bp.post("/api/v1/repos/import")
 @require_permission(REPO_WRITE)
+@_BODY_CEILING
+@validate_request()
 @api_operation(
     summary="Import an external repository",
     description=(
@@ -782,22 +824,19 @@ def create_repo():
         **errors("400", "401", "403", "409", "502", "500"),
     },
 )
-def import_repo():
-    payload = _json_body()
-    source_url = str(payload.get("source_url") or "").strip()
+def import_repo(body: RepoImportRequest):
+    # `body` is the bound JSON body — see `schemas.RepoImportRequest`, which
+    # keeps `source_url`/`mode` optional so this route's prose 400s (and the
+    # service's own `SourceUrlError`) stay exactly where they were.
+    source_url = (body.source_url or "").strip()
     if not source_url:
         raise BadRequestError("source_url 不能为空")
-    mode = str(payload.get("mode") or "code+issues").strip()
+    mode = (body.mode or "code+issues").strip()
     if mode not in IMPORT_MODES:
         raise BadRequestError(f"mode 必须是 {', '.join(IMPORT_MODES)} 之一")
-    include_prs = payload.get("include_prs")
+    include_prs = body.include_prs
     include_prs = True if include_prs is None else bool(include_prs)
-    repo_id = payload.get("repo_id")
-    if repo_id is not None:
-        try:
-            repo_id = int(repo_id)
-        except (TypeError, ValueError) as exc:
-            raise BadRequestError("repo_id 必须是整数") from exc
+    repo_id = body.repo_id
 
     service = _service()
     try:
@@ -845,8 +884,9 @@ def get_repo(slug: str):
     return jsonify(repo_to_dict(_repo_or_404(slug)))
 
 
-@repo_bp.route("/api/v1/repos/<path:slug>/issues")
+@repo_bp.get("/api/v1/repos/<path:slug>/issues")
 @require_permission(REPO_READ)
+@validate_request()
 @api_operation(
     summary="List a repository's mirrored issues",
     description=(
@@ -884,32 +924,32 @@ def get_repo(slug: str):
         **errors("400", "401", "403", "404", "500"),
     },
 )
-def list_issues(slug: str):
+def list_issues(slug: str, query: RepoIssueListQuery):
     repo = _repo_or_404(slug)
     type_issue = _models()["RepoIssue"]
-    page, per_page = _paging()
-    query = _session().query(type_issue).filter(type_issue.repo_id == repo.id)
+    page, per_page = _paging(query.page, query.per_page)
+    stmt = _session().query(type_issue).filter(type_issue.repo_id == repo.id)
 
-    state = (request.args.get("state") or "").strip()
+    state = (query.state or "").strip()
     if state and state != "all":
-        query = query.filter(type_issue.state == state)
+        stmt = stmt.filter(type_issue.state == state)
 
-    label = (request.args.get("label") or "").strip()
+    label = (query.label or "").strip()
     if label:
         token = json.dumps(label, ensure_ascii=False)
-        query = query.filter(type_issue.labels.ilike(f"%{token}%"))
+        stmt = stmt.filter(type_issue.labels.ilike(f"%{token}%"))
 
-    term = (request.args.get("q") or "").strip()
+    term = (query.q or "").strip()
     if term:
-        query = query.filter(type_issue.title.ilike(f"%{term}%"))
+        stmt = stmt.filter(type_issue.title.ilike(f"%{term}%"))
 
-    is_pr = _bool_arg("is_pull_request")
+    is_pr = _bool_arg(query.is_pull_request, "is_pull_request")
     if is_pr is not None:
-        query = query.filter(type_issue.is_pull_request == is_pr)
+        stmt = stmt.filter(type_issue.is_pull_request == is_pr)
 
-    total = query.count()
+    total = stmt.count()
     rows = (
-        query.order_by(type_issue.number.desc())
+        stmt.order_by(type_issue.number.desc())
         .offset((page - 1) * per_page)
         .limit(per_page)
         .all()
@@ -951,12 +991,14 @@ def get_issue(slug: str, number: int):
         .one_or_none()
     )
     if issue is None:
-        raise PypiError(f"{slug} 中没有 issue #{number}", status_code=404)
+        raise PypiError("该仓库中没有这个 issue", status_code=404)
     return jsonify(issue_to_dict(issue, include_body=True))
 
 
-@repo_bp.route("/api/v1/repos/<path:slug>/sync", methods=["POST"])
+@repo_bp.post("/api/v1/repos/<path:slug>/sync")
 @require_permission(REPO_WRITE)
+@_BODY_CEILING
+@validate_request()
 @api_operation(
     summary="Queue an incremental sync",
     description=(
@@ -976,21 +1018,24 @@ def get_issue(slug: str, number: int):
         **errors("400", "401", "403", "404", "409", "502", "500"),
     },
 )
-def sync_repo(slug: str):
+def sync_repo(slug: str, body: RepoSyncRequest):
     repo = _repo_or_404(slug)
-    payload = _json_body()
-    mode = str(payload.get("mode") or "code+issues").strip()
+    # `body` is the bound JSON body — see `schemas.RepoSyncRequest`, which maps
+    # the *absent* body this route documents (and has always served) onto the
+    # all-defaults body, and keeps `mode` a plain string so the check below
+    # still answers with the route's own prose 400.
+    mode = (body.mode or "code+issues").strip()
     if mode not in IMPORT_MODES:
         raise BadRequestError(f"mode 必须是 {', '.join(IMPORT_MODES)} 之一")
-    include_prs = payload.get("include_prs")
+    include_prs = body.include_prs
     include_prs = True if include_prs is None else bool(include_prs)
-    full = bool(payload.get("full"))
+    full = bool(body.full)
 
     service = _service()
     source_url = getattr(repo, "source_url", None)
     if not source_url:
         raise PypiError(
-            f"仓库 {slug!r} 没有 source_url，无法同步（本地工作仓请用 import）",
+            "该仓库没有 source_url，无法同步（本地工作仓请用 import）",
             status_code=409,
         )
     try:
@@ -1041,8 +1086,10 @@ def get_runner(slug: str):
     return jsonify(_runner_service().document(repo.id, name=repo.slug))
 
 
-@repo_bp.route("/api/v1/repos/<path:slug>/runner", methods=["PATCH"])
+@repo_bp.patch("/api/v1/repos/<path:slug>/runner")
 @require_permission(REPO_WRITE)
+@_BODY_CEILING
+@validate_request()
 @api_operation(
     summary="Update repository runner configuration",
     description=(
@@ -1063,32 +1110,18 @@ def get_runner(slug: str):
         **errors("400", "401", "403", "404", "500"),
     },
 )
-def update_runner(slug: str):
+def update_runner(slug: str, body: RunnerPatchRequest):
     repo = _repo_or_404(slug)
-    payload = _json_body()
 
-    changes: dict = {}
-    if "enabled" in payload:
-        if not isinstance(payload["enabled"], bool):
-            raise BadRequestError("enabled 必须是布尔值")
-        changes["enabled"] = payload["enabled"]
-    if "max_concurrency" in payload:
-        value = payload["max_concurrency"]
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise BadRequestError("max_concurrency 必须是整数")
-        changes["max_concurrency"] = value
-    if "egress_policy" in payload:
-        if not isinstance(payload["egress_policy"], str):
-            raise BadRequestError("egress_policy 必须是字符串")
-        changes["egress_policy"] = payload["egress_policy"]
-    if "egress_allowlist" in payload:
-        if not isinstance(payload["egress_allowlist"], str):
-            raise BadRequestError("egress_allowlist 必须是字符串（逗号分隔；空串清除）")
-        changes["egress_allowlist"] = payload["egress_allowlist"]
-    if "workspace_subdir" in payload:
-        if not isinstance(payload["workspace_subdir"], str):
-            raise BadRequestError("workspace_subdir 必须是字符串")
-        changes["workspace_subdir"] = payload["workspace_subdir"]
+    # `exclude_unset=True` is load-bearing, not an optimisation:
+    # `RepoRunnerService.update` reads an **absent** keyword as "leave the stored
+    # value", so an omitted field must not arrive as `None`.  Dumping every field
+    # would silently reset the settings the operator did not mention.  The value
+    # rules (a negative `max_concurrency`, an unknown `egress_policy`, a
+    # `workspace_subdir` that escapes `AGENT_WORK_ROOT`) stay in the service,
+    # which is what keeps its prose 400s reachable; `schemas.RunnerPatchRequest`
+    # therefore constrains nothing but the JSON types.
+    changes = body.model_dump(exclude_unset=True)
 
     try:
         runner = _runner_service().update(repo.id, **changes)
@@ -1098,8 +1131,10 @@ def update_runner(slug: str):
     return jsonify(runner.to_dict())
 
 
-@repo_bp.route("/api/v1/repos/<path:slug>/runner/credential", methods=["PUT"])
+@repo_bp.put("/api/v1/repos/<path:slug>/runner/credential")
 @require_permission(REPO_WRITE)
+@_BODY_CEILING
+@validate_request()
 @api_operation(
     summary="Set the repository's runner credential",
     description=(
@@ -1122,19 +1157,20 @@ def update_runner(slug: str):
         **errors("400", "401", "403", "404", "503", "500"),
     },
 )
-def put_runner_credential(slug: str):
+def put_runner_credential(slug: str, body: RunnerCredentialRequest):
     repo = _repo_or_404(slug)
-    payload = _json_body()
 
-    token = payload.get("token")
-    if not isinstance(token, str) or not token.strip():
+    # `body.token` is bound and required — see `schemas.RunnerCredentialRequest`.
+    # The blank check stays here because `""` and `"   "` are valid `str`s: the
+    # service would refuse them too, but this route has always answered them
+    # itself, before it asks the service to seal anything.
+    token = body.token
+    if not token.strip():
         raise BadRequestError("token 不能为空")
-    username = payload.get("username")
-    if username is None:
-        username = ""
-    if not isinstance(username, str):
-        raise BadRequestError("username 必须是字符串")
-    expires_at = _credential_expiry(payload.get("expires_at"))
+    username = body.username or ""
+    # `_credential_expiry` still owns the ISO-8601 parse and its prose 400 — the
+    # model only proves the field is a string.
+    expires_at = _credential_expiry(body.expires_at)
 
     try:
         runner = _runner_service().set_credential(
@@ -1142,10 +1178,9 @@ def put_runner_credential(slug: str):
         )
     except repo_runner.RepoRunnerError as exc:
         # A missing GIT_IDENTITY_KEY (or unusable key material) is a deployment
-        # gap: 503, and this module never falls back to a plaintext write.  Mask
-        # the token in case a future service message ever quotes it.
-        detail = mask_secrets(str(exc), [token])
-        raise PypiError(f"runner 凭据未写入：{detail}", status_code=503) from exc
+        # gap: 503, and this module never falls back to a plaintext write.  The
+        # response deliberately quotes neither the token nor the upstream detail.
+        raise PypiError("runner 凭据未写入", status_code=503) from exc
     logger.info("runner credential stored for repo %s", slug)
     return jsonify(runner.to_dict())
 
@@ -1197,7 +1232,7 @@ def delete_runner_credential(slug: str):
 def get_import(job_id: int):
     job = _service().job(job_id)
     if job is None:
-        raise PypiError(f"导入任务 {job_id} 不存在", status_code=404)
+        raise PypiError("导入任务不存在", status_code=404)
     return jsonify(repo_import.job_payload(job, repo_slug=job_repo_slug(job)))
 
 
@@ -1318,13 +1353,15 @@ def git_credential(slug: str):
 # `request.host` when FORGEJO_PUBLIC_BASE_URL is a path prefix).
 
 def _git_config() -> repo_import.ImportConfig:
-    """The Forgejo/import environment, read once per request.
+    """The deployment's Forgejo/import configuration.
 
-    ``ImportConfig.from_env`` is the single reader of ``FORGEJO_BASE_URL`` /
-    ``FORGEJO_ADMIN_TOKEN`` / ``FORGEJO_OWNER`` / ``FORGEJO_PUBLIC_BASE_URL``;
-    this endpoint deliberately invents no second set of variable names.
+    ``config.forgejo`` is the single reader of ``FORGEJO_BASE_URL`` /
+    ``FORGEJO_ADMIN_TOKEN`` / ``FORGEJO_OWNER`` / ``FORGEJO_PUBLIC_BASE_URL`` and
+    :meth:`ImportConfig.from_settings` only reshapes it into the value object the
+    rest of the tree passes around; this endpoint deliberately invents no second
+    set of variable names.
     """
-    return repo_import.ImportConfig.from_env()
+    return repo_import.ImportConfig.from_settings()
 
 
 def _forgejo_repo_name(repo, slug: str) -> str:

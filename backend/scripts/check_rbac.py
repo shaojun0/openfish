@@ -187,6 +187,10 @@ def main() -> int:
 
     check(alice_client.get("/simple/").status_code == 200,
           "revoking `authenticated` and granting `reader-only` keeps read access")
+    # `POST /` takes `form: PyPIUploadForm`, so this pair also pins the *order* of
+    # the guard and the request binding: a binder that ran before
+    # `@require_permission` would answer the request below with its own 400 instead
+    # of the 403 — after spooling an unauthorized body to disk.
     upload = alice_client.post("/", auth=None)
     check(upload.status_code == 403,
           f"package:write is enforced — upload refused with 403 (got {upload.status_code})")

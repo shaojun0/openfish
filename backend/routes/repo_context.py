@@ -19,13 +19,26 @@ in the wrapped ``text`` and nowhere else.
 Authorization: ``repo:read`` (§5.1) — every signed-in user may read a
 repository's collaboration history.  Nothing here writes, so there is no wider
 point to check.
+
+Request binding
+---------------
+``search_repo_context`` binds its query string as a view parameter (``query:
+RepoContextSearchQuery``) instead of reading ``request.args`` by hand, which is
+what ``@validate_request()`` — placed *below* the guard, so an unauthorized
+request is answered ``401``/``403`` and never by the binder — installs.  The
+model carries the raw query strings and nothing else: the clamping of
+``limit``/``offset``/``budget``, the tri-state ``is_pull_request``, the
+ISO-8601 bounds and the ``finding_id``/``q`` exclusivity all stay in this
+module, so no value this route has always tolerated can become the binder's
+``400``.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from flask import Blueprint, abort, jsonify, request
+from flask import abort, jsonify
+from flask_openapi3 import APIBlueprint, validate_request
 from sqlalchemy import select
 
 from auth.decorators import require_permission
@@ -34,9 +47,13 @@ from errors import BadRequestError
 from extensions.database import Session
 from models.agent_hub import Repo
 from openapi import api_operation, errors, ok
+from schemas import RepoContextSearchQuery
 from services import repo_context
 
-repo_context_bp = Blueprint("repo_context", __name__)
+# `doc_ui=False` for the same reason `app.py` passes it: the request-binding half
+# of flask-openapi3 is all this module uses, and the library's own document is
+# never served — `/openapi.json` is built from `@api_operation` in `openapi/`.
+repo_context_bp = APIBlueprint("repo_context", __name__, doc_ui=False)
 
 #: One entry of ``items`` — metadata for an evidence entry that is *included*
 #: in ``text``.  The untrusted body itself is only ever inside the wrapped
@@ -241,52 +258,57 @@ _QUERY_PARAMS = [
 
 
 # ── Query-argument parsing ───────────────────────────────────────────
+# The raw query strings below come from the bound `RepoContextSearchQuery`; every
+# *decision* stays here on purpose.  This route clamps its integers, reads an
+# empty value as "not given" and answers a malformed one with its own prose 400 —
+# none of which a typed model field can express without turning a request it
+# serves today into a 400.
 
-def _int_arg(name: str, default: int, *, low: int, high: int) -> int:
+def _int_arg(raw: str | None, name: str, default: int, *, low: int, high: int) -> int:
     """An integer query argument, clamped — or a 400 when it is not a number."""
-    raw = (request.args.get(name) or "").strip()
-    if not raw:
+    value = (raw or "").strip()
+    if not value:
         return default
     try:
-        value = int(raw)
+        number = int(value)
     except ValueError as exc:
         raise BadRequestError(f"参数 {name} 必须是整数") from exc
-    return max(low, min(high, value))
+    return max(low, min(high, number))
 
 
-def _optional_int_arg(name: str) -> int | None:
+def _optional_int_arg(raw: str | None, name: str) -> int | None:
     """An optional integer query argument — ``None`` when absent, 400 on junk.
 
     ``_int_arg`` cannot express "not given at all": it needs a default and a
     clamp, and ``finding_id`` has neither (an absent id switches the route to
     keyword mode; a present one must be the exact id, not a clamped one).
     """
-    raw = (request.args.get(name) or "").strip()
-    if not raw:
+    value = (raw or "").strip()
+    if not value:
         return None
     try:
-        return int(raw)
+        return int(value)
     except ValueError as exc:
         raise BadRequestError(f"参数 {name} 必须是整数") from exc
 
 
-def _bool_arg(name: str) -> bool | None:
-    raw = (request.args.get(name) or "").strip().lower()
-    if not raw:
+def _bool_arg(raw: str | None, name: str) -> bool | None:
+    value = (raw or "").strip().lower()
+    if not value:
         return None
-    if raw in ("1", "true", "yes"):
+    if value in ("1", "true", "yes"):
         return True
-    if raw in ("0", "false", "no"):
+    if value in ("0", "false", "no"):
         return False
     raise BadRequestError(f"参数 {name} 只接受 true/false")
 
 
-def _time_arg(name: str) -> datetime | None:
-    raw = (request.args.get(name) or "").strip()
-    if not raw:
+def _time_arg(raw: str | None, name: str) -> datetime | None:
+    value = (raw or "").strip()
+    if not value:
         return None
     try:
-        return datetime.fromisoformat(raw)
+        return datetime.fromisoformat(value)
     except ValueError as exc:
         raise BadRequestError(
             f"参数 {name} 必须是 ISO-8601 时间（如 2024-01-01 或 2024-01-01T00:00:00+00:00）"
@@ -299,14 +321,15 @@ def _repo(slug: str) -> tuple[int, str]:
         select(Repo.id, Repo.source).where(Repo.slug == slug)
     ).first()
     if row is None:
-        abort(404, description=f"仓库 {slug!r} 不存在")
+        abort(404, description="仓库不存在")
     return int(row[0]), (row[1] or "repo")
 
 
 # ── Routes ───────────────────────────────────────────────────────────
 
-@repo_context_bp.route("/api/v1/repos/<path:slug>/context/search")
+@repo_context_bp.get("/api/v1/repos/<path:slug>/context/search")
 @require_permission(REPO_READ)
+@validate_request()
 @api_operation(
     summary="Search a repository's collaboration history",
     description=(
@@ -347,9 +370,12 @@ def _repo(slug: str) -> tuple[int, str]:
         **errors("400", "401", "403", "404", "500"),
     },
 )
-def search_repo_context(slug: str):
-    q = (request.args.get("q") or "").strip()
-    finding_id = _optional_int_arg("finding_id")
+def search_repo_context(slug: str, query: RepoContextSearchQuery):
+    # `query` is the bound query string — see `schemas.RepoContextSearchQuery`:
+    # it declares the raw values and this view keeps every tolerance (the clamps,
+    # the empty-means-absent readings and the prose 400s).
+    q = (query.q or "").strip()
+    finding_id = _optional_int_arg(query.finding_id, "finding_id")
     if finding_id is not None and q:
         raise BadRequestError(
             "finding_id 与 q 互斥：给了 finding_id 就以该 finding 的关联证据"
@@ -357,19 +383,20 @@ def search_repo_context(slug: str):
             "召回；不能再叠加关键词 q，请二选一。"
         )
 
-    kind = (request.args.get("kind") or repo_context.ALL_KINDS).strip().lower()
+    kind = (query.kind or repo_context.ALL_KINDS).strip().lower()
     if kind not in (*repo_context.KINDS, repo_context.ALL_KINDS):
         raise BadRequestError(
-            f"kind 只支持 {'/'.join((*repo_context.KINDS, repo_context.ALL_KINDS))}（收到 {kind!r}）"
+            f"kind 只支持 {'/'.join((*repo_context.KINDS, repo_context.ALL_KINDS))}"
         )
 
     repo_id, source = _repo(slug)
     limit = _int_arg(
-        "limit", repo_context.DEFAULT_LIMIT, low=1, high=repo_context.MAX_LIMIT
+        query.limit, "limit", repo_context.DEFAULT_LIMIT,
+        low=1, high=repo_context.MAX_LIMIT,
     )
-    offset = _int_arg("offset", 0, low=0, high=1_000_000)
+    offset = _int_arg(query.offset, "offset", 0, low=0, high=1_000_000)
     budget = _int_arg(
-        "budget", repo_context.DEFAULT_BUDGET,
+        query.budget, "budget", repo_context.DEFAULT_BUDGET,
         low=repo_context.MIN_BUDGET, high=repo_context.MAX_BUDGET,
     )
 
@@ -390,7 +417,7 @@ def search_repo_context(slug: str):
         except LookupError:
             # Deliberately one shape for "no such finding" and "belongs to
             # another repo": the caller must not learn which ids exist.
-            abort(404, description=f"仓库 {slug!r} 下不存在 finding {finding_id}")
+            abort(404, description="该仓库下不存在这个 finding")
         result["slug"] = slug
         return jsonify(result)
 
@@ -398,13 +425,13 @@ def search_repo_context(slug: str):
         Session(),
         repo_id=repo_id,
         q=q,
-        state=request.args.get("state") or None,
-        label=request.args.get("label") or None,
-        author=request.args.get("author") or None,
+        state=query.state or None,
+        label=query.label or None,
+        author=query.author or None,
         kind=kind,
-        is_pull_request=_bool_arg("is_pull_request"),
-        since=_time_arg("since"),
-        until=_time_arg("until"),
+        is_pull_request=_bool_arg(query.is_pull_request, "is_pull_request"),
+        since=_time_arg(query.since, "since"),
+        until=_time_arg(query.until, "until"),
         limit=limit,
         offset=offset,
         budget=budget,

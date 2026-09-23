@@ -54,7 +54,7 @@ from sqlalchemy.orm import Mapped
 
 from services.digest import sha256_text
 
-from .base import Base, iso, utcnow
+from .base import Base, in_check, iso, utcnow
 
 # ── Status vocabularies (DEVELOPMENT.md §4.3) ────────────────────────
 # "No scattered string literals" is a hard rule: services and routes import
@@ -105,12 +105,6 @@ CHECK_AUTHOR = ("human", "ai")
 CHECK_RUN_STATE = ("passed", "failed", "unverified", "error")
 
 
-def _in_check(column: str, values: tuple[str, ...]) -> str:
-    """SQL for ``column IN ('a', 'b', …)`` — the body of a CHECK constraint."""
-    joined = ", ".join(f"'{value}'" for value in values)
-    return f"{column} IN ({joined})"
-
-
 # ── Fingerprint (DEVELOPMENT.md §4.4, invariant I1) ──────────────────
 
 def context_key(*parts: str | None) -> str:
@@ -159,9 +153,9 @@ class Repo(Base):
 
     __tablename__ = "repos"
     __table_args__ = (
-        CheckConstraint(_in_check("kind", REPO_KIND), name="ck_repos_kind"),
-        CheckConstraint(_in_check("source", REPO_SOURCE), name="ck_repos_source"),
-        CheckConstraint(_in_check("sync_state", REPO_SYNC_STATE), name="ck_repos_sync_state"),
+        CheckConstraint(in_check("kind", REPO_KIND), name="ck_repos_kind"),
+        CheckConstraint(in_check("source", REPO_SOURCE), name="ck_repos_source"),
+        CheckConstraint(in_check("sync_state", REPO_SYNC_STATE), name="ck_repos_sync_state"),
     )
 
     id: Mapped[int] = Column(Integer, primary_key=True, autoincrement=True)
@@ -326,8 +320,8 @@ class ImportJob(Base):
 
     __tablename__ = "import_jobs"
     __table_args__ = (
-        CheckConstraint(_in_check("mode", IMPORT_MODE), name="ck_import_jobs_mode"),
-        CheckConstraint(_in_check("phase", IMPORT_PHASE), name="ck_import_jobs_phase"),
+        CheckConstraint(in_check("mode", IMPORT_MODE), name="ck_import_jobs_mode"),
+        CheckConstraint(in_check("phase", IMPORT_PHASE), name="ck_import_jobs_phase"),
     )
 
     id: Mapped[int] = Column(Integer, primary_key=True, autoincrement=True)
@@ -388,7 +382,7 @@ class RepoIssue(Base):
         # the same index name (see models/agent_hub_migrate.py).
         UniqueConstraint("repo_id", "source_id", name="uq_repo_issues_repo_source"),
         Index("ix_repo_issues_repo_state", "repo_id", "state"),
-        CheckConstraint(_in_check("state", ISSUE_STATE), name="ck_repo_issues_state"),
+        CheckConstraint(in_check("state", ISSUE_STATE), name="ck_repo_issues_state"),
     )
 
     id: Mapped[int] = Column(Integer, primary_key=True, autoincrement=True)
@@ -508,9 +502,9 @@ class Finding(Base):
         Index("ix_findings_repo_status", "repo_id", "status"),
         Index("ix_findings_repo_rule", "repo_id", "rule_id"),
         Index("ix_findings_status_due", "status", "due"),
-        CheckConstraint(_in_check("level", FINDING_LEVEL), name="ck_findings_level"),
-        CheckConstraint(_in_check("severity", FINDING_SEVERITY), name="ck_findings_severity"),
-        CheckConstraint(_in_check("status", FINDING_STATUS), name="ck_findings_status"),
+        CheckConstraint(in_check("level", FINDING_LEVEL), name="ck_findings_level"),
+        CheckConstraint(in_check("severity", FINDING_SEVERITY), name="ck_findings_severity"),
+        CheckConstraint(in_check("status", FINDING_STATUS), name="ck_findings_status"),
     )
 
     id: Mapped[int] = Column(Integer, primary_key=True, autoincrement=True)
@@ -631,7 +625,7 @@ class ReviewRun(Base):
     __tablename__ = "review_runs"
     __table_args__ = (
         Index("ix_review_runs_repo_started", "repo_id", "started_at"),
-        CheckConstraint(_in_check("status", REVIEW_RUN_STATUS), name="ck_review_runs_status"),
+        CheckConstraint(in_check("status", REVIEW_RUN_STATUS), name="ck_review_runs_status"),
     )
 
     id: Mapped[int] = Column(Integer, primary_key=True, autoincrement=True)
@@ -691,8 +685,8 @@ class AgentTask(Base):
     __table_args__ = (
         Index("ix_agent_tasks_status_priority_created", "status", "priority", "created_at"),
         Index("ix_agent_tasks_lease_until", "lease_until"),
-        CheckConstraint(_in_check("status", TASK_STATUS), name="ck_agent_tasks_status"),
-        CheckConstraint(_in_check("kind", TASK_KIND), name="ck_agent_tasks_kind"),
+        CheckConstraint(in_check("status", TASK_STATUS), name="ck_agent_tasks_status"),
+        CheckConstraint(in_check("kind", TASK_KIND), name="ck_agent_tasks_kind"),
     )
 
     id: Mapped[int] = Column(Integer, primary_key=True, autoincrement=True)
@@ -792,13 +786,13 @@ class CheckSuiteSnapshot(Base):
         ),
         Index("ix_check_suite_snapshots_repo_kind", "repo_id", "kind"),
         CheckConstraint(
-            _in_check("kind", CHECK_SUITE_KIND), name="ck_check_suite_snapshots_kind"
+            in_check("kind", CHECK_SUITE_KIND), name="ck_check_suite_snapshots_kind"
         ),
         CheckConstraint(
-            _in_check("status", CHECK_SUITE_STATUS), name="ck_check_suite_snapshots_status"
+            in_check("status", CHECK_SUITE_STATUS), name="ck_check_suite_snapshots_status"
         ),
         CheckConstraint(
-            _in_check("author", CHECK_AUTHOR), name="ck_check_suite_snapshots_author"
+            in_check("author", CHECK_AUTHOR), name="ck_check_suite_snapshots_author"
         ),
     )
 
@@ -900,7 +894,7 @@ class CheckRun(Base):
         Index("ix_check_runs_repo_check", "repo_id", "check_id"),
         Index("ix_check_runs_suite_hash", "suite_hash"),
         CheckConstraint(
-            _in_check("state", CHECK_RUN_STATE), name="ck_check_runs_state"
+            in_check("state", CHECK_RUN_STATE), name="ck_check_runs_state"
         ),
     )
 
@@ -1038,7 +1032,7 @@ class WebhookDelivery(Base):
     received_at: Mapped[datetime] = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"<WebhookDelivery {self.delivery_key!r}>"
+        return f"<WebhookDelivery {self.delivery_key}>"
 
 
 # ── finding_evidence ─────────────────────────────────────────────────
@@ -1060,10 +1054,10 @@ class FindingEvidence(Base):
         ),
         Index("ix_finding_evidence_finding", "finding_id"),
         CheckConstraint(
-            _in_check("relation", EVIDENCE_RELATION), name="ck_finding_evidence_relation"
+            in_check("relation", EVIDENCE_RELATION), name="ck_finding_evidence_relation"
         ),
         CheckConstraint(
-            _in_check("status", ("pending", "confirmed", "rejected")),
+            in_check("status", ("pending", "confirmed", "rejected")),
             name="ck_finding_evidence_status",
         ),
     )

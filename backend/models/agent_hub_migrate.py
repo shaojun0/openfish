@@ -45,7 +45,6 @@ from typing import Any
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.schema import CreateTable
 
 from .agent_hub import (
     CHECK_SUITE_KIND,
@@ -58,7 +57,8 @@ from .agent_hub import AgentTask, CheckRun, CheckSuiteSnapshot, CheckValidation
 from .agent_hub import Finding, FindingEvent, FindingEvidence, GitIdentity
 from .agent_hub import ImportJob, Repo, RepoCommit, RepoIssue, RepoRunner
 from .agent_hub import ReviewRun, WebhookDelivery
-from .base import Base
+from .base import Base, in_check
+from .table_rebuild import rebuild_table
 
 logger = logging.getLogger("cpypiserver.models.agent_hub_migrate")
 
@@ -237,10 +237,6 @@ def ensure_schema(engine: Engine, *, create: bool = True) -> dict[str, list[str]
 _LITERAL_RE = re.compile(r"'((?:[^']|'')*)'")
 
 
-def _table_model(table: str) -> Any | None:
-    return next((model for model in AGENT_HUB_TABLES if model.__tablename__ == table), None)
-
-
 def _check_literals(sqltext: str) -> set[str]:
     """The single-quoted literals inside a CHECK expression."""
     return {match.replace("''", "'") for match in _LITERAL_RE.findall(sqltext or "")}
@@ -271,10 +267,6 @@ def _mentions_column(sqltext: str, column: str) -> bool:
     return re.search(rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])", sqltext or "") is not None
 
 
-def _in_check_sql(column: str, values: tuple[str, ...]) -> str:
-    return f"{column} IN (" + ", ".join(f"'{value}'" for value in values) + ")"
-
-
 def evolve_check_constraints(engine: Engine) -> list[str]:
     """Rewrite every CHECK constraint whose allowed set has grown.
 
@@ -293,7 +285,7 @@ def evolve_check_constraints(engine: Engine) -> list[str]:
         if _dialect_name(engine) == "postgresql":
             _evolve_postgres(engine, table, name, column, values, live)
         else:
-            _rebuild_sqlite(engine, table)
+            rebuild_table(engine, table)
         updated.append(f"{table}.{name}")
         logger.warning(
             "Migrated agent-hub database: widened CHECK %s on %s to admit %s",
@@ -322,67 +314,8 @@ def _evolve_postgres(
                 continue
             conn.execute(text(f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS "{live_name}"'))
         conn.execute(text(
-            f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({_in_check_sql(column, values)})"
+            f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({in_check(column, values)})"
         ))
-
-
-def _rebuild_sqlite(engine: Engine, table: str) -> None:
-    """The documented SQLite table-rebuild, preserving rows, FKs and indexes.
-
-    Order matters: ``PRAGMA foreign_keys=OFF`` must run *outside* a transaction
-    (it is silently ignored inside one), the new table is created under a
-    temporary name so the live table is only absent between ``DROP`` and
-    ``RENAME``, and the FKs of other tables keep pointing at ``table`` because
-    that name is never renamed away.  ``PRAGMA foreign_key_check`` verifies the
-    result before the connection is released.
-    """
-    model = _table_model(table)
-    if model is None:
-        raise RuntimeError(f"no model registered for table {table!r}")
-    new_name = f"{table}__openfish_new"
-    ddl = str(CreateTable(model.__table__).compile(dialect=engine.dialect))
-    match = re.search(rf"CREATE TABLE {re.escape(table)}(?![A-Za-z0-9_])", ddl)
-    if match is None:
-        raise RuntimeError(f"unexpected CREATE TABLE DDL for {table}: {ddl[:80]!r}")
-    # Replace only the table name in the CREATE TABLE clause; constraint and
-    # index names that also contain the table name must stay untouched.
-    ddl = ddl[: match.start()] + f"CREATE TABLE {new_name}" + ddl[match.end():]
-
-    columns = [column.name for column in model.__table__.columns]
-    column_sql = ", ".join(columns)
-    raw = engine.raw_connection()
-    try:
-        cursor = raw.cursor()
-        cursor.execute("PRAGMA foreign_keys=OFF")
-        try:
-            cursor.execute("BEGIN")
-            cursor.execute(f"DROP TABLE IF EXISTS {new_name}")
-            cursor.execute(ddl)
-            cursor.execute(
-                f"INSERT INTO {new_name} ({column_sql}) SELECT {column_sql} FROM {table}"
-            )
-            cursor.execute(f"DROP TABLE {table}")
-            cursor.execute(f"ALTER TABLE {new_name} RENAME TO {table}")
-            for index in model.__table__.indexes:
-                index_columns = ", ".join(column.name for column in index.columns)
-                unique_sql = "UNIQUE " if index.unique else ""
-                cursor.execute(
-                    f"CREATE {unique_sql}INDEX IF NOT EXISTS {index.name} "
-                    f"ON {table}({index_columns})"
-                )
-            cursor.execute("COMMIT")
-        except Exception:
-            cursor.execute("ROLLBACK")
-            raise
-        finally:
-            cursor.execute("PRAGMA foreign_keys=ON")
-        violations = cursor.execute("PRAGMA foreign_key_check").fetchall()
-        if violations:
-            raise RuntimeError(
-                f"foreign key violations after rebuilding {table}: {violations[:5]}"
-            )
-    finally:
-        raw.close()
 
 
 def create_missing_tables(engine: Engine) -> list[str]:

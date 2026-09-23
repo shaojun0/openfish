@@ -122,7 +122,7 @@ def normalize_doc_id(value: str) -> str:
     if any(ch in _FORBIDDEN_CHARS or ord(ch) < 32 for ch in candidate):
         raise ValueError("文档标识不能包含路径分隔符或控制字符")
     if candidate in _RESERVED_IDS:
-        raise ValueError(f"文档标识 {candidate!r} 是保留名")
+        raise ValueError(f"文档标识 {candidate} 是保留名")
     return candidate
 
 

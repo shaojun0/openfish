@@ -130,9 +130,13 @@ def register_all(app):
 
     # ── JSON API consumed by the SPA ────────────────────────────────
     app.register_blueprint(session_bp, url_prefix=api)
-    app.register_blueprint(api_keys_bp, url_prefix=api)
+    # `api_keys_bp` and `access_bp` bind request bodies as view parameters
+    # (`body: CreateKeyRequest`, `body: CreateRoleRequest`, …), so they go
+    # through `register_api` like `pypi_bp`.  Their read-only routes stay plain
+    # `@…_bp.route` views and are registered unchanged.
+    app.register_api(api_keys_bp, url_prefix=api)
     app.register_blueprint(admin_bp, url_prefix=api + "/admin")
-    app.register_blueprint(access_bp, url_prefix=api + "/admin")
+    app.register_api(access_bp, url_prefix=api + "/admin")
 
     # ── Artifact hub: one blueprint per ecosystem ───────────────────
     # Each carries both the JSON catalog under `/api/v1/*` and the
@@ -141,11 +145,25 @@ def register_all(app):
     # Every view keeps its own `@require_permission` guard — there is no
     # blueprint-wide guard, and `scripts/check_auth_guards.py` fails the build
     # if one is ever dropped or written above its `@route` decorator.
-    app.register_blueprint(hub_bp, url_prefix=prefix)
-    app.register_blueprint(npm_bp, url_prefix=prefix)
-    app.register_blueprint(docker_bp, url_prefix=prefix)
-    app.register_blueprint(debian_bp, url_prefix=prefix)
-    app.register_blueprint(docs_bp, url_prefix=prefix)
+    app.register_api(hub_bp, url_prefix=prefix)
+    # `npm_bp` is a flask-openapi3 APIBlueprint too: `PUT /npm/<package>` binds
+    # `npm publish`'s JSON body as a view parameter, which only the per-verb
+    # decorators install, so it goes through `register_api` like `pypi_bp`. Every
+    # other npm route stays a plain `@npm_bp.route` and is registered unchanged.
+    app.register_api(npm_bp, url_prefix=prefix)
+    # `docker_bp` and `debian_bp` are flask-openapi3 APIBlueprints as well: the
+    # docker `tags/list` query, the docker artifact upload, the offline snapshot
+    # query and the offline bundle import bind their input as view parameters,
+    # which only the per-verb decorators install, so both go through
+    # `register_api`. Every other route on them stays a plain `@…_bp.route` and
+    # is registered unchanged.
+    app.register_api(docker_bp, url_prefix=prefix)
+    app.register_api(debian_bp, url_prefix=prefix)
+    # `docs_bp` binds request input on four of its views (the two Markdown
+    # writes, the asset upload and the raw-download `?download=` flag), so it
+    # goes through `register_api` as well; every other docs route stays a plain
+    # `@docs_bp.route` and is registered unchanged.
+    app.register_api(docs_bp, url_prefix=prefix)
 
     # ── Private CA chain. Anonymous on purpose: a client must be able to
     #    fetch the CA before it can trust the mirror.  Serves exactly one
@@ -163,10 +181,21 @@ def register_all(app):
     # Registered at the bare prefix like the artifact-hub blueprints, so each
     # view declares its full path internally (/api/v1/repos…,
     # /api/v1/findings…, /api/v1/agent/tasks…, /api/v1/repos/<slug>/context…).
-    app.register_blueprint(repo_bp, url_prefix=prefix)
-    app.register_blueprint(repo_context_bp, url_prefix=prefix)
-    app.register_blueprint(findings_bp, url_prefix=prefix)
-    app.register_blueprint(agent_tasks_bp, url_prefix=prefix)
+    # `repo_bp` binds request input on seven of its views (the two list queries
+    # and the five JSON bodies), which only the per-verb decorators install, so
+    # it goes through `register_api` like `pypi_bp`.  Every other view on it
+    # stays a plain `@repo_bp.route` and is registered unchanged.
+    app.register_api(repo_bp, url_prefix=prefix)
+    # The other three Agent-Hub blueprints bind request input too — the context
+    # search's query string, the findings board's filters, the decide/policy
+    # bodies and the agent task list/create pair (each module carries a "Request
+    # binding" note naming its views) — so they go through `register_api` as
+    # well.  Their remaining views stay plain `@…_bp.route` and are registered
+    # unchanged; `repo_webhook_bp` binds nothing at all, because its HMAC is
+    # verified over the raw bytes before anything is parsed.
+    app.register_api(repo_context_bp, url_prefix=prefix)
+    app.register_api(findings_bp, url_prefix=prefix)
+    app.register_api(agent_tasks_bp, url_prefix=prefix)
     app.register_blueprint(repo_webhook_bp, url_prefix=prefix)
 
     # ── SPA shell. Machine routes above win by rule specificity, so this

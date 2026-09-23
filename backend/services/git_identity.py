@@ -42,10 +42,8 @@ a fake client, a throwaway SQLite file and no network.
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
-import os
 import re
 import secrets
 import threading
@@ -56,9 +54,10 @@ from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote
 
 import requests
-from cryptography.fernet import Fernet
 from sqlalchemy.exc import IntegrityError
 
+from config import settings
+from config.keys import KeysConfig
 from models.agent_hub import GitIdentity
 from models.base import iso, utcnow
 from services.agent_runner import mask_secrets
@@ -70,14 +69,17 @@ from services.repo_import import (
     ImportConfig,
     RateLimiter,
 )
+from services.sealing import derive_fernet
 
 logger = logging.getLogger("cpypiserver.git_identity")
 
 
 # ── Configuration constants ──────────────────────────────────────────
 
-#: Environment variable holding the Fernet master key for token storage.
-GIT_IDENTITY_KEY_ENV = "GIT_IDENTITY_KEY"
+#: Environment variable holding the Fernet master key for token storage.  Derived
+#: from :class:`config.keys.KeysConfig`, which owns the variable, so the name an
+#: operator is told to set cannot drift from the name that is read.
+GIT_IDENTITY_KEY_ENV = KeysConfig.env_name("git_identity_key")
 
 #: What an operator sees when the key is missing.  Deliberately actionable:
 #: the endpoint answers 503 rather than degrading to plaintext.
@@ -154,11 +156,11 @@ def derive_username(user_id: int, external_id: str) -> str:
     try:
         numeric_id = int(user_id)
     except (TypeError, ValueError) as exc:
-        raise GitIdentityError(f"user_id 必须是整数：{user_id!r}") from exc
+        raise GitIdentityError(f"user_id 必须是整数：{user_id}") from exc
     digest = sha256_text(str(external_id or ""))
     username = f"{USERNAME_PREFIX}{numeric_id}-{digest[:USERNAME_HASH_LENGTH]}"
     if len(username) > USERNAME_MAX_LENGTH or not _USERNAME_RE.match(username):
-        raise GitIdentityError(f"派生的 Forgejo 用户名不合法：{username!r}")
+        raise GitIdentityError(f"派生的 Forgejo 用户名不合法：{username}")
     return username
 
 
@@ -177,22 +179,30 @@ class TokenCipher:
     """Fernet wrapper that seals a token for storage.
 
     ``GIT_IDENTITY_KEY`` may be any high-entropy secret (the S6.md command is
-    ``secrets.token_urlsafe(48)``); a valid Fernet key is *derived* from it as
-    ``urlsafe_b64encode(sha256(secret))``.  Deriving rather than demanding
-    exactly 32 url-safe bytes is deliberate: ``Fernet.generate_key()`` and a
-    random token both work, so an operator cannot end up with a key the code
-    silently refuses.  Rotation of the key is out of scope and documented.
+    ``secrets.token_urlsafe(48)``); the derivation from it lives in
+    :func:`services.sealing.derive_fernet`, which is the project's one answer to
+    "how is a Fernet cipher built from an operator's secret?".  Rotation of the
+    key is out of scope and documented.
     """
 
     def __init__(self, key: str | None = None, *, env: Mapping[str, str] | None = None) -> None:
         raw = key
         if raw is None:
-            raw = (env or os.environ).get(GIT_IDENTITY_KEY_ENV)
+            if env is None:
+                # The deployment's key, resolved once at start-up.  ``os.environ``
+                # is not consulted here: the settings object is the only reader of
+                # the environment, so nothing can re-point the master key at
+                # runtime.
+                raw = settings.keys.git_identity_key
+            else:
+                # An explicit mapping — including an empty one, which means "no
+                # key here" and must not silently fall back to the deployment's
+                # (that is how the offline gate proves the missing-key path).
+                raw = env.get(GIT_IDENTITY_KEY_ENV)
         raw = (raw or "").strip()
         if not raw:
             raise GitIdentityConfigError(GIT_IDENTITY_KEY_HELP)
-        derived = base64.urlsafe_b64encode(bytes.fromhex(sha256_text(raw)))
-        self._fernet = Fernet(derived)
+        self._fernet = derive_fernet(raw)
 
     def encrypt(self, plaintext: str) -> str:
         return self._fernet.encrypt(plaintext.encode("utf-8")).decode("ascii")
@@ -235,7 +245,7 @@ class ForgejoIdentityClient:
         limiter: RateLimiter | None = None,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
-        self.config = config or ImportConfig.from_env()
+        self.config = config or ImportConfig.from_settings()
         self.base_url = self.config.base_url
         self.timeout = self.config.http_timeout
         self.session = session or requests.Session()

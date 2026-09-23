@@ -36,9 +36,12 @@ shallow read-only bare copy plus the ``git`` CLI, §3.1).  ``scripts/
 check_agent_repos.py`` substitutes both and runs the whole pipeline offline —
 no Forgejo, no network, no Flask.
 
-Configuration is environment-only.  The Forgejo admin token and the webhook
-secret are never written to a file, a log line or a response body, matching the
-"no secrets on disk" rule the model route table already follows.
+Configuration lives in :mod:`config.forgejo` (``FORGEJO_*`` / ``IMPORT_*`` /
+``GIT_MIRROR_DIR``) and is read once, when the process builds its settings; this
+module no longer looks at the environment itself, so a job cannot mirror from a
+different Forgejo than the process that queued it.  The Forgejo admin token and
+the webhook secret are never written to a file, a log line or a response body,
+matching the "no secrets on disk" rule the model route table already follows.
 """
 
 from __future__ import annotations
@@ -59,86 +62,93 @@ from urllib.parse import quote, urlparse
 
 import requests
 
+from config import settings
+from config.forgejo import ForgejoConfig
 from services.agent_runner import POLICY_RELPATH, mask_secrets
 from services.git_auth import credential_args, git_env, git_host_of
 
 logger = logging.getLogger("cpypiserver.repo_import")
 
 
-# ── Configuration (environment only) ─────────────────────────────────
+# ── Configuration (owned by config/forgejo.py) ───────────────────────
 
-CONFIG_ITEMS: tuple[tuple[str, str], ...] = (
-    ("FORGEJO_BASE_URL", "http://forgejo:3000"),
-    ("FORGEJO_GIT_BASE_URL", ""),
-    ("FORGEJO_ADMIN_TOKEN", ""),
-    ("FORGEJO_WEBHOOK_SECRET", ""),
-    ("FORGEJO_OWNER", "openfish"),
-    ("FORGEJO_PUBLIC_BASE_URL", "/git"),
-    ("IMPORT_MAX_ISSUES", "20000"),
-    ("IMPORT_MAX_COMMITS", "5000"),
-    ("IMPORT_MAX_RATE", "2"),
-    ("IMPORT_PAGE_SIZE", "50"),
-    ("IMPORT_POLL_INTERVAL", "2"),
-    ("IMPORT_POLL_ATTEMPTS", "150"),
-    ("IMPORT_HTTP_TIMEOUT", "30"),
-    ("GIT_MIRROR_DIR", ""),
-)
+def _cfg_default(field: str) -> Any:
+    """The default :class:`ForgejoConfig` declares for *field*.
+
+    Read off the model instead of being re-typed, so an unconfigured
+    :class:`ImportConfig` means exactly what an unconfigured deployment means and
+    the two cannot drift.
+    """
+    return ForgejoConfig.model_fields[field].default
 
 
 @dataclass(frozen=True)
 class ImportConfig:
-    """The import pipeline's knobs, read from the environment on construction.
+    """The import pipeline's knobs, as one immutable value.
 
-    ``from_env`` is deliberately re-evaluated per job rather than frozen at
-    import time, so a test (or an operator restarting a worker with a different
-    ceiling) sees the new value.
+    :meth:`from_settings` is how a running deployment builds one.  The settings
+    object is the only reader of the environment, so a job can no longer mirror
+    from a different Forgejo than the process that queued it, and the old
+    field-by-field ``number()`` parsing — which warned and silently fell back to
+    a default for a value it could not use — is gone: the settings model
+    validates those values once, at start-up, and refuses to start rather than
+    quietly importing with a limit nobody chose.
+
+    The class stays a plain frozen value object rather than *being* the settings
+    model, because every consumer is handed one — the pipeline, the webhook route
+    and the Forgejo identity exchange all take a config, and the offline gates
+    inject their own.  Its field defaults are the settings' own defaults (see
+    :func:`_cfg_default`), so there is one number in the tree.
     """
 
-    base_url: str = "http://forgejo:3000"
-    git_base_url: str = ""
-    admin_token: str = ""
-    webhook_secret: str = ""
-    owner: str = "openfish"
-    public_base_url: str = "/git"
-    max_issues: int = 20000
-    max_commits: int = 5000
-    max_rate: float = 2.0
-    page_size: int = 50
-    poll_interval: float = 2.0
-    poll_attempts: int = 150
-    http_timeout: float = 30.0
-    mirror_dir: str = ""
+    base_url: str = _cfg_default("forgejo_base_url")
+    git_base_url: str = _cfg_default("forgejo_git_base_url")
+    admin_token: str = _cfg_default("forgejo_admin_token")
+    webhook_secret: str = _cfg_default("forgejo_webhook_secret")
+    owner: str = _cfg_default("forgejo_owner")
+    public_base_url: str = _cfg_default("forgejo_public_base_url")
+    max_issues: int = _cfg_default("import_max_issues")
+    max_commits: int = _cfg_default("import_max_commits")
+    max_rate: float = _cfg_default("import_max_rate")
+    page_size: int = _cfg_default("import_page_size")
+    poll_interval: float = _cfg_default("import_poll_interval")
+    poll_attempts: int = _cfg_default("import_poll_attempts")
+    http_timeout: float = _cfg_default("import_http_timeout")
+    mirror_dir: str = _cfg_default("git_mirror_dir")
+    #: Credential for cloning from a *remote* import source that requires
+    #: authentication (see ``config.forgejo.import_source_token``).  It used to be
+    #: read straight out of the environment at probe time, which is why it never
+    #: appeared in this dataclass; it is a platform secret and belongs with the
+    #: rest of the deployment's Forgejo configuration.
+    source_token: str = _cfg_default("import_source_token")
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> "ImportConfig":
-        get = (env or os.environ).get
+    def from_settings(cls, source: ForgejoConfig | None = None) -> "ImportConfig":
+        """Build one from the deployment's Forgejo/importer settings.
 
-        def number(name: str, default: float, *, integer: bool = False) -> float:
-            raw = (get(name) or "").strip()
-            try:
-                value = float(raw) if raw else default
-            except (TypeError, ValueError):
-                logger.warning("ignoring non-numeric %s=%r; using %s", name, raw, default)
-                value = default
-            if value <= 0:
-                value = default
-            return int(value) if integer else value
-
+        The small normalisations stay here — trailing slashes off the URLs, the
+        credentials stripped of surrounding whitespace — because
+        :class:`ImportConfig` is the value every consumer reads, and it has to
+        mean the same thing whether it came from the settings, from a job row or
+        from a gate.
+        """
+        config = settings.forgejo if source is None else source
         return cls(
-            base_url=(get("FORGEJO_BASE_URL") or "http://forgejo:3000").strip().rstrip("/"),
-            git_base_url=(get("FORGEJO_GIT_BASE_URL") or "").strip().rstrip("/"),
-            admin_token=(get("FORGEJO_ADMIN_TOKEN") or "").strip(),
-            webhook_secret=(get("FORGEJO_WEBHOOK_SECRET") or "").strip(),
-            owner=(get("FORGEJO_OWNER") or "openfish").strip() or "openfish",
-            public_base_url=(get("FORGEJO_PUBLIC_BASE_URL") or "/git").strip().rstrip("/"),
-            max_issues=int(number("IMPORT_MAX_ISSUES", 20000, integer=True)),
-            max_commits=int(number("IMPORT_MAX_COMMITS", 5000, integer=True)),
-            max_rate=float(number("IMPORT_MAX_RATE", 2.0)),
-            page_size=int(number("IMPORT_PAGE_SIZE", 50, integer=True)),
-            poll_interval=float(number("IMPORT_POLL_INTERVAL", 2.0)),
-            poll_attempts=int(number("IMPORT_POLL_ATTEMPTS", 150, integer=True)),
-            http_timeout=float(number("IMPORT_HTTP_TIMEOUT", 30.0)),
-            mirror_dir=(get("GIT_MIRROR_DIR") or "").strip(),
+            base_url=config.forgejo_base_url.strip().rstrip("/"),
+            git_base_url=config.forgejo_git_base_url.strip().rstrip("/"),
+            admin_token=config.forgejo_admin_token.strip(),
+            webhook_secret=config.forgejo_webhook_secret.strip(),
+            owner=config.forgejo_owner.strip(),
+            public_base_url=config.forgejo_public_base_url.strip().rstrip("/"),
+            max_issues=int(config.import_max_issues),
+            max_commits=int(config.import_max_commits),
+            max_rate=float(config.import_max_rate),
+            page_size=int(config.import_page_size),
+            poll_interval=float(config.import_poll_interval),
+            poll_attempts=int(config.import_poll_attempts),
+            http_timeout=float(config.import_http_timeout),
+            mirror_dir=config.git_mirror_dir.strip(),
+            source_token=config.import_source_token.strip(),
         )
 
 
@@ -242,12 +252,12 @@ def _split_namespace(path: str) -> tuple[str, str, str]:
     """
     parts = [p for p in path.split("/") if p]
     if len(parts) < 2:
-        raise SourceUrlError(f"仓库地址缺少 owner/name：{path!r}")
+        raise SourceUrlError(f"仓库地址缺少 owner/name：{path}")
     if parts[-1].endswith(".git"):
         parts[-1] = parts[-1][: -len(".git")]
     if not all(_OWNER_RE.match(segment) for segment in parts[:-1]) \
             or not _NAME_RE.match(parts[-1]):
-        raise SourceUrlError(f"仓库地址中的路径段非法：{'/'.join(parts)!r}")
+        raise SourceUrlError(f"仓库地址中的路径段非法：{'/'.join(parts)}")
     return "/".join(parts), parts[-2], parts[-1]
 
 
@@ -285,10 +295,10 @@ def parse_source(source_url: str) -> RepoSource:
         parsed = urlparse(raw)
         scheme = (parsed.scheme or "").lower()
         if scheme not in {"http", "https", "git", "ssh"}:
-            raise SourceUrlError(f"不支持的仓库协议：{raw!r}（需要 https / git / ssh）")
+            raise SourceUrlError(f"不支持的仓库协议：{raw}（需要 https / git / ssh）")
         host = (parsed.hostname or "").lower()
         if not host:
-            raise SourceUrlError(f"仓库地址缺少主机名：{raw!r}")
+            raise SourceUrlError(f"仓库地址缺少主机名：{raw}")
         namespace, owner, name = _split_namespace(parsed.path)
 
     kind = _KNOWN_HOSTS.get(host, "git")
@@ -375,7 +385,7 @@ def set_models(**models: Any) -> None:
     """Override the model classes (tests only).  Unknown keys are rejected."""
     for name, cls in models.items():
         if name not in _MODELS:
-            raise KeyError(f"unknown agent-hub model {name!r}")
+            raise KeyError(f"unknown agent-hub model {name}")
         _MODELS[name] = cls
 
 
@@ -544,7 +554,7 @@ class ForgejoClient:
         limiter: RateLimiter | None = None,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
-        self.config = config or ImportConfig.from_env()
+        self.config = config or ImportConfig.from_settings()
         self.base_url = self.config.base_url
         self.timeout = self.config.http_timeout
         self.session = session or requests.Session()
@@ -896,7 +906,7 @@ class ForgejoClient:
             return {"reachable": True, "open_issues": None,
                     "detail": "bare git URL — probe deferred to migration"}
         headers = {"Accept": "application/json", "User-Agent": "openfish-agent-hub/1"}
-        token = os.environ.get("IMPORT_SOURCE_TOKEN", "").strip()
+        token = self.config.source_token
         if token and source.kind != "git":
             headers["Authorization"] = f"Bearer {token}"
         self.limiter.wait()
@@ -949,7 +959,7 @@ class ForgejoClient:
         slug = str(forgejo_repo or "").strip().strip("/")
         if not slug or "/" not in slug:
             raise ForgejoError(
-                f"forgejo_repo 必须是 <owner>/<name>，得到 {forgejo_repo!r}"
+                f"forgejo_repo 必须是 <owner>/<name>，得到 {forgejo_repo}"
             )
         document = self._json(
             "POST",
@@ -991,7 +1001,7 @@ class GitCommitReader:
         git_binary: str = "git",
         runner: Callable[..., subprocess.CompletedProcess] | None = None,
     ) -> None:
-        self.config = config or ImportConfig.from_env()
+        self.config = config or ImportConfig.from_settings()
         self.git = git_binary
         self._run = runner or subprocess.run
 
@@ -1082,6 +1092,11 @@ class GitCommitReader:
         extra_env: Mapping[str, str] | None = None,
     ) -> str:
         argv = [self.git, *self._git_auth_args(), *args]
+        # The ambient environment, deliberately: this is not configuration being
+        # *read*, it is the environment a git client is *given* — proxies,
+        # ``GIT_SSL_CAINFO``, credential helpers and the operator's git config all
+        # have to survive, and the import runs trusted platform code (unlike the
+        # sandbox children, which go through services/sandbox_env.py).
         env = dict(os.environ)
         env.update(extra_env or {})
         try:
@@ -1214,7 +1229,7 @@ class RepoImportService:
         artifact_root: str | None = None,
     ) -> None:
         self.session = session
-        self.config = config or ImportConfig.from_env()
+        self.config = config or ImportConfig.from_settings()
         self.client = client if client is not None else ForgejoClient(config=self.config)
         self.commits = commits if commits is not None else GitCommitReader(config=self.config)
         self.queue = queue
@@ -1278,9 +1293,9 @@ class RepoImportService:
         """
         source = parse_source(source_url)
         if mode not in {"code", "code+issues", "issues"}:
-            raise SourceUrlError(f"不支持的导入模式：{mode!r}")
+            raise SourceUrlError(f"不支持的导入模式：{mode}")
         if skip_to is not None and skip_to not in JOB_PHASES:
-            raise SourceUrlError(f"不支持的起始阶段：{skip_to!r}")
+            raise SourceUrlError(f"不支持的起始阶段：{skip_to}")
 
         repo = self.session.get(self.Repo, repo_id) if repo_id else None
         if repo is None:
@@ -1371,7 +1386,7 @@ class RepoImportService:
                     return self._finish(job, cursor, steps)
                 handler = getattr(self, f"_step_{phase}", None)
                 if handler is None:
-                    raise RepoImportError(f"未知的导入阶段：{phase!r}")
+                    raise RepoImportError(f"未知的导入阶段：{phase}")
                 moved = handler(job, cursor)
                 if moved:
                     steps += 1
@@ -2010,7 +2025,7 @@ def job_payload(job: Any, *, repo_slug: str | None = None) -> dict[str, Any]:
     explicit that a ceiling must never be a silent truncation, so the flag is
     part of the contract rather than an optional extra.
     """
-    config = ImportConfig.from_env()
+    config = ImportConfig.from_settings()
     partial = partial_of(job)
     finished = _get(job, "finished_at")
     started = _get(job, "started_at")
@@ -2102,15 +2117,14 @@ def fingerprint_source_paths(
     a timestamp or a digest, because any of those in a fingerprint would break
     the cross-commit deduplication the whole design rests on.
     """
-    settings = config or ImportConfig.from_env()
-    reader = GitCommitReader(config=settings)
+    import_config = config or ImportConfig.from_settings()
+    reader = GitCommitReader(config=import_config)
     mirror = reader.ensure_mirror(forgejo_repo)
     raw = reader._git(["log", "--name-only", "--format=", "HEAD"], cwd=mirror)
     return sorted({line.strip() for line in raw.splitlines() if line.strip()})
 
 
 __all__ = [
-    "CONFIG_ITEMS",
     "CURSOR_VERSION",
     "DEFAULT_BRANCH",
     "JOB_PHASES",

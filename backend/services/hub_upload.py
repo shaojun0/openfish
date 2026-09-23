@@ -113,7 +113,7 @@ def _check_listed(name: str, *, what: str) -> None:
     lower = name.lower()
     if lower in _RESERVED_NAMES or lower.startswith(_HIDDEN_PREFIXES):
         raise BadRequestError(
-            f"{what} {name!r} 会被目录扫描忽略（catalog.json 与 README/LICENSE/"
+            f"{what} {name} 会被目录扫描忽略（catalog.json 与 README/LICENSE/"
             f"CHANGELOG 属于说明文件），请改用其它名称"
         )
 
@@ -132,7 +132,7 @@ def _check_suffix(
         return
     allowed = ", ".join(suffixes)
     extra = f"；或以 {', '.join(bare_names)} 开头" if bare_names else ""
-    raise BadRequestError(f"不支持的文件类型 {name!r}；允许的扩展名：{allowed}{extra}")
+    raise BadRequestError(f"不支持的文件类型 {name}；允许的扩展名：{allowed}{extra}")
 
 
 def tools_target(root: str, filename: str, category: str = "") -> Path:
@@ -191,7 +191,7 @@ def save(target: Path, upload, *, overwrite: bool | None = None) -> int:
     published file is chmodded 0644 by :func:`services.fileio.atomic_write_stream`.
     """
     if target.is_dir():
-        raise BadRequestError(f"{target.name!r} 已是一个目录，无法作为文件写入")
+        raise BadRequestError(f"{target.name} 已是一个目录，无法作为文件写入")
     allow_overwrite = settings.storage.overwrite if overwrite is None else overwrite
     if target.exists() and not allow_overwrite:
         raise PypiError(

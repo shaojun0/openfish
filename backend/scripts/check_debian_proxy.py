@@ -270,7 +270,7 @@ def main() -> int:
         check(
             "Release keeps its Content-Type",
             response.headers.get("Content-Type", "").startswith("text/plain"),
-            f"Content-Type={response.headers.get('Content-Type')!r}",
+            f"Content-Type={response.headers.get('Content-Type')}",
         )
 
         response = client_get(client, "/debian/dists/bookworm/main/binary-arm64/Packages")
@@ -295,8 +295,8 @@ def main() -> int:
             ".gz Content-Encoding / Content-Type preserved",
             gz_response.headers.get("Content-Encoding") == "gzip"
             and gz_response.headers.get("Content-Type") == "application/x-gzip",
-            f"Content-Encoding={gz_response.headers.get('Content-Encoding')!r} "
-            f"Content-Type={gz_response.headers.get('Content-Type')!r}",
+            f"Content-Encoding={gz_response.headers.get('Content-Encoding')} "
+            f"Content-Type={gz_response.headers.get('Content-Type')}",
         )
 
         # ── Second request inside the TTL must not hit the mirror ────
@@ -351,7 +351,7 @@ def main() -> int:
         check(
             "pool GET advertises Accept-Ranges",
             response.headers.get("Accept-Ranges") == "bytes",
-            f"Accept-Ranges={response.headers.get('Accept-Ranges')!r}",
+            f"Accept-Ranges={response.headers.get('Accept-Ranges')}",
         )
 
         response = client_get(client, pool_path, headers={"Range": "bytes=0-9"})
@@ -367,8 +367,8 @@ def main() -> int:
             response.headers.get("Content-Range") == f"bytes 0-9/{len(POOL_BLOB)}"
             and response.headers.get("Content-Length") == "10"
             and response.headers.get("Accept-Ranges") == "bytes",
-            f"Content-Range={response.headers.get('Content-Range')!r} "
-            f"Content-Length={response.headers.get('Content-Length')!r}",
+            f"Content-Range={response.headers.get('Content-Range')} "
+            f"Content-Length={response.headers.get('Content-Length')}",
         )
 
         response = client.open(pool_path, method="HEAD", headers=AUTH)
@@ -378,7 +378,7 @@ def main() -> int:
             and response.data == b""
             and response.headers.get("Content-Length") == str(len(POOL_BLOB)),
             f"status={response.status_code} bytes={len(response.data)} "
-            f"Content-Length={response.headers.get('Content-Length')!r}",
+            f"Content-Length={response.headers.get('Content-Length')}",
         )
 
         # ── Error handling ───────────────────────────────────────────
@@ -390,7 +390,7 @@ def main() -> int:
             response.status_code == 404
             and response.is_json
             and "error" in response.get_json(),
-            f"status={response.status_code} body={response.data[:80]!r}",
+            f"status={response.status_code} body={response.data[:80]}",
         )
 
         response = client_get(client, "/debian/pool/main/t/tiny/missing.deb")
@@ -399,7 +399,7 @@ def main() -> int:
             response.status_code == 404
             and response.is_json
             and "error" in response.get_json(),
-            f"status={response.status_code} body={response.data[:80]!r}",
+            f"status={response.status_code} body={response.data[:80]}",
         )
 
         settings.hub.debian_upstream = f"http://127.0.0.1:{_free_port()}"
@@ -409,13 +409,13 @@ def main() -> int:
             response.status_code == 502
             and response.is_json
             and "error" in response.get_json(),
-            f"status={response.status_code} body={response.data[:80]!r}",
+            f"status={response.status_code} body={response.data[:80]}",
         )
         response = client_get(client, "/debian/pool/main/t/tiny/tiny_1.0_arm64.deb")
         check(
             "unreachable upstream on pool -> 502 JSON",
             response.status_code == 502 and response.is_json,
-            f"status={response.status_code} body={response.data[:80]!r}",
+            f"status={response.status_code} body={response.data[:80]}",
         )
 
         settings.hub.debian_upstream = ""
@@ -426,13 +426,13 @@ def main() -> int:
             response.status_code == 404
             and response.is_json
             and "local flat repository" in response.get_json().get("error", ""),
-            f"status={response.status_code} body={response.data[:120]!r}",
+            f"status={response.status_code} body={response.data[:120]}",
         )
         response = client_get(client, "/debian/pool/main/t/tiny/tiny_1.0_arm64.deb")
         check(
             "no upstream configured on pool -> 404 JSON",
             response.status_code == 404 and response.is_json,
-            f"status={response.status_code} body={response.data[:80]!r}",
+            f"status={response.status_code} body={response.data[:80]}",
         )
 
         # ── Path safety ──────────────────────────────────────────────
@@ -536,7 +536,7 @@ def main() -> int:
             and response.headers.get("Content-Range")
             == f"bytes 10-19/{len(LOCAL_DEB)}",
             f"status={response.status_code} bytes={len(response.data)} "
-            f"Content-Range={response.headers.get('Content-Range')!r}",
+            f"Content-Range={response.headers.get('Content-Range')}",
         )
 
         response = client.open(local_deb_path, method="HEAD", headers=AUTH)
@@ -546,14 +546,14 @@ def main() -> int:
             and response.data == b""
             and response.headers.get("Content-Length") == str(len(LOCAL_DEB)),
             f"status={response.status_code} bytes={len(response.data)} "
-            f"Content-Length={response.headers.get('Content-Length')!r}",
+            f"Content-Length={response.headers.get('Content-Length')}",
         )
 
         response = client_get(client, "/debian/dists/%2e%2e/%2e%2e/etc/passwd")
         check(
             "local traversal path is refused",
             400 <= response.status_code < 500,
-            f"status={response.status_code} body={response.data[:60]!r}",
+            f"status={response.status_code} body={response.data[:60]}",
         )
 
         # A symlink inside the tree pointing outside it must not be served.
@@ -564,7 +564,7 @@ def main() -> int:
         check(
             "symlink escaping the local mirror is refused",
             400 <= response.status_code < 500 and b"TOP SECRET" not in response.data,
-            f"status={response.status_code} body={response.data[:60]!r}",
+            f"status={response.status_code} body={response.data[:60]}",
         )
 
         # A local miss must still fall back to the upstream.
@@ -622,7 +622,7 @@ def main() -> int:
             response.status_code == 200
             and "text/plain" in response.headers.get("Content-Type", ""),
             f"status={response.status_code} Content-Type="
-            f"{response.headers.get('Content-Type')!r}",
+            f"{response.headers.get('Content-Type')}",
         )
 
         local_files = sorted(

@@ -202,7 +202,7 @@ def declare(code: str, *, name: str | None = None, description: str | None = Non
     """
     if not code or ":" not in code:
         raise ValueError(
-            f"permission code {code!r} must be namespaced as 'module:action'"
+            f"permission code {code} must be namespaced as 'module:action'"
         )
     prev = _DECLARED.get(code)
     if prev is None:

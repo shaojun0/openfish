@@ -49,7 +49,7 @@ def main() -> int:
 
     # ── 2. Envelope ──────────────────────────────────────────────────
     if spec.get("openapi") != "3.1.0":
-        fail(f"expected openapi 3.1.0, got {spec.get('openapi')!r}")
+        fail(f"expected openapi 3.1.0, got {spec.get('openapi')}")
     if not spec.get("paths"):
         fail("document has no paths")
     if not spec.get("info", {}).get("title"):

@@ -25,10 +25,18 @@ primitive — both come from Werkzeug, which is already a dependency:
 trusted to be one component (a document id, an asset name, a tool filename) is
 proved to be one here rather than reduced to one, so a caller that expected
 ``my doc`` does not silently end up with ``my_doc``.
+
+:func:`contained_resolved` is the variant for a destination inside a *live*
+tree.  ``safe_join`` is lexical: it refuses a component that is absolute or
+climbs out, but it cannot see that ``pool/main/x`` on disk is a symlink to
+``/etc``.  Where the target directory is one the operator — or an earlier
+import — may have populated, that difference is the whole check, so this one
+resolves the candidate before comparing.  One rule, one extra syscall.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from werkzeug.security import safe_join
@@ -67,8 +75,28 @@ def contained(root: str | Path, *parts: str) -> Path:
     """
     joined = safe_join(str(root), *parts)
     if joined is None:
-        raise ValueError(f"path escapes {root!r}")
+        raise ValueError(f"path escapes {root}")
     return Path(joined)
+
+
+def contained_resolved(root: str | Path, *parts: str) -> Path:
+    """Join *parts* under *root*, refusing anything that escapes after resolution.
+
+    The difference from :func:`contained` is one ``resolve()``.  A lexical check
+    cannot see that a component on disk *is* a symlink out of the root, which is
+    exactly the case for a write target inside a directory someone else may have
+    populated — the Debian repository a bundle is published into, for instance.
+    The root is resolved too, so a root that is itself reached through a symlink
+    still compares equal to its own real path rather than to the link.
+
+    Returns the resolved target, which is what callers open, so the path that
+    was checked and the path that is used cannot drift apart.
+    """
+    candidate = contained(root, *parts)
+    target = candidate.resolve()
+    if not target.is_relative_to(Path(root).resolve()):
+        raise ValueError(f"path escapes {root} through a symlink")
+    return target
 
 
 def single_segment(value: str, *, what: str = "name") -> str:
@@ -87,11 +115,17 @@ def single_segment(value: str, *, what: str = "name") -> str:
         raise ValueError(f"{what} must not start with a dot")
     if any(sep in value for sep in _PATH_SEPARATORS):
         raise ValueError(f"{what} must not contain a path separator")
-    if Path(value).name != value:
+    if re.split(r"[/\\]", value.rstrip("/\\"))[-1] != value:
         raise ValueError(f"{what} must be a single path segment")
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
         raise ValueError(f"{what} must not contain control characters")
     return value
 
 
-__all__ = ["MAX_NAME_BYTES", "contained", "safe_name", "single_segment"]
+__all__ = [
+    "MAX_NAME_BYTES",
+    "contained",
+    "contained_resolved",
+    "safe_name",
+    "single_segment",
+]

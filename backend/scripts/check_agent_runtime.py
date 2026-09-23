@@ -41,6 +41,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 os.chdir(REPO_ROOT)
 
+from config import settings  # noqa: E402
+from config.agent import AgentConfig  # noqa: E402
 from models.agent_hub import Finding, Repo  # noqa: E402
 from services import agent_worker  # noqa: E402
 from services.agent_queue import (  # noqa: E402
@@ -536,8 +538,17 @@ def check_pr_policy() -> None:
     except PolicyValidationError:
         check("非法 pr_policy 被 policy schema 拒绝", True)
 
-    # The environment override wins over the file and is normalised.
-    os.environ["AGENT_PR_POLICY"] = "NEVER"
+    # The deployment-wide override wins over the file and is normalised.  It is
+    # configured on the settings object rather than through ``os.environ``: the
+    # settings are resolved once at start-up and are the only reader of the
+    # environment, so a runtime re-read — which anything running in this process
+    # could have used to re-point publication — no longer exists.  The variable
+    # name is asserted first, so the field and the documented knob cannot drift.
+    check("AGENT_PR_POLICY 仍然映射到 settings.agent.pr_policy",
+          AgentConfig.env_name("pr_policy") == "AGENT_PR_POLICY",
+          AgentConfig.env_name("pr_policy"))
+    previous_policy = settings.agent.pr_policy
+    settings.agent.pr_policy = "NEVER"
     try:
         with tempfile.TemporaryDirectory(prefix="agent-runtime-") as root:
             sink = RecordingSink()
@@ -552,7 +563,7 @@ def check_pr_policy() -> None:
               outcome.status == "done" and adapter.committed == [] and not adapter.pushed,
               f"status={outcome.status} calls={adapter.calls}")
     finally:
-        os.environ.pop("AGENT_PR_POLICY", None)
+        settings.agent.pr_policy = previous_policy
 
 
 # ── production worker wiring (defects A1 / A2) ───────────────────────

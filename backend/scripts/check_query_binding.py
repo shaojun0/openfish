@@ -17,6 +17,11 @@ difference is a silent failure the test suite does not otherwise catch:
 * it binds a path parameter through a model named ``path`` in the view
   signature, so a plain ``str`` argument is dropped before the view runs — a
   ``500`` on every request, not a validation error;
+* it only reads a field out of the *file* part of a form when that field's JSON
+  Schema is ``{"type": "string", "format": "binary"}``, which is what
+  ``flask_openapi3.FileStorage`` emits.  An ``Optional[FileStorage]`` sends the
+  binder to the form's *text* fields instead, so a perfectly good upload is
+  answered "content is required";
 * its ``validation_error_callback`` result is passed to ``abort()``, so the
   callback must return a ``Response``; a ``(body, status)`` tuple turns the
   ``400`` into a ``500``.
@@ -26,6 +31,14 @@ the *reverse* direction is pinned too: ``url_for('pypi.package_page', …)`` and
 ``url_for('pypi.serve_package', …)`` must still build from the renamed path
 parameter, or the index page itself 500s while every literal-URL request passes.
 
+``POST /`` — the ``twine`` upload — is the one *form*-bound view.  Its section
+posts a real wheel and pins that the file arrives as a view parameter, that a
+body without it is answered by the envelope under ``form_params`` rather than by
+a bare ``422`` (or a ``KeyError`` inside the view), and that the upload really
+lands in ``PACKAGES_DIR``.  The order of the guard and the binding is pinned by
+``scripts/check_rbac.py``, which requires ``403`` — not the binding's ``400`` —
+for an account without ``package:write``.
+
 The last section pins the *removal*: the old distribution is absent from the
 interpreter and from every import in the source tree.
 """
@@ -34,12 +47,14 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import io
 import os
 import sys
 import tempfile
 import tomllib
-import zipfile
 from pathlib import Path
+
+from wheel.wheelfile import WheelFile
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -51,27 +66,47 @@ _PACKAGES_DIR = _TMP / "packages"
 #: The one seeded project, and the wheel the index has to list for it.
 _WHEEL = "demo_pkg-1.0.0-py3-none-any.whl"
 
+#: The wheel the upload section posts, and the name it must be stored under.
+_UPLOADED_WHEEL = "uploaded_pkg-2.0.0-py3-none-any.whl"
+
+
+def _wheel_bytes(name: str, version: str) -> bytes:
+    """A minimal but structurally real wheel, in memory.
+
+    Written through ``wheel.wheelfile.WheelFile`` — the same class
+    ``services.validation`` verifies an upload with — so the fixture carries the
+    ``RECORD`` hashes a real build would record.  Nothing here is a real build,
+    so the project name and version are the only things that vary.
+    """
+    dist_info = f"{name}-{version}.dist-info"
+    with tempfile.TemporaryDirectory(prefix="cpypi-binding-") as workdir:
+        path = Path(workdir) / f"{name}-{version}-py3-none-any.whl"
+        with WheelFile(str(path), "w") as wheel:
+            wheel.writestr(
+                f"{dist_info}/WHEEL",
+                "Wheel-Version: 1.0\nGenerator: check_query_binding\n"
+                "Root-Is-Purelib: true\nTag: py3-none-any\n",
+            )
+            wheel.writestr(
+                f"{dist_info}/METADATA",
+                f"Metadata-Version: 2.1\nName: {name.replace('_', '-')}\nVersion: {version}\n",
+            )
+        return path.read_bytes()
+
 
 def _seed_wheel() -> None:
     """Write a minimal but structurally real wheel before the app scans for it."""
     _PACKAGES_DIR.mkdir(parents=True, exist_ok=True)
-    dist_info = "demo_pkg-1.0.0.dist-info"
-    with zipfile.ZipFile(_PACKAGES_DIR / _WHEEL, "w") as wheel:
-        wheel.writestr(
-            f"{dist_info}/WHEEL",
-            "Wheel-Version: 1.0\nGenerator: check_query_binding\n"
-            "Root-Is-Purelib: true\nTag: py3-none-any\n",
-        )
-        wheel.writestr(
-            f"{dist_info}/METADATA",
-            "Metadata-Version: 2.1\nName: demo-pkg\nVersion: 1.0.0\n",
-        )
+    (_PACKAGES_DIR / _WHEEL).write_bytes(_wheel_bytes("demo_pkg", "1.0.0"))
 
 
 _seed_wheel()
 
 os.environ["API_KEYS_FILE"] = str(_TMP / "binding.db")
 os.environ["PACKAGES_DIR"] = str(_PACKAGES_DIR)
+# The upload below runs the real pipeline, GuardDog included: keep its pinned
+# top-package cache inside the throwaway tree rather than in data/.
+os.environ["GUARDDOG_CACHE_DIR"] = str(_TMP / "guarddog")
 os.environ["AUTH_ENABLED"] = "true"
 os.environ["AUTH_USERNAME"] = "bindingadmin"
 os.environ["AUTH_ASSERT"] = "binding-gate-secret"
@@ -116,10 +151,10 @@ def _exercise(client, base: str, success_status: int) -> None:
     check(isinstance(params, list) and bool(params), "body carries validation_error.query_params")
     if params:
         first = params[0]
-        check(first.get("loc") == ["format"], f"error loc is ['format'] (got {first.get('loc')!r})")
+        check(first.get("loc") == ["format"], f"error loc is ['format'] (got {first.get('loc')})")
         check(
             first.get("type") == "string_pattern_mismatch",
-            f"error type is string_pattern_mismatch (got {first.get('type')!r})",
+            f"error type is string_pattern_mismatch (got {first.get('type')})",
         )
 
 
@@ -184,6 +219,40 @@ def main() -> int:
         f"/packages/{_WHEEL}" in project_html,
         "the project page links to the file (url_for('pypi.serve_package'))",
     )
+
+    print()
+    print("── POST / binds the upload as a file part ──────────────────────")
+    # The upload view used to reach into `request.files["content"]`; it now takes
+    # `form: PyPIUploadForm`.  Getting there needs three things to line up at
+    # once, and each one fails silently on its own: the route must be registered
+    # by `@pypi_bp.post` (only the per-verb decorators install the binding), the
+    # model field must be a `flask_openapi3.FileStorage` (only that schema sends
+    # the binder to `request.files`), and `@validate_request()` must sit below
+    # `@require_permission` (otherwise the body is bound before the guard runs —
+    # see `scripts/check_rbac.py`, which pins the 403).
+    uploaded = client.post(
+        "/",
+        data={"content": (io.BytesIO(_wheel_bytes("uploaded_pkg", "2.0.0")), _UPLOADED_WHEEL)},
+        content_type="multipart/form-data",
+        auth=AUTH,
+    )
+    check(uploaded.status_code == 200,
+          f"POST / with a wheel -> {uploaded.status_code} (want 200)")
+    check((_PACKAGES_DIR / _UPLOADED_WHEEL).exists(),
+          f"the bound file part was stored as {_UPLOADED_WHEEL}")
+
+    # A body without the part is refused by the *binding*: 400 in the envelope the
+    # previous layer used, filed under the form location, and never a 500 from a
+    # view that ran with `form` unfilled.
+    missing = client.post("/", data={}, content_type="multipart/form-data", auth=AUTH)
+    missing_body = missing.get_json(silent=True) or {}
+    params = (missing_body.get("validation_error") or {}).get("form_params")
+    check(missing.status_code == 400,
+          f"POST / without the `content` part -> {missing.status_code} (want 400)")
+    check(isinstance(params, list) and bool(params),
+          "the missing part is reported as validation_error.form_params")
+    check(missing.headers.get("X-Content-Type-Options") == "nosniff",
+          "the binding error carries X-Content-Type-Options: nosniff")
 
     print()
     print("── the removed dependency is gone ──────────────────────────────")

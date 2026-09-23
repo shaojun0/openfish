@@ -240,10 +240,10 @@ def release_page(release_tag: str):
         return "<h1>Node builds not configured</h1>", 404
     resolved = _resolve(idx, release_tag)
     if resolved is None:
-        return f"<h1>Release '{release_tag}' not found</h1>", 404
+        return "<h1>Release not found</h1>", 404
     files = idx.get_files_for_release(resolved)
     if files is None:
-        return f"<h1>Release '{release_tag}' not found</h1>", 404
+        return "<h1>Release not found</h1>", 404
     return render_template(
         "node/build_release.html",
         server_name=settings.server.server_name,
@@ -276,13 +276,13 @@ def shasums(release_tag: str):
         return _not_found("Node builds not configured")
     resolved = _resolve(idx, release_tag)
     if resolved is None:
-        return _not_found(f"Release '{release_tag}' not found")
+        return _not_found("Release not found")
     on_disk = _builds_dir() / resolved / "SHASUMS256.txt"
     if on_disk.is_file():
         return send_from_directory(str(on_disk.parent), on_disk.name, mimetype="text/plain")
     text = idx.shasums(resolved)
     if text is None:
-        return _not_found(f"Release '{release_tag}' not found")
+        return _not_found("Release not found")
     return Response(text, mimetype="text/plain")
 
 
@@ -317,10 +317,10 @@ def download(release_tag: str, filename: str):
         return _not_found("Node builds not configured")
     resolved = _resolve(idx, release_tag)
     if resolved is None:
-        return _not_found(f"Release '{release_tag}' not found")
+        return _not_found("Release not found")
     release_dir = _builds_dir() / resolved
     if idx.get_file(resolved, filename) is None and filename not in _AUX_FILES:
-        return _not_found(f"Build '{filename}' not found in {release_tag}")
+        return _not_found("Build not found in that release")
     resp = send_from_directory(str(release_dir), filename)
     # The archives are already compressed; letting Flask re-encode them wastes
     # CPU and breaks the byte count a checksum verifies.
@@ -356,10 +356,10 @@ def sha256(release_tag: str, filename: str):
         return _not_found("Node builds not configured")
     resolved = _resolve(idx, release_tag)
     if resolved is None:
-        return _not_found(f"Release '{release_tag}' not found")
+        return _not_found("Release not found")
     f = idx.get_file(resolved, filename)
     if f is None:
-        return _not_found(f"Build '{filename}' not found")
+        return _not_found("Build not found")
     return jsonify({
         "filename": f.filename, "release_tag": f.release_tag,
         "version": f.version, "sha256": idx.get_sha256(f), "size": f.size,

@@ -7,12 +7,12 @@ this module keeps the two remaining halves.
 * **Tools** — a directory tree on disk, served as a browsable index plus direct
   downloads. It is the closest analogue of ``/simple/`` for binaries and
   scripts, and the remote install scripts (nap, uv, …) link into it.
-* **Model routing** — a small JSON document (``MODELS_FILE``) that a downstream
-  intranet DSH reads. This server publishes the table and lets an administrator
-  edit it in the browser (``model:write``); it does not proxy inference. The
-  document itself is owned by :mod:`services.model_routes`. Each route is
-  classified by ``provider`` (wire format) and ``kind`` (model function —
-  chat / completion / embedding / rerank / ocr / asr / tts).
+* **Model routing** — the ``model_routes`` table that a downstream intranet DSH
+  reads. This server publishes the table and lets an administrator edit it in
+  the browser (``model:write``); it does not proxy inference. The table itself
+  is owned by :mod:`services.model_routes`, which also validates every write.
+  Each route is classified by ``provider`` (wire format) and ``kind`` (model
+  function — chat / completion / embedding / rerank / ocr / asr / tts).
 
 Endpoints
 ---------
@@ -30,10 +30,18 @@ Endpoints
 Each index mirrors ``/simple/``: a server-rendered page a script (or a human)
 can read without the SPA. Templates live under ``static/<ecosystem>/``.
 
-⚠ Decorator order is load-bearing (see ``routes/python_build.py``): the
-``@hub_bp.route`` decorator must be the topmost line, or the guard is applied
-after registration and never runs. ``scripts/check_auth_guards.py`` enforces
-this.
+⚠ Decorator order is load-bearing (see ``routes/python_build.py``): the route
+decorator must be the topmost line, or the guard is applied after registration
+and never runs. ``scripts/check_auth_guards.py`` enforces this.
+
+The write routes bind their input as view parameters instead of reading
+``request`` by hand: ``body: ModelRouteRequest`` on the model-route writes and
+``form: ToolUploadForm`` on the tool upload. ``@validate_request()`` sits below
+the guard, so an unauthorized write is answered ``401``/``403`` and never by the
+binder. The model-route bodies are dumped with ``exclude_unset=True`` because
+``services.model_routes`` distinguishes *absent* from *null* — an omitted
+``kind``/``api_key`` keeps the stored value, an explicit null does not — and
+``scripts/check_request_binding.py`` pins that.
 """
 
 from __future__ import annotations
@@ -42,9 +50,10 @@ import logging
 from pathlib import Path
 
 from flask import (
-    Blueprint, abort, jsonify, render_template, request,
-    send_from_directory, url_for,
+    abort, jsonify, render_template, send_from_directory, url_for,
 )
+from flask_openapi3 import APIBlueprint, validate_request
+from sqlalchemy.exc import SQLAlchemyError
 
 from auth.decorators import require_permission
 from auth.permissions import (
@@ -53,13 +62,16 @@ from auth.permissions import (
 )
 from config import settings
 from errors import BadRequestError, PypiError
-from openapi import api_operation, binary, errors, ok
-from routes.hub_common import spa_url, wants_json
+from extensions.database import Session
+from openapi import api_operation, binary, errors, json_body, ok
+from routes.hub_common import body_ceiling, spa_url, wants_json
+from schemas import ModelRouteProbeRequest, ModelRouteRequest, ToolUploadForm
 from services import hub, hub_upload, model_routes
+from services.sealing import SealingKeyMissing
 
 logger = logging.getLogger("cpypiserver.hub")
 
-hub_bp = Blueprint("hub", __name__)
+hub_bp = APIBlueprint("hub", __name__)
 
 #: Inline response shapes.  The hub payloads are deliberately schemaless at the
 #: leaves (a tool may carry arbitrary tags) so a JSON object with `type` set is
@@ -129,7 +141,7 @@ _MODEL_ROUTE_SCHEMA = {
             "description": (
                 "Model function, orthogonal to the wire format: "
                 + " / ".join(model_routes.KINDS)
-                + ". Absent in the document it defaults by provider ("
+                + ". Absent it defaults by provider ("
                 + ", ".join(
                     f"{name} → {kind}" for name, kind in model_routes.DEFAULT_KINDS.items()
                 )
@@ -149,19 +161,16 @@ _MODEL_ROUTE_SCHEMA = {
             "type": ["string", "null"],
             "description": "Non-secret hint: the last four characters of the key",
         },
-        "api_key_env": {
-            "type": "string",
-            "description": (
-                "Environment-variable *name* the key is read from when no key is "
-                "stored inline. Lets the route document be committed and shared "
-                "while the secret stays in the process environment."
-            ),
-        },
         "api_key_source": {
             "type": "string",
             "description": (
-                "stored | env | env-missing | none — where the effective key came "
-                "from. `env-missing` means api_key_env names an unset variable."
+                "stored | plaintext | unreadable | none — how the route is "
+                "authenticated, never what with. `stored` is a key sealed in the "
+                "table and opened successfully; `plaintext` is a row written "
+                "before sealing existed and still awaiting `cli.py model-route "
+                "seal`; `unreadable` means the envelope cannot be opened under "
+                "this deployment's MODEL_ROUTE_KEY (missing or wrong key, or a "
+                "corrupt row); `none` means the route needs no credential."
             ),
         },
         "model": {"type": "string"},
@@ -208,9 +217,10 @@ _MODEL_ROUTE_RESOLVED_SCHEMA = {
         "api_key": {
             "type": "string",
             "description": (
-                "The **effective** upstream key, verbatim — the stored value, or "
-                "the value `api_key_env` resolved to (empty string when the route "
-                "needs none). Only `/api/v1/models/resolved` ever returns this."
+                "The **effective** upstream key, verbatim — decrypted from the "
+                "sealed column, or empty when the route needs none or its "
+                "envelope cannot be opened (see `api_key_source`). Only "
+                "`/api/v1/models/resolved` ever returns this."
             ),
         },
         "endpoint_url": {
@@ -225,53 +235,6 @@ _MODELS_RESOLVED_SCHEMA = {
     "properties": {
         **_MODELS_SCHEMA["properties"],
         "routes": {"type": "array", "items": _MODEL_ROUTE_RESOLVED_SCHEMA},
-    },
-}
-
-_ROUTE_WRITE_BODY = {
-    "required": True,
-    "content": {
-        "application/json": {
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Required, unique"},
-                    "provider": {"type": "string", "enum": list(model_routes.PROVIDERS)},
-                    "kind": {
-                        "type": "string",
-                        "enum": list(model_routes.KINDS),
-                        "description": (
-                            "Model function. Omitted or empty means the protocol "
-                            "default (`chat`, or `ocr` for `mineru`)."
-                        ),
-                    },
-                    "base_url": {"type": "string", "description": "Required http(s) URL"},
-                    "api_key": {
-                        "type": ["string", "null"],
-                        "description": (
-                            "Omitted or null keeps the stored key (the API never "
-                            "returns it), empty string clears it."
-                        ),
-                    },
-                    "api_key_env": {
-                        "type": ["string", "null"],
-                        "description": (
-                            "Environment-variable name to read the key from when "
-                            "no key is stored inline — the way to keep the route "
-                            "document free of secrets. Omitted or null keeps the "
-                            "current value; empty string clears it. Must match "
-                            "[A-Za-z_][A-Za-z0-9_]*."
-                        ),
-                    },
-                    "model": {"type": "string"},
-                    "aliases": {"type": "array", "items": {"type": "string"}},
-                    "path": {"type": "string"},
-                    "enabled": {"type": "boolean"},
-                    "description": {"type": "string", "description": "Required"},
-                },
-                "required": ["name", "base_url", "description"],
-            }
-        }
     },
 }
 
@@ -389,8 +352,9 @@ def tools_catalog():
     return jsonify(_tools_payload())
 
 
-@hub_bp.route("/api/v1/tools", methods=["POST"])
+@hub_bp.post("/api/v1/tools")
 @require_permission(TOOL_UPLOAD)
+@validate_request()
 @api_operation(
     summary="Upload a tool",
     description=(
@@ -438,11 +402,19 @@ def tools_catalog():
         **errors("400", "401", "403", "409", "413", "500"),
     },
 )
-def upload_tool():
-    upload = request.files.get("file")
-    if upload is None or not upload.filename:
+def upload_tool(form: ToolUploadForm):
+    # `form.file` is the `file` part, read out of `request.files` by the binder —
+    # see `schemas.ToolUploadForm` for why the field must be a
+    # `flask_openapi3.FileStorage` and not an optional one.  `filename` is also
+    # what tells a real part from a *text* field of the same name: the binder
+    # copies one of those into the model as a plain `str` (the field's schema is
+    # what sends it to `request.files`, but `FileStorage`'s validator then hands
+    # any value back untouched), so the `getattr` is what answers that request
+    # with this route's 400 instead of an `AttributeError` 500.
+    upload = form.file
+    if not getattr(upload, "filename", None):
         raise BadRequestError("multipart/form-data 需要一个 file 字段")
-    category = (request.form.get("category") or "").strip()
+    category = (form.category or "").strip()
     target = hub_upload.tools_target(
         settings.hub.tools_dir, upload.filename, category
     )
@@ -454,7 +426,7 @@ def upload_tool():
         # only fires if that visibility rule drifts; fail loudly rather than
         # answer 201 for a tool nobody can see.
         raise PypiError(
-            f"已写入 {relative}，但工具目录扫描未列出它；请检查 TOOLS_DIR 的可见性规则",
+            "已写入文件，但工具目录扫描未列出它；请检查 TOOLS_DIR 的可见性规则",
             status_code=500,
         )
     return jsonify(entry), 201
@@ -466,17 +438,18 @@ def upload_tool():
     summary="Model routing table",
     description=(
         "The model endpoints a downstream DSH deployment may be pointed at, "
-        "read from `MODELS_FILE`. A missing file yields `exists: false` and an "
-        "empty list rather than an error, so the panel renders on a fresh "
-        "install.\n\n"
+        "read from the `model_routes` table. An empty table yields an empty "
+        "list rather than an error, so the panel renders on a fresh install.\n\n"
         "Every route is classified on two independent axes: `provider` is the "
         "wire format (`openai` / `mineru` / `anthropic`) and `kind` is the model "
         "function (`chat` / `completion` / `embedding` / `rerank` / `ocr` / "
         "`asr` / `tts`). A route that names no `kind` falls back to its "
-        "protocol default, so the table classifies correctly even for a "
-        "document written before the field existed.\n\n"
+        "protocol default, so the table classifies correctly even for a row "
+        "written before the field existed.\n\n"
         "The raw API key of a route is **never** returned; `has_api_key` and "
-        "`api_key_hint` say whether one is stored. Each route may carry the "
+        "`api_key_hint` say whether one is stored, and `api_key_source` says how "
+        "it is configured (`plaintext` and `unreadable` are the two states worth "
+        "acting on). Each route may carry the "
         "result of the last connectivity probe under `health` (see "
         "`POST /api/v1/models/{name}/check`)."
     ),
@@ -487,12 +460,7 @@ def upload_tool():
     },
 )
 def model_routes_index():
-    return jsonify(
-        model_routes.load(
-            settings.hub.models_file,
-            health_path=settings.hub.model_health_file,
-        )
-    )
+    return jsonify(model_routes.load(Session))
 
 
 @hub_bp.route("/api/v1/models/resolved")
@@ -519,35 +487,35 @@ def model_routes_index():
     },
 )
 def model_routes_resolved():
-    return jsonify(
-        model_routes.resolve(
-            settings.hub.models_file,
-            health_path=settings.hub.model_health_file,
-        )
-    )
+    return jsonify(model_routes.resolve(Session))
 
 
 #: Ceiling on a route-body from the SPA.  The fields are short descriptions,
-#: not documents; a larger body is a mistake or an attack.
+#: not documents; a larger body is a mistake or an attack.  The gate itself is
+#: `routes.hub_common.body_ceiling`, shared with the repository writes, and it
+#: has to sit between the guard and the binder — see its docstring.
 _MODEL_ROUTE_MAX_BYTES = 64 * 1024
+_MODEL_ROUTE_BODY = body_ceiling(_MODEL_ROUTE_MAX_BYTES, "请求体过大")
 
 
-def _route_payload() -> dict:
-    """The JSON object body of a model-route write request."""
-    if request.content_length and request.content_length > _MODEL_ROUTE_MAX_BYTES:
-        raise BadRequestError("请求体过大")
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict):
-        raise BadRequestError("请求体必须是 JSON 对象")
-    return payload
+def _route_fields(body: ModelRouteRequest) -> dict:
+    """A bound route body as the mapping ``services.model_routes`` expects.
+
+    ``exclude_unset=True`` is load-bearing, not an optimisation: that service
+    distinguishes an **absent** field from an explicit ``null`` (``payload.get``
+    with a default), so an omitted ``kind``/``provider``/``api_key`` must not
+    arrive as ``None``.  Dumping every field would silently turn "keep the stored
+    value" into "reset to the default" on every ``PUT``.
+    """
+    return body.model_dump(by_alias=True, exclude_unset=True)
 
 
 def _conflict(exc: model_routes.DuplicateRouteError) -> PypiError:
     return PypiError(f"模型路由 {exc} 已存在", status_code=409)
 
 
-def _write_failed(exc: OSError) -> PypiError:
-    """Answer a stable 500 while the OS detail goes to the server log.
+def _write_failed(exc: Exception) -> PypiError:
+    """Answer a stable 500 while the database detail goes to the server log.
 
     The previous version interpolated ``exc.strerror`` into the response body.
     That is exactly the "system information disclosure" shape: the reason a
@@ -555,58 +523,76 @@ def _write_failed(exc: OSError) -> PypiError:
     attacker would otherwise have to guess.  The operator still gets the detail
     — from the log, where it belongs.
     """
-    logger.error("cannot write the model-route file: %s", exc)
+    logger.error("cannot write the model-route table: %s", exc)
     return PypiError(
-        "无法写入模型路由文件（MODELS_FILE 及其目录需可写，"
-        "容器单文件挂载不能使用 :ro）；详见服务日志",
+        "无法写入模型路由表（数据库不可写或连接中断）；详见服务日志",
         status_code=500,
     )
 
 
 def _not_found(name: str):
-    abort(404, description=f"模型路由 {name!r} 不存在")
+    abort(404, description="模型路由不存在")
+
+
+def _no_sealing_key(exc: Exception) -> PypiError:
+    """Answer 500 when the deployment has no MODEL_ROUTE_KEY.
+
+    A *server* misconfiguration, not a bad request: the operator's body was
+    fine, and the honest answer is "this box cannot store a key right now"
+    rather than a 400 that blames the caller — or, worse, a plaintext row.
+    """
+    logger.error("refusing to store a model-route API key: %s", exc)
+    return PypiError(str(exc), status_code=500)
 
 
 def _probe_timeout() -> float:
     return settings.hub.model_probe_timeout
 
 
-def _remember(route: dict, *, previous_name: str | None = None) -> dict:
-    """Probe a freshly written route and remember the answer."""
-    if previous_name and previous_name != route["name"]:
-        model_routes.forget_health(settings.hub.model_health_file, previous_name)
+def _remember(route: dict) -> dict:
+    """Probe a freshly written route and remember the answer on its row."""
     health = model_routes.probe(route, timeout=_probe_timeout())
-    model_routes.record_health(settings.hub.model_health_file, route["name"], health)
+    model_routes.record_health(Session, route["name"], health)
     return health
 
 
-@hub_bp.route("/api/v1/models", methods=["POST"])
+@hub_bp.post("/api/v1/models")
 @require_permission(MODEL_WRITE)
+@_MODEL_ROUTE_BODY
+@validate_request()
 @api_operation(
     summary="Add a model route",
     description=(
-        "Validates one route, appends it to `MODELS_FILE` and immediately "
-        "probes its URL for reachability. `name` and `description` are "
-        "mandatory; `api_key` may be empty. `provider` names the wire format "
+        "Validates one route, inserts it into the `model_routes` table and "
+        "immediately probes its URL for reachability. `name` and `description` "
+        "are mandatory; `api_key` may be empty. `provider` names the wire format "
         "and `kind` the model function (defaulting by protocol when omitted). "
-        "The response carries the stored "
+        "A non-empty `api_key` is sealed with `MODEL_ROUTE_KEY` before it is "
+        "stored, so a deployment without that key gets a 500 rather than a "
+        "plaintext row. The response carries the stored "
         "route (without the key) plus the probe result. Requires `model:write`, "
         "which by default only the built-in admin role holds."
     ),
     tags=["Hub"],
-    request_body=_ROUTE_WRITE_BODY,
+    request_body={
+        "required": True,
+        "description": "One model route; `services.model_routes` owns the rules",
+        "content": json_body("ModelRouteRequest"),
+    },
     responses={
         "201": ok("The created route and its first probe", _ROUTE_RESULT_SCHEMA),
         **errors("400", "401", "403", "409", "500"),
     },
 )
-def create_model_route():
-    payload = _route_payload()
+def create_model_route(body: ModelRouteRequest):
+    payload = _route_fields(body)
     try:
-        route = model_routes.create(settings.hub.models_file, payload)
+        route = model_routes.create(Session, payload)
     except model_routes.DuplicateRouteError as exc:
         raise _conflict(exc) from exc
-    except OSError as exc:
+    except SealingKeyMissing as exc:
+        raise _no_sealing_key(exc) from exc
+    except SQLAlchemyError as exc:
         raise _write_failed(exc) from exc
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
@@ -617,38 +603,51 @@ def create_model_route():
     }), 201
 
 
-@hub_bp.route("/api/v1/models/<name>", methods=["PUT"])
+@hub_bp.put("/api/v1/models/<name>")
 @require_permission(MODEL_WRITE)
+@_MODEL_ROUTE_BODY
+@validate_request()
 @api_operation(
     summary="Edit a model route",
     description=(
-        "Replaces one route in `MODELS_FILE` and re-probes it. The route is "
+        "Replaces one route in the `model_routes` table and re-probes it. The "
+        "route is "
         "addressed by its current name, so a body with a different `name` "
         "renames it. An omitted or null `api_key` keeps the stored key; an "
-        "empty string clears it. An omitted `kind` keeps the stored one and an "
+        "empty string clears it; a value is sealed with `MODEL_ROUTE_KEY` before "
+        "storage. An omitted `kind` keeps the stored one and an "
         "omitted `provider` keeps its default kind. Requires `model:write`."
     ),
     tags=["Hub"],
     parameters=[_ROUTE_PARAM],
-    request_body=_ROUTE_WRITE_BODY,
+    request_body={
+        "required": True,
+        "description": (
+            "The fields to change; anything omitted keeps the stored value — "
+            "the body is bound with `exclude_unset`, so *absent* really means absent"
+        ),
+        "content": json_body("ModelRouteRequest"),
+    },
     responses={
         "200": ok("The saved route and its probe", _ROUTE_RESULT_SCHEMA),
         **errors("400", "401", "403", "404", "409", "500"),
     },
 )
-def update_model_route(name: str):
-    payload = _route_payload()
+def update_model_route(name: str, body: ModelRouteRequest):
+    payload = _route_fields(body)
     try:
-        route = model_routes.update(settings.hub.models_file, name, payload)
+        route = model_routes.update(Session, name, payload)
     except model_routes.RouteNotFoundError:
         return _not_found(name)
     except model_routes.DuplicateRouteError as exc:
         raise _conflict(exc) from exc
-    except OSError as exc:
+    except SealingKeyMissing as exc:
+        raise _no_sealing_key(exc) from exc
+    except SQLAlchemyError as exc:
         raise _write_failed(exc) from exc
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
-    health = _remember(route, previous_name=name)
+    health = _remember(route)
     return jsonify({
         "route": model_routes.public_route(route, health=health),
         "health": health,
@@ -660,8 +659,8 @@ def update_model_route(name: str):
 @api_operation(
     summary="Remove a model route",
     description=(
-        "Deletes one route from `MODELS_FILE`, along with its remembered "
-        "connectivity result. Requires `model:write`."
+        "Deletes one route from the `model_routes` table, along with its "
+        "remembered connectivity result. Requires `model:write`."
     ),
     tags=["Hub"],
     parameters=[_ROUTE_PARAM],
@@ -672,19 +671,20 @@ def update_model_route(name: str):
 )
 def delete_model_route(name: str):
     try:
-        removed = model_routes.delete(settings.hub.models_file, name)
+        removed = model_routes.delete(Session, name)
     except model_routes.RouteNotFoundError:
         return _not_found(name)
-    except OSError as exc:
+    except SQLAlchemyError as exc:
         raise _write_failed(exc) from exc
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
-    model_routes.forget_health(settings.hub.model_health_file, name)
     return jsonify(model_routes.public_route(removed))
 
 
-@hub_bp.route("/api/v1/models/probe", methods=["POST"])
+@hub_bp.post("/api/v1/models/probe")
 @require_permission(MODEL_WRITE)
+@_MODEL_ROUTE_BODY
+@validate_request()
 @api_operation(
     summary="Probe an unsaved model route",
     description=(
@@ -697,28 +697,16 @@ def delete_model_route(name: str):
     tags=["Hub"],
     request_body={
         "required": True,
-        "content": {
-            "application/json": {
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "provider": {"type": "string", "enum": list(model_routes.PROVIDERS)},
-                        "base_url": {"type": "string"},
-                        "api_key": {"type": ["string", "null"]},
-                        "path": {"type": "string"},
-                    },
-                    "required": ["base_url"],
-                }
-            }
-        },
+        "description": "The draft to probe — `base_url` is the only required field",
+        "content": json_body("ModelRouteProbeRequest"),
     },
     responses={
         "200": ok("The probe result", _HEALTH_SCHEMA),
         **errors("400", "401", "403", "500"),
     },
 )
-def probe_model_route():
-    payload = _route_payload()
+def probe_model_route(body: ModelRouteProbeRequest):
+    payload = _route_fields(body)
     try:
         health = model_routes.probe_target(payload, timeout=_probe_timeout())
     except ValueError as exc:
@@ -745,14 +733,13 @@ def probe_model_route():
 def check_model_route(name: str):
     try:
         health = model_routes.probe_and_record(
-            settings.hub.models_file,
+            Session,
             name,
-            health_path=settings.hub.model_health_file,
             timeout=_probe_timeout(),
         )
     except model_routes.RouteNotFoundError:
         return _not_found(name)
-    except OSError as exc:
+    except SQLAlchemyError as exc:
         raise _write_failed(exc) from exc
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc

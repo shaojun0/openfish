@@ -54,11 +54,12 @@ from sqlalchemy import (  # noqa: E402
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker  # noqa: E402
 
-#: ``_in_check`` is the model's own CHECK-expression builder.  The fake
+#: ``in_check`` is the model layer's own CHECK-expression builder.  The fake
 #: ``import_jobs`` below reuses it so the substitute table carries the real
 #: ``ck_import_jobs_phase``; without it ``ensure_schema`` would rebuild the
 #: substitute into the real DDL and the fake ORM class would no longer match.
-from models.agent_hub import IMPORT_PHASE, TASK_KIND, _in_check  # noqa: E402
+from models.agent_hub import IMPORT_PHASE, TASK_KIND  # noqa: E402
+from models.base import in_check  # noqa: E402
 from routes.repo_webhook import (  # noqa: E402
     AGENT_LABEL, PRIORITY_DOC, PRIORITY_FIX, PRIORITY_REVIEW, backfill_pr_url,
     compute_signature, enqueue_task, parse_event, plan_actions, verify_signature,
@@ -139,7 +140,7 @@ def _build_models(*, with_partial: bool) -> tuple[dict[str, Any], MetaData]:
         #: stops ``models.agent_hub_migrate.evolve_check_constraints`` from
         #: rebuilding the substitute table out from under the fake ORM class.
         __table_args__ = (
-            CheckConstraint(_in_check("phase", IMPORT_PHASE),
+            CheckConstraint(in_check("phase", IMPORT_PHASE),
                             name="ck_import_jobs_phase"),
         )
         id = Column(Integer, primary_key=True, autoincrement=True)
@@ -451,7 +452,7 @@ def scenario_parse() -> None:
             and source.slug == path
             and source.clone_url.endswith(f"/{path}.git")
         )
-        check(f"{raw} → {source.slug}", ok, f"got {source!r}")
+        check(f"{raw} → {source.slug}", ok, f"got {source}")
 
     # Two subgroups with the same project name must not share an identity.
     first = repo_import.parse_source("https://gitlab.com/group-a/sub/project")
@@ -464,9 +465,9 @@ def scenario_parse() -> None:
         try:
             repo_import.parse_source(bad)
         except repo_import.SourceUrlError:
-            check(f"rejects {bad!r}", True)
+            check(f"rejects {bad}", True)
         else:
-            check(f"rejects {bad!r}", False, "no SourceUrlError")
+            check(f"rejects {bad}", False, "no SourceUrlError")
 
     source = repo_import.parse_source("https://github.com/vllm-project/vllm")
     check("probe_url targets the source host",
@@ -581,7 +582,7 @@ def scenario_idempotent_upsert() -> None:
               row.title == "renamed after the first pass"
               and row.state == "closed"
               and row.number == 999,
-              f"{row.title!r}/{row.state}/{row.number}")
+              f"{row.title}/{row.state}/{row.number}")
 
         # A row that predates source_id is still matched by (repo_id, number).
         legacy = type_issue(repo_id=repo.id, number=42, title="legacy row",
@@ -720,14 +721,14 @@ def scenario_partial() -> None:
               str(session.query(harness.models["RepoIssue"]).count()))
 
         # The REST document is built from the *job row*; it must agree.
-        previous = repo_import.ImportConfig.from_env
-        repo_import.ImportConfig.from_env = classmethod(  # type: ignore[assignment]
-            lambda cls, env=None: config
+        previous = repo_import.ImportConfig.from_settings
+        repo_import.ImportConfig.from_settings = classmethod(  # type: ignore[assignment]
+            lambda cls, source=None: config
         )
         try:
             payload = repo_import.job_payload(stored, repo_slug="vllm-project/vllm")
         finally:
-            repo_import.ImportConfig.from_env = previous
+            repo_import.ImportConfig.from_settings = previous
         check("payload.partial is true", payload["partial"] is True, json.dumps(payload))
         check("payload.truncated is true", payload["truncated"] is True)
         check("payload names the ceiling", payload["max_issues"] == 50,
@@ -750,14 +751,14 @@ def scenario_partial() -> None:
         check("no partial column on the model", not hasattr(stored, "partial"))
         check("partial_of() still reports truncation",
               repo_import.partial_of(stored) is True)
-        previous = repo_import.ImportConfig.from_env
-        repo_import.ImportConfig.from_env = classmethod(  # type: ignore[assignment]
-            lambda cls, env=None: config
+        previous = repo_import.ImportConfig.from_settings
+        repo_import.ImportConfig.from_settings = classmethod(  # type: ignore[assignment]
+            lambda cls, source=None: config
         )
         try:
             payload = repo_import.job_payload(stored)
         finally:
-            repo_import.ImportConfig.from_env = previous
+            repo_import.ImportConfig.from_settings = previous
         check("payload still exposes partial=true", payload["partial"] is True,
               json.dumps(payload))
         check("a human can see why in `error`",
@@ -1285,7 +1286,7 @@ def scenario_http() -> None:
             import routes.repo_webhook as webhook_module
             previous_config = webhook_module.ImportConfig
             webhook_module.ImportConfig = SimpleNamespace(  # type: ignore[assignment]
-                from_env=lambda: harness.config
+                from_settings=lambda: harness.config
             )
             try:
                 response = client.post("/api/v1/repos/webhook", data=body_bytes,
@@ -1359,7 +1360,7 @@ def scenario_queue_delivery() -> None:
         database.Session = scoped_session(harness.Session)  # type: ignore[assignment]
         previous_config = sys.modules["routes.repo_webhook"].ImportConfig
         sys.modules["routes.repo_webhook"].ImportConfig = SimpleNamespace(  # type: ignore[assignment]
-            from_env=lambda: harness.config
+            from_settings=lambda: harness.config
         )
         try:
             service = harness.service()
@@ -1450,7 +1451,7 @@ def scenario_import_phase_vocabulary() -> None:
     from models.base import Base as ModelBase
 
     check("the model admits the pipeline's first phase",
-          "validate" in IMPORT_PHASE, f"IMPORT_PHASE={IMPORT_PHASE!r}")
+          "validate" in IMPORT_PHASE, f"IMPORT_PHASE={IMPORT_PHASE}")
     check("JOB_PHASES is covered by IMPORT_PHASE",
           set(repo_import.JOB_PHASES) <= set(IMPORT_PHASE),
           f"extra={sorted(set(repo_import.JOB_PHASES) - set(IMPORT_PHASE))}")
@@ -1476,9 +1477,9 @@ def scenario_import_phase_vocabulary() -> None:
                     session.commit()
                 except Exception as exc:  # noqa: BLE001 - the CHECK is the assertion
                     session.rollback()
-                    check(f"the real schema admits phase {phase!r}", False, str(exc))
+                    check(f"the real schema admits phase {phase}", False, str(exc))
                     continue
-                check(f"the real schema admits phase {phase!r}", True)
+                check(f"the real schema admits phase {phase}", True)
     finally:
         engine.dispose()
 

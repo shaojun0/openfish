@@ -595,7 +595,7 @@ def _require_debt_fields(action: str, owner: str | None, due: date | None) -> No
         missing.append("due")
     if missing:
         raise DecisionInvalidError(
-            f"action {action!r} requires {' and '.join(missing)} (invariant I2)",
+            f"action {action} requires {' and '.join(missing)} (invariant I2)",
             code="finding_decision_invalid",
         )
 
@@ -633,7 +633,7 @@ def decide(
     action = str(action or "").strip().lower()
     if action not in DECISION_ACTIONS:
         raise DecisionInvalidError(
-            f"unknown action {action!r}; expected one of "
+            f"unknown action {action}; expected one of "
             f"{', '.join(DECISION_ACTIONS)}",
             code="finding_decision_invalid",
         )
@@ -676,7 +676,7 @@ def decide(
                     code="finding_decision_invalid",
                 )
     else:  # pragma: no cover - DECISION_ACTIONS screens every other spelling
-        raise DecisionInvalidError(f"unknown action {action!r}")
+        raise DecisionInvalidError(f"unknown action {action}")
 
     if to_status in (STATUS_ACKNOWLEDGED, STATUS_WONTFIX):
         finding.owner = (owner or "").strip()
@@ -770,13 +770,13 @@ def coerce_due(value: Any) -> date | None:
     try:
         return date.fromisoformat(str(value).strip()[:10])
     except ValueError as exc:
-        raise ValueError(f"due must be an ISO date (YYYY-MM-DD), got {value!r}") from exc
+        raise ValueError(f"due must be an ISO date (YYYY-MM-DD), got {value}") from exc
 
 
 def _normalize_level(value: Any) -> str:
     level = _text(value, LEVEL_DEBT).strip().lower()
     if level not in FINDING_LEVEL:
-        raise ValueError(f"level must be one of {FINDING_LEVEL}, got {value!r}")
+        raise ValueError(f"level must be one of {FINDING_LEVEL}, got {value}")
     return level
 
 
@@ -792,10 +792,10 @@ def _resolve_repo_id(session: Any, repo_id: int | str) -> int:
     models = _models()
     repo = getattr(models, "Repo", None)
     if repo is None:
-        raise FindingsError(f"cannot resolve repo slug {repo_id!r}: models.Repo is missing")
+        raise FindingsError(f"cannot resolve repo slug {repo_id}: models.Repo is missing")
     row = session.query(repo).filter(repo.slug == str(repo_id)).one_or_none()
     if row is None:
-        raise FindingsError(f"no repo with slug {repo_id!r}")
+        raise FindingsError(f"no repo with slug {repo_id}")
     return int(row.id)
 
 
@@ -867,7 +867,7 @@ def ingest(
         if not rule_id or not file_path or not symbol:
             raise FindingsError(
                 "a finding needs rule_id, file_path and symbol — "
-                f"got rule_id={rule_id!r} file_path={file_path!r} symbol={symbol!r}"
+                f"got rule_id={rule_id} file_path={file_path} symbol={symbol}"
             )
         context_key = _text(entry.get("context_key"))
         digest = fingerprint(rule_id, file_path, symbol, context_key)
@@ -1218,7 +1218,7 @@ def rule_quality_watch(
             .one_or_none()
         )
         detail = (
-            f"{count} confirmed false positive(s) for rule {rule_id!r} in the last "
+            f"{count} confirmed false positive(s) for rule {rule_id} in the last "
             f"{int(window_days)} days (threshold {threshold}); the rule needs fixing "
             "or demoting to debt."
         )
@@ -1286,7 +1286,7 @@ def autofix_allowed(rule_id: str, policy: Any) -> bool:
     """Whether policy lets the agent repair *rule_id* without a human.
 
     Default **false**: §6.4 puts whole categories (service splits, cache
-    strategy, permission model, protocol semantics, ``model_routes.json``)
+    strategy, permission model, protocol semantics, ``model_routes``)
     permanently out of reach, and the policy file is where a rule opts in.
     """
     if policy is None:

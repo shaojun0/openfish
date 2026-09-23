@@ -190,6 +190,14 @@ def init_engine(
 
     Base.metadata.create_all(engine)
     _apply_light_migrations(engine)
+    # ``model_routes`` ships its own idempotent migration helper: a retired
+    # ``api_key_env`` column is ``NOT NULL`` with no server default, so leaving
+    # it in place would reject every insert the application makes.  It also
+    # reports — without touching anything — how many routes still hold a
+    # plaintext key, which is an operator action rather than a boot-time one.
+    from models.model_route_migrate import ensure_schema as ensure_model_routes
+
+    ensure_model_routes(engine)
     # The Agent Hub tables ship their own idempotent migration helper (added
     # columns / indexes on a database that predates them).  ``create_all`` above
     # has already created the tables; this call is what keeps an *upgraded*

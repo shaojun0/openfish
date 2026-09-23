@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shlex
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -49,6 +48,9 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session as SASession
 
+from config import settings
+from config.agent import DEFAULT_REVIEW_TIMEOUT, AgentConfig
+from config.forgejo import ForgejoConfig
 from models.agent_hub import AgentTask, Repo, RepoCommit, ReviewRun
 from models.base import utcnow
 from services.agent_queue import ClaimedTask, TaskHandler
@@ -89,20 +91,23 @@ from services.sandbox_identity import (
 logger = logging.getLogger("cpypiserver.agent_worker")
 
 #: The headless command a deployment configures to ask a model for findings.
-#: Empty (the default) makes every review task fail loudly — never "done".
-ENV_REVIEW_COMMAND = "AGENT_REVIEW_COMMAND"
+#: Empty (the default) makes every review task fail loudly — never "done".  The
+#: name is derived from :mod:`config.agent`, which owns the variable, so a
+#: message that tells an operator what to set cannot name a variable nothing
+#: reads any more.
+ENV_REVIEW_COMMAND = AgentConfig.env_name("review_command")
 
 #: The shared fallback credential the runner uses when a repository has no
 #: repo-scoped token.  Deliberately **not** ``FORGEJO_ADMIN_TOKEN``: the runner
 #: containers execute repository-supplied code, so the admin token stays in the
 #: backend container.  Empty means the runner can review but cannot publish, and
-#: says so loudly.  Mirrors :data:`services.repo_runner.SHARED_TOKEN_ENV`, the
-#: single implementation (:func:`runner_token` delegates there).
-ENV_RUNNER_TOKEN = "FORGEJO_RUNNER_TOKEN"
+#: says so loudly.  Mirrors :data:`services.repo_runner.SHARED_TOKEN_ENV` — and
+#: both derive from :class:`config.forgejo.ForgejoConfig`, the single
+#: implementation (:func:`runner_token` delegates there).
+ENV_RUNNER_TOKEN = ForgejoConfig.env_name("forgejo_runner_token")
 
 #: Wall-clock budget for that command, so a stuck model client fails the task.
-ENV_REVIEW_TIMEOUT = "AGENT_REVIEW_TIMEOUT"
-DEFAULT_REVIEW_TIMEOUT = 900.0
+ENV_REVIEW_TIMEOUT = AgentConfig.env_name("review_timeout")
 
 #: How the headless command learns its **role** in the run.  ``review`` must
 #: leave the tree alone, ``fix`` is expected to edit files (an escalated fix that
@@ -114,10 +119,6 @@ ENV_TASK_KIND = "OPENFISH_TASK_KIND"
 
 #: The roles :data:`ENV_TASK_KIND` can carry; mirrors the runner's task kinds.
 TASK_KINDS: tuple[str, ...] = ("review", "fix", "checks")
-
-#: The model route table the runner reads (same default as the backend image).
-ENV_MODELS_FILE = "MODELS_FILE"
-DEFAULT_MODELS_FILE = "/app/config/model_routes.json"
 
 #: Task kinds this sandbox runner implements.  Anything else (``import``,
 #: ``backfill``) has no handler yet and must fail loudly rather than be retired
@@ -174,7 +175,7 @@ def _load_task(claimed: ClaimedTask, sessions: Callable[[], SASession]) -> _Load
     """
     if claimed.kind not in SUPPORTED_KINDS:
         raise AgentRunnerError(
-            f"任务类型 {claimed.kind!r} 没有沙箱 runner 处理器（只支持 "
+            f"任务类型 {claimed.kind} 没有沙箱 runner 处理器（只支持 "
             f"{', '.join(SUPPORTED_KINDS)}）；不要把它当作已完成"
         )
     payload = claimed.payload or {}
@@ -265,9 +266,9 @@ def _make_publish_guard(
                 or str(task.status or "") not in ("leased", "running")
             ):
                 raise AgentRunnerError(
-                    f"任务 {claimed.id} 的租约已不在 worker {owner!r} 手上"
-                    f"（leased_by={getattr(task, 'leased_by', None)!r},"
-                    f" status={getattr(task, 'status', None)!r}）；"
+                    f"任务 {claimed.id} 的租约已不在 worker {owner} 手上"
+                    f"（leased_by={getattr(task, 'leased_by', None)},"
+                    f" status={getattr(task, 'status', None)}）；"
                     "另一个副本已接管，拒绝 push/开 PR"
                 )
         finally:
@@ -291,7 +292,7 @@ def _repo_url(slug: str) -> str:
     """The git URL inside the compose network — **no credential in the URL**."""
     from services.repo_import import ImportConfig
 
-    config = ImportConfig.from_env()
+    config = ImportConfig.from_settings()
     base = (config.git_base_url or config.base_url).rstrip("/")
     return f"{base}/{slug}.git"
 
@@ -320,12 +321,11 @@ def build_review_fn(
     silently marking every task ``done``.
     """
     text = (
-        command if command is not None else os.environ.get(ENV_REVIEW_COMMAND, "")
+        command if command is not None else settings.agent.review_command
     ).strip()
     env = {str(key): str(value) for key, value in (model_env or {}).items()}
     budget = float(
-        timeout if timeout is not None
-        else os.environ.get(ENV_REVIEW_TIMEOUT) or DEFAULT_REVIEW_TIMEOUT
+        timeout if timeout is not None else settings.agent.review_timeout
     )
 
     def review_fn(
@@ -343,7 +343,7 @@ def build_review_fn(
             )
         argv = shlex.split(text)
         if not argv:
-            raise AgentRunnerError(f"{ENV_REVIEW_COMMAND} 为空命令：{command!r}")
+            raise AgentRunnerError(f"{ENV_REVIEW_COMMAND} 为空命令：{command}")
         checkout = Path(workdir) / "repo"
         cwd = checkout if checkout.is_dir() else Path(workdir)
         # The review command is where the model credential legitimately goes —
@@ -566,7 +566,7 @@ def build_open_pr_fn(
 
             from services.repo_import import ForgejoClient, ImportConfig
 
-            config = ImportConfig.from_env()
+            config = ImportConfig.from_settings()
             if token is not None:
                 # An explicit *token* is authoritative, including an explicit
                 # ``""``: the handler resolved this repo's credential, and
@@ -834,7 +834,6 @@ def record_check_artifacts(
 def build_handler(
     *,
     engine: Any,
-    models_file: str | Path | None = None,
     model_route: str | None = None,
     review_command: str | None = None,
     session_factory: Callable[[], SASession] | None = None,
@@ -845,10 +844,14 @@ def build_handler(
     A handler is *stateless across tasks*: every task gets a fresh runner, sink
     and adapter, so one task's model credential env or work directory can never
     leak into the next.
+
+    The model credential env is resolved **once**, from the ``model_routes``
+    table in the same database the queue lives in: an administrator editing the
+    routing panel changes what the *next* worker process uses, exactly as the
+    previous file-backed route table behaved.
     """
     sessions = session_factory or sqlalchemy_session_factory(engine)
-    route_file = Path(models_file or os.environ.get(ENV_MODELS_FILE) or DEFAULT_MODELS_FILE)
-    model_env = _resolve_model_env(route_file, model_route)
+    model_env = _resolve_model_env(sessions, model_route)
     review_fn = build_review_fn(review_command, model_env=model_env)
     policy_parser = build_policy_parser()
 
@@ -912,19 +915,23 @@ def build_handler(
     return handle
 
 
-def _resolve_model_env(models_file: Path, route: str | None) -> dict[str, str]:
-    """Resolve the route table; a missing/broken file is a warning, not a crash."""
+def _resolve_model_env(
+    sessions: Callable[[], SASession],
+    route: str | None,
+) -> dict[str, str]:
+    """Resolve the route table; an unreadable table is a warning, not a crash."""
+    session = sessions()
     try:
-        return resolve_model_env(models_file, route=route)
+        return resolve_model_env(session, route=route)
     except Exception as exc:  # noqa: BLE001 - review step fails loudly if it matters
-        logger.warning("模型路由解析失败（%s）：%s", models_file, exc)
+        logger.warning("模型路由解析失败：%s", exc)
         return {}
+    finally:
+        session.close()
 
 
 __all__ = [
-    "DEFAULT_MODELS_FILE",
     "DEFAULT_REVIEW_TIMEOUT",
-    "ENV_MODELS_FILE",
     "ENV_REVIEW_COMMAND",
     "ENV_REVIEW_TIMEOUT",
     "ENV_RUNNER_TOKEN",

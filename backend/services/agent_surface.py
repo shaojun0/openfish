@@ -108,14 +108,14 @@ class RestrictedForgejoClient:
             raise AttributeError(name)
         if name not in self._allow:
             raise AgentSurfaceError(
-                f"agent 路径不允许调用 Forgejo 客户端方法 {name!r}"
+                f"agent 路径不允许调用 Forgejo 客户端方法 {name}"
                 f"（能力白名单：{', '.join(sorted(self._allow))}）；"
                 "合并/批准/改分支保护永远不在白名单里"
             )
         return getattr(self._client, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        raise AgentSurfaceError(f"agent 路径不允许改写客户端属性 {name!r}")
+        raise AgentSurfaceError(f"agent 路径不允许改写客户端属性 {name}")
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<RestrictedForgejoClient allow={sorted(self._allow)}>"

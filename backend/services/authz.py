@@ -693,7 +693,7 @@ class AuthzService:
         session = self._s
         try:
             if session.query(Role).filter(Role.code == code).first() is not None:
-                raise ValueError(f"role {code!r} already exists")
+                raise ValueError(f"role {code} already exists")
             role = Role(code=code, name=(name or code).strip(), description=description)
             session.add(role)
             session.commit()
@@ -712,7 +712,7 @@ class AuthzService:
             if role is None:
                 raise ValueError("role not found")
             if role.is_builtin:
-                raise ValueError(f"role {role.code!r} is built-in and cannot be deleted")
+                raise ValueError(f"role {role.code} is built-in and cannot be deleted")
             session.delete(role)
             session.commit()
             self.invalidate()
@@ -782,7 +782,7 @@ class AuthzService:
         try:
             role = session.query(Role).filter(Role.code == role_code).first()
             if role is None:
-                raise ValueError(f"role {role_code!r} not found")
+                raise ValueError(f"role {role_code} not found")
             if session.get(User, user_id) is None:
                 raise ValueError(f"user {user_id} not found")
             exists = session.query(UserRole).filter(

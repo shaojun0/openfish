@@ -170,7 +170,7 @@ class GateResult(BaseModel):
         gets ``passed=False`` without the check counting as a real failure.
         """
         if self.status not in GATE_STATUSES:
-            raise ValueError(f"status={self.status!r} 不是 {GATE_STATUSES} 之一")
+            raise ValueError(f"status={self.status} 不是 {GATE_STATUSES} 之一")
         if self.status == STATUS_UNVERIFIED:
             self.passed = False
         elif not self.passed:
@@ -202,7 +202,7 @@ class GateSummary(BaseModel):
     @model_validator(mode="after")
     def _sync_state(self) -> "GateSummary":
         if self.state and self.state not in GATE_STATUSES:
-            raise ValueError(f"state={self.state!r} 不是 {GATE_STATUSES} 之一")
+            raise ValueError(f"state={self.state} 不是 {GATE_STATUSES} 之一")
         if not self.state:
             # A hand-built summary (tests, an injected fake adapter) declares no
             # state: derive it from the counts it did provide.  An empty one is
@@ -257,10 +257,10 @@ class CheckCommand(BaseModel):
         if not self.id.strip():
             raise ValueError("check id 不能为空")
         if not self.argv or not str(self.argv[0]).strip():
-            raise ValueError(f"check {self.id!r} 的 argv 为空")
+            raise ValueError(f"check {self.id} 的 argv 为空")
         if self.validation not in VALIDATIONS:
             raise ValueError(
-                f"check {self.id!r} validation={self.validation!r} "
+                f"check {self.id} validation={self.validation} "
                 f"不是 {VALIDATIONS} 之一"
             )
         return self
@@ -288,11 +288,11 @@ class CheckSuite(BaseModel):
     @model_validator(mode="after")
     def _check_source(self) -> "CheckSuite":
         if self.source not in SUITE_SOURCES:
-            raise ValueError(f"suite source={self.source!r} 不是 {SUITE_SOURCES} 之一")
+            raise ValueError(f"suite source={self.source} 不是 {SUITE_SOURCES} 之一")
         ids: set[str] = set()
         for check in self.checks:
             if check.id in ids:
-                raise ValueError(f"suite 里出现重复的 check id：{check.id!r}")
+                raise ValueError(f"suite 里出现重复的 check id：{check.id}")
             ids.add(check.id)
         return self
 
@@ -330,7 +330,7 @@ def suite_fingerprint(suite: CheckSuite) -> str:
         }
         for check in suite.checks
     ]
-    payload = f"{suite.source}:{normalized!r}"
+    payload = f"{suite.source}:{normalized}"
     return sha256_text(payload)
 
 
@@ -428,7 +428,7 @@ class SubprocessGateExecutor:
     ) -> None:
         if env_mode not in (ENV_SANDBOX, ENV_INHERIT):
             raise ValueError(
-                f"env_mode must be {ENV_SANDBOX!r} or {ENV_INHERIT!r}, got {env_mode!r}"
+                f"env_mode must be {ENV_SANDBOX} or {ENV_INHERIT}, got {env_mode}"
             )
         self._python = python or sys.executable
         self._cwd = Path(cwd) if cwd is not None else REPO_ROOT

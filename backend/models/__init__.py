@@ -7,6 +7,8 @@ that way, because ``create_all`` only creates what has been imported.
 collaboration history, findings, review runs and the agent task queue); its
 constants and ``to_dict()`` serializers are re-exported here so callers can say
 ``from models import FINDING_STATUS`` instead of reaching into the module.
+``model_route`` is the model-routing registry the ``/models`` panel edits and a
+downstream DSH reads.
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ from .agent_hub import (
     context_key,
     fingerprint,
 )
+from .model_route import KINDS, PROVIDERS, ModelRoute
 from .rbac import Permission, Role, RolePermission, UserRole
 from .user import User
 
@@ -60,6 +63,10 @@ __all__ = [
     "Permission",
     "UserRole",
     "RolePermission",
+    # ── Model-routing registry ───────────────────────────────────────
+    "ModelRoute",
+    "KINDS",
+    "PROVIDERS",
     # ── Agent Hub tables ─────────────────────────────────────────────
     "AgentTask",
     "CheckRun",

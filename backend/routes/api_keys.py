@@ -3,17 +3,27 @@
 The HTML dashboard that used to live here is now part of the Vue SPA
 (``frontend/src/views/ApiKeysView.vue``).  This module only serves JSON, under
 ``/api/v1``.
+
+``POST /keys`` binds its body as a view parameter (``body: CreateKeyRequest``)
+rather than reading ``request.get_json`` by hand: the model is the one the
+OpenAPI document has always advertised for this operation, and ``@validate_request()``
+— kept *below* the blueprint's ``require_auth`` and the view's
+``@require_permission``, so an unauthorized caller is answered ``401``/``403``
+and never by the binder — is what actually enforces it.
 """
 
 from __future__ import annotations
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import current_app, jsonify
+from flask_openapi3 import APIBlueprint, validate_request
 
 from auth.decorators import current_sub, current_user_id, require_permission
 from auth.permissions import KEY_CREATE, KEY_DELETE, KEY_LIST, KEY_STATS
+from errors import BadRequestError
 from openapi import api_operation, array_of, errors, json_body, ok
+from schemas import CreateKeyRequest
 
-api_keys_bp = Blueprint("api_keys", __name__)
+api_keys_bp = APIBlueprint("api_keys", __name__)
 
 
 @api_keys_bp.route("/keys", methods=["GET"])
@@ -39,8 +49,9 @@ def list_keys():
     return jsonify(keys)
 
 
-@api_keys_bp.route("/keys", methods=["POST"])
+@api_keys_bp.post("/keys")
 @require_permission(KEY_CREATE)
+@validate_request()
 @api_operation(
     summary="Create an API key",
     description=(
@@ -57,20 +68,18 @@ def list_keys():
         **errors("400", "401", "403", "500"),
     },
 )
-def create_key():
-    data = request.get_json(silent=True) or {}
-    name = str(data.get("name", "")).strip()
+def create_key(body: CreateKeyRequest):
+    # `body` is bound and validated by flask-openapi3 from `CreateKeyRequest`, so
+    # neither the missing-field case nor the type of `expires_in_days` is this
+    # view's business any more.  Only the whitespace rule is left: `"   "`
+    # satisfies `min_length=1` and would otherwise mint an unnamed key.
+    name = body.name.strip()
     if not name:
-        return jsonify({"error": "name is required"}), 400
+        raise BadRequestError("name is required")
 
-    expires = data.get("expires_in_days")
-    if expires is not None:
-        try:
-            expires = int(expires)
-            if expires <= 0:
-                expires = None
-        except (ValueError, TypeError):
-            expires = None
+    expires = body.expires_in_days
+    if expires is not None and expires <= 0:
+        expires = None
 
     mgr = current_app.extensions["api_key_manager"]
     result = mgr.create_key(

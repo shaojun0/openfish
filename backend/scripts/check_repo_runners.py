@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 import tempfile
 import uuid
@@ -60,6 +59,7 @@ from sqlalchemy import inspect, text  # noqa: E402
 from sqlalchemy.exc import IntegrityError  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 
+from config import settings  # noqa: E402
 from models.agent_hub import AgentTask, Repo, RepoRunner  # noqa: E402
 from models.agent_hub_migrate import ensure_schema  # noqa: E402
 from services.agent_queue import (  # noqa: E402
@@ -87,11 +87,12 @@ from services.repo_runner import (  # noqa: E402
 #: host secret is required.
 _TEST_KEY = "openfish-repo-runner-gate-key-not-for-deployment"
 
-#: A *truthy* mapping with neither the cipher key nor the shared token.
-#: ``TokenCipher`` and :func:`shared_runner_token` treat an empty mapping as
-#: "unset" and fall back to ``os.environ``, so meaning "neither exists" here
-#: requires a non-empty mapping.
-_EMPTY_ENV: dict[str, str] = {"OPENFISH_REPO_RUNNER_GATE": "1"}
+#: A mapping with neither the cipher key nor the shared token, for the paths that
+#: must prove they fail closed rather than reach for the deployment's own
+#: credentials.  An explicit mapping — even an empty one — means "nothing is
+#: configured here"; only ``env=None`` reads the settings, so this can no longer
+#: be satisfied by accident from the host environment.
+_EMPTY_ENV: dict[str, str] = {}
 
 # The gate deliberately drives failure paths (a corrupted credential, an
 # in-flight ceiling); those warnings are the subject of the assertions, not
@@ -267,9 +268,9 @@ def scenario_schema() -> None:
                         session.commit()
                     except IntegrityError:
                         session.rollback()
-                        check(f"the CHECK rejects {label}={kwargs[label]!r}", True)
+                        check(f"the CHECK rejects {label}={kwargs[label]}", True)
                     else:
-                        check(f"the CHECK rejects {label}={kwargs[label]!r}", False,
+                        check(f"the CHECK rejects {label}={kwargs[label]}", False,
                               "the invalid row was accepted")
         finally:
             engine.dispose()
@@ -612,9 +613,9 @@ def scenario_workspace() -> None:
         try:
             safe_workspace_subdir(bad)
         except RepoRunnerError:
-            check(f"safe_workspace_subdir rejects {bad!r}", True)
+            check(f"safe_workspace_subdir rejects {bad}", True)
         else:
-            check(f"safe_workspace_subdir rejects {bad!r}", False, "the path was accepted")
+            check(f"safe_workspace_subdir rejects {bad}", False, "the path was accepted")
 
     check("'' → runners/<id>", safe_workspace_subdir("", runner_id=7) == "runners/7",
           repr(safe_workspace_subdir("", runner_id=7)))
@@ -788,8 +789,17 @@ def scenario_dispatch() -> None:
 def scenario_concurrency() -> None:
     section("9 · concurrency: runner ceiling and explicit argument precedence")
     harness = _Harness()
-    previous = os.environ.get(ENV_MAX_IN_FLIGHT_PER_REPO)
-    os.environ[ENV_MAX_IN_FLIGHT_PER_REPO] = "1"
+    # The deployment ceiling used to be injected through the environment.  The
+    # settings object is now the only reader of the environment, resolved once at
+    # start-up, so the gate sets the *field*: the same thing the variable would
+    # have done, minus a runtime re-read that anything running in this process
+    # could have used to re-point a worker's ceiling.  The variable name is
+    # asserted below so the field and the documented knob cannot drift apart.
+    check(f"the ceiling knob is still {ENV_MAX_IN_FLIGHT_PER_REPO}",
+          ENV_MAX_IN_FLIGHT_PER_REPO == "AGENT_MAX_IN_FLIGHT_PER_REPO",
+          ENV_MAX_IN_FLIGHT_PER_REPO)
+    previous = settings.agent.max_in_flight_per_repo
+    settings.agent.max_in_flight_per_repo = 1
     try:
         repo_id = harness.repo("concurrency")
         service = harness.service(env=_EMPTY_ENV)
@@ -798,12 +808,12 @@ def scenario_concurrency() -> None:
 
         first = queue.enqueue(repo_id, kind="review", payload={})
         second = queue.enqueue(repo_id, kind="review", payload={})
-        check("the env ceiling suppresses the second task",
+        check("the deployment ceiling suppresses the second task",
               first > 0 and second == 0, f"{first}/{second}")
 
         service.update(repo_id, max_concurrency=2)
         third = queue.enqueue(repo_id, kind="review", payload={})
-        check("runner.max_concurrency overrides the env ceiling", third > 0, str(third))
+        check("runner.max_concurrency overrides the deployment ceiling", third > 0, str(third))
         fourth = queue.enqueue(repo_id, kind="review", payload={})
         check("the runner ceiling is then enforced", fourth == 0, str(fourth))
 
@@ -814,10 +824,7 @@ def scenario_concurrency() -> None:
                               max_in_flight_per_repo=3)
         check("the explicit ceiling is itself enforced", sixth == 0, str(sixth))
     finally:
-        if previous is None:
-            os.environ.pop(ENV_MAX_IN_FLIGHT_PER_REPO, None)
-        else:
-            os.environ[ENV_MAX_IN_FLIGHT_PER_REPO] = previous
+        settings.agent.max_in_flight_per_repo = previous
         harness.close()
 
 

@@ -16,6 +16,18 @@ permission each route demands.
 The permission points come from ``auth.agent_hub_permissions`` (re-exported by
 ``auth.permissions``); every route carries its own ``@require_permission``
 guard, so registering this blueprint cannot accidentally expose it.
+
+Request binding
+---------------
+Three views take their input as view parameters instead of reading ``request``
+by hand: ``list_findings`` binds its filter query (``query: FindingListQuery``)
+and ``decide_finding`` / ``put_policy`` bind their JSON bodies.  On each of them
+``@validate_request()`` sits *below* the guard, so an unauthorized request is
+answered ``401``/``403`` and never by the binder —
+``scripts/check_request_binding.py`` pins that shape and order.  The path
+variables stay plain Flask arguments: ``<int:finding_id>`` is Flask's own
+converter, and ``<path:slug>`` is validated by :func:`_checked_slug`, whose
+message is what the console shows for a traversal attempt.
 """
 
 from __future__ import annotations
@@ -23,16 +35,20 @@ from __future__ import annotations
 import logging
 import re
 
-from flask import Blueprint, request
+from flask_openapi3 import APIBlueprint, validate_request
 
 from auth.decorators import current_principal, require_permission
 from auth.permissions import AGENT_RUN, FINDING_DECIDE, FINDING_READ, POLICY_WRITE
 from errors import BadRequestError, ForbiddenError
 from openapi import api_operation, errors, json_body, ok
+from schemas import FindingDecisionRequest, FindingListQuery, ReviewPolicyRequest
 from services import findings as findings_service
 from services import review_policy
 
-findings_bp = Blueprint("findings", __name__)
+# `doc_ui=False` for the same reason `app.py` passes it: the request-binding half
+# of flask-openapi3 is all this module uses, and the library's own document is
+# never served — `/openapi.json` is built from `@api_operation` in `openapi/`.
+findings_bp = APIBlueprint("findings", __name__, doc_ui=False)
 logger = logging.getLogger("cpypiserver.findings_routes")
 
 #: A repository slug (``<owner>/<name>``) as it may appear in a URL.  Flask has
@@ -59,18 +75,20 @@ def _actor() -> str:
     return (current_principal() or {}).get("sub") or "unknown"
 
 
-def _body() -> dict:
-    return request.get_json(silent=True) or {}
+def _int_arg(raw: str | None, name: str, default: int) -> int:
+    """A bound query value read the way this module has always read it.
 
-
-def _int_arg(name: str, default: int) -> int:
-    raw = request.args.get(name)
+    The raw string comes from the bound query model, but the *decision* stays
+    here: an absent **or empty** value means the default, and anything that is
+    not an integer is this route's own prose ``400``.  A typed model field would
+    turn ``?limit=`` into the binding's error instead of the default.
+    """
     if raw is None or raw == "":
         return default
     try:
         return int(raw)
     except ValueError as exc:
-        raise BadRequestError(f"{name} must be an integer, got {raw!r}") from exc
+        raise BadRequestError(f"{name} must be an integer") from exc
 
 
 def _checked_slug(slug: str) -> str:
@@ -81,14 +99,16 @@ def _checked_slug(slug: str) -> str:
     """
     if not _SLUG_RE.match(slug or ""):
         raise BadRequestError(
-            f"invalid repository slug {slug!r}; expected '<owner>/<name>'"
+            "invalid repository slug; expected '<owner>/<name>'"
         )
     return slug
 
 
 # ── OpenAPI fragments ────────────────────────────────────────────────
-# Inline schemas, exactly as `routes/hub.py` does it: the shared
-# `schemas.py` registry is not ours to extend from this slice.
+# Inline *response* schemas, exactly as `routes/hub.py` does it: they describe
+# shapes this slice owns and are validated here rather than in the shared
+# registry.  The request models below do live in `schemas.py`, like every other
+# bound view's, so one file holds the whole wire contract.
 
 _FINDING_SCHEMA = {
     "type": "object",
@@ -256,8 +276,9 @@ def _repo_root_for(slug: str) -> str | None:
 #  Findings
 # ══════════════════════════════════════════════════════════════════════
 
-@findings_bp.route("/api/v1/findings")
+@findings_bp.get("/api/v1/findings")
 @require_permission(FINDING_READ)
+@validate_request()
 @api_operation(
     summary="List findings",
     description=(
@@ -281,16 +302,19 @@ def _repo_root_for(slug: str) -> str | None:
     ],
     responses={"200": ok("Findings", _FINDING_LIST_SCHEMA), **_errors("400")},
 )
-def list_findings():
-    limit = _int_arg("limit", 200)
-    offset = _int_arg("offset", 0)
+def list_findings(query: FindingListQuery):
+    # `query` is the bound filter string — see `schemas.FindingListQuery`: the
+    # values stay raw so `_int_arg` keeps answering an empty `?limit=` with the
+    # default and a malformed one with this route's own prose 400.
+    limit = _int_arg(query.limit, "limit", 200)
+    offset = _int_arg(query.offset, "offset", 0)
     payload = findings_service.list_findings(
         _session(),
-        repo=request.args.get("repo") or None,
-        status=request.args.get("status") or None,
-        level=request.args.get("level") or None,
-        rule=request.args.get("rule") or None,
-        owner=request.args.get("owner") or None,
+        repo=query.repo or None,
+        status=query.status or None,
+        level=query.level or None,
+        rule=query.rule or None,
+        owner=query.owner or None,
         limit=limit,
         offset=offset,
     )
@@ -319,8 +343,9 @@ def get_finding(finding_id: int):
     }
 
 
-@findings_bp.route("/api/v1/findings/<int:finding_id>/decide", methods=["POST"])
+@findings_bp.post("/api/v1/findings/<int:finding_id>/decide")
 @require_permission(FINDING_DECIDE)
+@validate_request()
 @api_operation(
     summary="Decide a finding",
     description=(
@@ -342,22 +367,25 @@ def get_finding(finding_id: int):
         **_errors("400", "409"),
     },
 )
-def decide_finding(finding_id: int):
-    payload = _body()
+def decide_finding(finding_id: int, body: FindingDecisionRequest):
+    # `body` is the bound JSON body — see `schemas.FindingDecisionRequest`: every
+    # field is optional and `action` is a plain string, so the §6.1 table's own
+    # 409 stays the answer for a missing or unknown action, and I2/I3 stay in
+    # `services.findings.decide`.
     try:
-        due = findings_service.coerce_due(payload.get("due"))
+        due = findings_service.coerce_due(body.due)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     try:
         result = findings_service.decide(
             finding_id,
-            str(payload.get("action") or ""),
+            str(body.action or ""),
             _actor(),
-            owner=payload.get("owner"),
+            owner=body.owner,
             due=due,
-            reason=payload.get("reason"),
+            reason=body.reason,
             session=_session(),
-            confirmed_by=payload.get("confirmed_by"),
+            confirmed_by=body.confirmed_by,
         )
     except findings_service.DecisionInvalidError as exc:
         return {"error": exc.code, "message": exc.message}, 409
@@ -453,7 +481,7 @@ def _load_policy(slug: str):
         if root is not None:
             return review_policy.load(root)
     except review_policy.PolicyValidationError as exc:
-        raise BadRequestError(f"the policy for {name!r} is invalid: {exc.message}") from exc
+        raise BadRequestError("the policy is invalid") from exc
     except review_policy.PolicyDependencyError as exc:
         raise ForbiddenError(message=str(exc)) from exc
     return review_policy.load()
@@ -480,8 +508,9 @@ def get_policy(slug: str):
     return {"slug": slug, **_load_policy(slug).as_payload()}
 
 
-@findings_bp.route("/api/v1/policies/<path:slug>", methods=["PUT"])
+@findings_bp.put("/api/v1/policies/<path:slug>")
 @require_permission(POLICY_WRITE)
+@validate_request()
 @api_operation(
     summary="Replace the review policy",
     description=(
@@ -516,8 +545,12 @@ def get_policy(slug: str):
     },
     responses={"200": ok("The stored, normalized policy", _POLICY_SCHEMA), **_errors("400", "409")},
 )
-def put_policy(slug: str):
-    payload = _body()
+def put_policy(slug: str, body: ReviewPolicyRequest):
+    # `body` is the bound JSON object, dumped with `exclude_unset=True` — see
+    # `schemas.ReviewPolicyRequest`: `services.review_policy` distinguishes an
+    # absent section (built-in default) from an explicit `null` (a validation
+    # failure), so only the keys the caller actually sent may reach it.
+    payload = body.model_dump(by_alias=True, exclude_unset=True)
     if not payload:
         raise BadRequestError("a policy document is required")
     name = _resolve_slug(slug)

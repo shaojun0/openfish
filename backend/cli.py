@@ -83,7 +83,7 @@ def cmd_create_admin(args, authz: AuthzService) -> int:
             email=args.email,
         )
     if user is None:
-        return _fail(f"could not provision an account for {args.identity!r}")
+        return _fail(f"could not provision an account for {args.identity}")
 
     authz.set_superuser(user.id, True)
     # Also grant the built-in admin role: `is_superuser` is the bypass, but the
@@ -102,7 +102,7 @@ def cmd_demote(args, authz: AuthzService) -> int:
     """Clear the superuser bypass.  Roles are left untouched."""
     user = authz.find_user(args.identity)
     if user is None:
-        return _fail(f"no account for {args.identity!r}")
+        return _fail(f"no account for {args.identity}")
     if not user.is_superuser:
         print(f"{args.identity} is not a superuser — nothing to do.")
         return 0
@@ -120,7 +120,7 @@ def cmd_demote(args, authz: AuthzService) -> int:
 def cmd_grant(args, authz: AuthzService) -> int:
     user = authz.find_user(args.identity)
     if user is None:
-        return _fail(f"no account for {args.identity!r}")
+        return _fail(f"no account for {args.identity}")
     try:
         granted = authz.grant_role(user.id, args.role)
     except ValueError as exc:
@@ -133,7 +133,7 @@ def cmd_grant(args, authz: AuthzService) -> int:
 def cmd_revoke(args, authz: AuthzService) -> int:
     user = authz.find_user(args.identity)
     if user is None:
-        return _fail(f"no account for {args.identity!r}")
+        return _fail(f"no account for {args.identity}")
     revoked = authz.revoke_role(user.id, args.role)
     print(f"{args.role}: {'revoked' if revoked else 'not held'} for {_describe(authz, user)}")
     return 0
@@ -142,7 +142,7 @@ def cmd_revoke(args, authz: AuthzService) -> int:
 def cmd_show(args, authz: AuthzService) -> int:
     user = authz.find_user(args.identity)
     if user is None:
-        return _fail(f"no account for {args.identity!r}")
+        return _fail(f"no account for {args.identity}")
     print(f"account      : {user.external_id} (id={user.id})")
     print(f"display name : {user.display_name or '—'}")
     print(f"provider     : {user.provider}")
@@ -190,7 +190,7 @@ def cmd_disable_user(args, authz: AuthzService) -> int:
     """
     user = authz.find_user(args.identity)
     if user is None:
-        return _fail(f"no account for {args.identity!r}")
+        return _fail(f"no account for {args.identity}")
     if not user.is_active:
         print(f"{args.identity} is already inactive — nothing to do.")
         return 0
@@ -219,7 +219,7 @@ def cmd_disable_user(args, authz: AuthzService) -> int:
 def cmd_enable_user(args, authz: AuthzService) -> int:
     user = authz.find_user(args.identity)
     if user is None:
-        return _fail(f"no account for {args.identity!r}")
+        return _fail(f"no account for {args.identity}")
     if user.is_active:
         print(f"{args.identity} is already active — nothing to do.")
         return 0
@@ -307,7 +307,7 @@ def _repo_id_for_slug(slug: str) -> int:
     finally:
         session.close()
     if repo_id is None:
-        raise RepoRunnerError(f"未知的仓库 slug：{slug!r}")
+        raise RepoRunnerError(f"未知的仓库 slug：{slug}")
     return int(repo_id)
 
 
@@ -387,7 +387,7 @@ def cmd_runner_show(args) -> int:
     row = _runner_service().get(repo_id)
     if row is None:
         return _fail(
-            f"no runner configured for {args.slug!r}; "
+            f"no runner configured for {args.slug}; "
             f"create it with: cli.py runner enable {args.slug}"
         )
     _print_runner_config(row, args.slug)
@@ -453,7 +453,7 @@ def cmd_runner_set_credential(args) -> int:
         token = (os.environ.get(args.token_env) or "").strip()
         if not token:
             return _fail(
-                f"environment variable {args.token_env!r} is unset or empty — "
+                f"environment variable {args.token_env} is unset or empty — "
                 "nothing stored"
             )
     else:
@@ -487,6 +487,152 @@ def cmd_runner_clear_credential(args) -> int:
     print(f"Cleared the repo-scoped credential for {args.slug} (id={row.id}).")
     print("  The runner falls back to the shared FORGEJO_RUNNER_TOKEN.")
     return 0
+
+
+# ── Model routes ─────────────────────────────────────────────────────
+# A route's upstream key is sealed under MODEL_ROUTE_KEY before it is stored, so
+# the deployment step that injects a key cannot be "write it into the table" —
+# and cannot be the environment either, since that is what made one row's
+# behaviour depend on the deploying process (see models/model_route.py).  These
+# commands are the operator's path: the same sealing the panel uses, from a
+# shell, with the secret read from a variable or a hidden prompt rather than
+# from argv.
+#
+# None of them ever prints a key: `list` shows the non-secret
+# `api_key_source` / `api_key_hint` the API publishes, and nothing more.
+
+def _model_route_session():
+    """A session bound to the CLI's configured database."""
+    return Session()
+
+
+def _print_route_key(row: dict) -> None:
+    """One route's key status, never its value."""
+    source = str(row.get("api_key_source") or "none")
+    hint = row.get("api_key_hint") or ""
+    names = {
+        "stored": "已加密存储",
+        "plaintext": "⚠ 仍是明文（需 seal）",
+        "unreadable": "⚠ 无法解密（MODEL_ROUTE_KEY 缺失或不对）",
+        "none": "未配置",
+    }
+    detail = f"{names.get(source, source)}"
+    if hint:
+        detail += f" {hint}"
+    print(f"  {row.get('name')}: {detail}")
+
+
+def cmd_model_route_list(args) -> int:
+    """List the routing table and how each route is authenticated."""
+    from services import model_routes
+
+    session = _model_route_session()
+    try:
+        routes = model_routes.load(session)["routes"]
+    finally:
+        session.close()
+    if not routes:
+        print("模型路由表为空。用 /models 面板或 config/model_routes.seed.sql 添加路由。")
+        return 0
+    print(f"{len(routes)} model route(s):")
+    for row in routes:
+        _print_route_key(row)
+    if any(row.get("api_key_source") == "plaintext" for row in routes):
+        print(f"  → 用 `model-route seal` 重新封存明文密钥（需要 {_key_env()}）。")
+    return 0
+
+
+def cmd_model_route_set_key(args) -> int:
+    """Seal an upstream key read from the environment or a hidden prompt.
+
+    The key is deliberately not an argv value — a flag would land in the shell
+    history and in ``ps``.  ``--key-env`` names the variable to read; without it
+    the operator is prompted through :func:`getpass.getpass`.
+    """
+    from services import model_routes
+    from services.sealing import SealingKeyMissing
+
+    if args.key_env:
+        key = (os.environ.get(args.key_env) or "").strip()
+        if not key:
+            return _fail(
+                f"environment variable {args.key_env} is unset or empty — nothing stored"
+            )
+    else:
+        try:
+            key = getpass.getpass(f"upstream api key for {args.name}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            return _fail("no key entered — nothing stored")
+        if not key:
+            return _fail("empty key — nothing stored")
+    session = _model_route_session()
+    try:
+        row = model_routes.update(session, args.name, {"api_key": key})
+    except model_routes.RouteNotFoundError:
+        return _fail(f"未知的模型路由：{args.name}")
+    except SealingKeyMissing as exc:
+        return _fail(str(exc))
+    except ValueError as exc:
+        return _fail(str(exc))
+    finally:
+        session.close()
+    print(f"已封存 {args.name} 的上游密钥（{_key_env()}）。")
+    _print_route_key(model_routes.public_route(row))
+    print("  → 用 `model-route clear-key` 删除，或用 /models 面板重新检测连通性。")
+    return 0
+
+
+def cmd_model_route_clear_key(args) -> int:
+    """Drop a route's stored key, so it authenticates with nothing."""
+    from services import model_routes
+
+    session = _model_route_session()
+    try:
+        row = model_routes.update(session, args.name, {"api_key": ""})
+    except model_routes.RouteNotFoundError:
+        return _fail(f"未知的模型路由：{args.name}")
+    except ValueError as exc:
+        return _fail(str(exc))
+    finally:
+        session.close()
+    print(f"已清除 {args.name} 的上游密钥。")
+    _print_route_key(model_routes.public_route(row))
+    return 0
+
+
+def cmd_model_route_seal(args) -> int:
+    """Re-seal every route whose key predates sealing — the data migration.
+
+    Idempotent, and the only thing that rewrites an existing key.  Boot reports
+    how many rows need this (see ``models.model_route_migrate``) but never does
+    it, because it needs the master key and writes a secret.
+    """
+    from services import model_routes
+    from services.sealing import SealingKeyMissing
+
+    session = _model_route_session()
+    try:
+        resealed = model_routes.migrate_plaintext_keys(session)
+    except SealingKeyMissing as exc:
+        return _fail(str(exc))
+    finally:
+        session.close()
+    if not resealed:
+        print("没有明文密钥需要处理。")
+        return 0
+    print(f"已重新封存 {len(resealed)} 条路由的明文密钥：")
+    for name in resealed:
+        print(f"  {name}")
+    print("  → 数据库/备份现在不再包含可直接使用的上游凭证。")
+    return 0
+
+
+def _key_env() -> str:
+    """The master-key variable name, derived from the config model that owns it."""
+    from config.keys import KeysConfig
+
+    return KeysConfig.env_name("model_route_key")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -630,6 +776,39 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("slug")
     q.set_defaults(func=cmd_runner_clear_credential)
 
+    p = sub.add_parser(
+        "model-route",
+        help="Inspect and set the sealed upstream keys of the routing table.",
+    )
+    routes = p.add_subparsers(dest="model_route_command", required=True)
+
+    q = routes.add_parser(
+        "list",
+        help="Show every route and how it is authenticated (never the key).",
+    )
+    q.set_defaults(func=cmd_model_route_list)
+
+    q = routes.add_parser(
+        "set-key",
+        help=f"Seal a route's upstream key (needs {_key_env()}; never passed on the command line).",
+    )
+    q.add_argument("name")
+    q.add_argument(
+        "--key-env", default=None, metavar="VAR",
+        help="Environment variable holding the key; omit to be prompted.",
+    )
+    q.set_defaults(func=cmd_model_route_set_key)
+
+    q = routes.add_parser("clear-key", help="Drop a route's stored upstream key.")
+    q.add_argument("name")
+    q.set_defaults(func=cmd_model_route_clear_key)
+
+    q = routes.add_parser(
+        "seal",
+        help="Re-seal any key still stored in plaintext (idempotent).",
+    )
+    q.set_defaults(func=cmd_model_route_seal)
+
     return parser
 
 
@@ -648,6 +827,10 @@ def main(argv: list[str] | None = None) -> int:
     authz = build_authz(args.db)
     if getattr(args, "runner_command", None):
         return _run_runner(args)
+    if getattr(args, "model_route_command", None):
+        # These map their own domain errors onto exit 1 (a missing sealing key,
+        # an unknown route) and take no authorization service.
+        return args.func(args)
     try:
         return args.func(args, authz)
     except ValueError as exc:

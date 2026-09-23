@@ -35,9 +35,31 @@ only to redirect to the canonical slashed form, so old bookmarks keep working.
 Changing anything requires ``doc:upload``, which only the built-in ``admin``
 role holds.
 
-⚠ Decorator order is load-bearing (see ``routes/python_build.py``): the
-``@docs_bp.route`` decorator must be the topmost line, or the guard is applied
-after registration and never runs. ``scripts/check_auth_guards.py`` enforces it.
+⚠ Decorator order is load-bearing (see ``routes/python_build.py``): the route
+decorator — ``@docs_bp.route``, or ``@docs_bp.get``/``@docs_bp.put``/
+``@docs_bp.post`` where the view binds request input — must be the topmost line,
+or the guard is applied after registration and never runs.
+``scripts/check_auth_guards.py`` enforces it.
+
+Four views bind their request input as view parameters instead of reading
+``request`` by hand, which is what ``@validate_request()`` — placed *below* the
+guard, so an unauthorized request is answered ``401``/``403`` and never by the
+binder — installs: ``docs_update`` and ``docs_preview`` bind their JSON
+``content``, ``docs_asset_upload`` its ``file`` part and ``docs_raw`` its
+``?download=`` flag.
+
+Two hand-reads stay, deliberately:
+
+* ``docs_create``'s multipart body.  The content arrives as an **optional**
+  ``file`` part and the title as a text field, and a create with only one of
+  them is a supported call — without a file the document starts empty, and
+  without a title the heading inside the uploaded Markdown names it.  A file
+  part must not be optional in a bound model (``schemas.PyPIUploadForm``
+  documents why), and a required one would refuse every title-only create this
+  route has always served.
+* ``docs_index``'s ``?format=`` / ``Accept`` negotiation, which lives in
+  :func:`routes.hub_common.wants_json` and is shared with the other ecosystem
+  indexes.
 """
 
 from __future__ import annotations
@@ -46,9 +68,10 @@ from pathlib import Path
 from urllib.parse import quote
 
 from flask import (
-    Blueprint, abort, jsonify, redirect, render_template, request,
+    abort, jsonify, redirect, render_template, request,
     send_from_directory, url_for,
 )
+from flask_openapi3 import APIBlueprint, validate_request
 
 from auth.decorators import require_permission
 from auth.permissions import DOC_READ, DOC_UPLOAD
@@ -56,9 +79,13 @@ from config import settings
 from errors import BadRequestError
 from openapi import api_operation, errors, ok
 from routes.hub_common import spa_url, wants_json
+from schemas import DocsAssetUploadForm, DocsContentRequest, DocsDownloadQuery
 from services import docs, markdown
 
-docs_bp = Blueprint("docs", __name__)
+# `doc_ui=False` for the same reason `app.py` passes it: the request-binding half
+# of flask-openapi3 is all this module uses, and the library's own document is
+# never served — `/openapi.json` is built from `@api_operation` in `openapi/`.
+docs_bp = APIBlueprint("docs", __name__, doc_ui=False)
 
 # ── Inline response shapes ───────────────────────────────────────────
 # The leaf payloads are schemaless enough that a JSON object with `type` set
@@ -158,13 +185,24 @@ _ASSET_NAME_PARAM = {
     "schema": {"type": "string"},
 }
 
+_DOWNLOAD_PARAM = {
+    "name": "download",
+    "in": "query",
+    "required": False,
+    "description": (
+        "Any non-empty value (including `0`) serves the Markdown as an "
+        "attachment. The catalog's `download_url` sends `1`."
+    ),
+    "schema": {"type": "string"},
+}
+
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _require_ecosystem(ecosystem: str) -> None:
     """404 an unknown ecosystem before it becomes a directory lookup."""
     if ecosystem not in docs.ECOSYSTEMS:
-        abort(404, description=f"Unknown ecosystem '{ecosystem}'")
+        abort(404, description="Unknown ecosystem")
 
 
 def _asset_base(ecosystem: str, doc_id: str) -> str:
@@ -205,14 +243,6 @@ def _decode_markdown(upload) -> str:
         return raw.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise BadRequestError("文档必须是 UTF-8 编码的 Markdown 文本") from exc
-
-
-def _json_content() -> str:
-    """The ``content`` string of a JSON request body."""
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict) or not isinstance(payload.get("content"), str):
-        raise BadRequestError("请求体需要一个字符串字段 content")
-    return payload["content"]
 
 
 # ── JSON API: catalog ────────────────────────────────────────────────
@@ -311,6 +341,10 @@ def docs_catalog(ecosystem: str):
 )
 def docs_create(ecosystem: str):
     _require_ecosystem(ecosystem)
+    # Kept hand-read on purpose — see the module docstring: a create may carry a
+    # `title` field, a `file` part or both, and no single model describes an
+    # *optional* file part (a required one would refuse every title-only create
+    # this route has always served).
     title = (request.form.get("title") or "").strip()
     content = ""
     upload = request.files.get("file")
@@ -356,12 +390,13 @@ def docs_document(ecosystem: str, doc_id: str):
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     except FileNotFoundError:
-        abort(404, description=f"Document '{doc_id}' not found")
+        abort(404, description="Document not found")
     return jsonify(entry)
 
 
-@docs_bp.route("/api/v1/docs/<ecosystem>/<doc_id>", methods=["PUT"])
+@docs_bp.put("/api/v1/docs/<ecosystem>/<doc_id>")
 @require_permission(DOC_UPLOAD)
+@validate_request()
 @api_operation(
     summary="Save a documentation document's source",
     description=(
@@ -389,15 +424,18 @@ def docs_document(ecosystem: str, doc_id: str):
         **errors("400", "401", "403", "404", "413", "500"),
     },
 )
-def docs_update(ecosystem: str, doc_id: str):
+def docs_update(ecosystem: str, doc_id: str, body: DocsContentRequest):
     _require_ecosystem(ecosystem)
-    content = _json_content()
+    # `body.content` is the bound JSON body — see `schemas.DocsContentRequest`.
+    # The old hand-read helper's prose 400 (missing / non-string `content`) is
+    # now the binder's `validation_error` envelope, with the same status.
+    content = body.content
     try:
         docs.save_content(settings.hub.docs_dir, ecosystem, doc_id, content)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     except FileNotFoundError:
-        abort(404, description=f"Document '{doc_id}' not found")
+        abort(404, description="Document not found")
     return jsonify(_read(ecosystem, doc_id))
 
 
@@ -424,12 +462,13 @@ def docs_delete(ecosystem: str, doc_id: str):
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     except FileNotFoundError:
-        abort(404, description=f"Document '{doc_id}' not found")
+        abort(404, description="Document not found")
     return jsonify(entry)
 
 
-@docs_bp.route("/api/v1/docs/<ecosystem>/<doc_id>/preview", methods=["POST"])
+@docs_bp.post("/api/v1/docs/<ecosystem>/<doc_id>/preview")
 @require_permission(DOC_UPLOAD)
+@validate_request()
 @api_operation(
     summary="Render unsaved documentation source",
     description=(
@@ -463,13 +502,14 @@ def docs_delete(ecosystem: str, doc_id: str):
         **errors("400", "401", "403", "404", "500"),
     },
 )
-def docs_preview(ecosystem: str, doc_id: str):
+def docs_preview(ecosystem: str, doc_id: str, body: DocsContentRequest):
     _require_ecosystem(ecosystem)
     try:
         docs.normalize_doc_id(doc_id)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
-    content = _json_content()
+    # Same bound body as `docs_update`; the renderer stays this view's business.
+    content = body.content
     return jsonify({
         "html": markdown.render(content, asset_base=_asset_base(ecosystem, doc_id))
     })
@@ -505,7 +545,7 @@ def docs_assets(ecosystem: str, doc_id: str):
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     except FileNotFoundError:
-        abort(404, description=f"Document '{doc_id}' not found")
+        abort(404, description="Document not found")
     return jsonify({
         "assets": docs.list_assets(
             settings.hub.docs_dir, ecosystem, doc_id, url_prefix=spa_url("/docs")
@@ -513,8 +553,9 @@ def docs_assets(ecosystem: str, doc_id: str):
     })
 
 
-@docs_bp.route("/api/v1/docs/<ecosystem>/<doc_id>/assets", methods=["POST"])
+@docs_bp.post("/api/v1/docs/<ecosystem>/<doc_id>/assets")
 @require_permission(DOC_UPLOAD)
+@validate_request()
 @api_operation(
     summary="Upload an asset into a document",
     description=(
@@ -542,10 +583,18 @@ def docs_assets(ecosystem: str, doc_id: str):
         **errors("400", "401", "403", "404", "413", "500"),
     },
 )
-def docs_asset_upload(ecosystem: str, doc_id: str):
+def docs_asset_upload(ecosystem: str, doc_id: str, form: DocsAssetUploadForm):
     _require_ecosystem(ecosystem)
-    upload = request.files.get("file")
-    if upload is None or not upload.filename:
+    # `form.file` is the `file` part, read out of `request.files` by the binder —
+    # see `schemas.DocsAssetUploadForm` for why the field must be a
+    # `flask_openapi3.FileStorage` and not an optional one.  `filename` is also
+    # what tells a real part from a *text* field of the same name: the binder
+    # hands one of those to the model as a plain `str`, and this check is what
+    # answers it with the 400 this route has always answered — instead of an
+    # `AttributeError` 500 — while a body without the part at all is refused
+    # earlier, by the binding.
+    upload = form.file
+    if not getattr(upload, "filename", None):
         raise BadRequestError("multipart/form-data 需要一个 file 字段")
 
     data = upload.read(docs.MAX_ASSET_BYTES + 1)
@@ -563,7 +612,7 @@ def docs_asset_upload(ecosystem: str, doc_id: str):
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     except FileNotFoundError:
-        abort(404, description=f"Document '{doc_id}' not found")
+        abort(404, description="Document not found")
     return jsonify(entry), 201
 
 
@@ -586,7 +635,7 @@ def docs_asset_delete(ecosystem: str, doc_id: str, name: str):
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     except FileNotFoundError:
-        abort(404, description=f"Asset '{name}' not found")
+        abort(404, description="Asset not found")
     return jsonify(entry)
 
 
@@ -654,8 +703,9 @@ def docs_index(ecosystem: str):
     )
 
 
-@docs_bp.route("/docs/<ecosystem>/<doc_id>")
+@docs_bp.get("/docs/<ecosystem>/<doc_id>")
 @require_permission(DOC_READ)
+@validate_request()
 @api_operation(
     summary="Download a documentation document",
     description=(
@@ -666,7 +716,7 @@ def docs_index(ecosystem: str):
         "outside the ecosystem directory is refused."
     ),
     tags=["Docs"],
-    parameters=[_ECOSYSTEM_PARAM, _DOC_PARAM],
+    parameters=[_ECOSYSTEM_PARAM, _DOC_PARAM, _DOWNLOAD_PARAM],
     responses={
         "200": {
             "description": "Raw Markdown document",
@@ -675,19 +725,21 @@ def docs_index(ecosystem: str):
         **errors("400", "401", "403", "404", "500"),
     },
 )
-def docs_raw(ecosystem: str, doc_id: str):
+def docs_raw(ecosystem: str, doc_id: str, query: DocsDownloadQuery):
     _require_ecosystem(ecosystem)
     try:
         docs.resolve_doc_file(settings.hub.docs_dir, ecosystem, doc_id)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     except FileNotFoundError:
-        abort(404, description=f"Document '{doc_id}' not found")
+        abort(404, description="Document not found")
     return send_from_directory(
         docs.resolve_doc_dir(settings.hub.docs_dir, ecosystem, doc_id),
         docs.DOC_FILENAME,
         mimetype="text/markdown",
-        as_attachment=bool(request.args.get("download")),
+        # `bool()` on the raw string, not a bound boolean: `?download=0` has
+        # always meant "attachment" — see `schemas.DocsDownloadQuery`.
+        as_attachment=bool(query.download),
         download_name=f"{doc_id}.md",
     )
 
@@ -719,7 +771,7 @@ def docs_asset_raw(ecosystem: str, doc_id: str, name: str):
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     except FileNotFoundError:
-        abort(404, description=f"Asset '{name}' not found")
+        abort(404, description="Asset not found")
     assets_dir = docs.resolve_doc_dir(settings.hub.docs_dir, ecosystem, doc_id) / docs.ASSETS_DIRNAME
     inline = docs.is_image_name(name)
     return send_from_directory(

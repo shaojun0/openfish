@@ -21,7 +21,15 @@ dependencies = [
     # ``flask-pydantic``; only its binding half is used (`OpenAPI(doc_ui=False)`),
     # never its bundled documentation surface.
     "flask-openapi3>=4.3.2",
+    # Malicious-package static analysis for uploads (YARA rules + risk engine).
+    # Linux/macOS only: it depends on ``nono-py``, which ships no Windows wheel,
+    # so a Windows developer box gets the scan disabled with a warning instead
+    # of an unbuildable dependency.  Production (Docker, Debian) always has it.
+    "guarddog>=3.2,<4; sys_platform != 'win32'",
     "markdown-it-py>=3.0",
+    # PyPA's reference implementation of the packaging specs.  Upload validation
+    # parses wheel/sdist filenames with it rather than with a regex of our own.
+    "packaging>=26.3",
     # PostgreSQL driver (psycopg 3).  The ``binary`` extra bundles libpq, so the
     # image needs no libpq-dev / build toolchain.  Never imported while
     # DATABASE_URL is empty and SQLite is in use.
@@ -36,6 +44,10 @@ dependencies = [
     "requests>=2.34.2",
     "sqlalchemy>=2.0",
     "watchdog>=6.0.0",
+    # ``wheel.WheelFile`` verifies a wheel's RECORD hashes on read; it is the
+    # only supported way to check that an uploaded wheel is internally
+    # consistent, and it replaces our own archive walk.
+    "wheel>=0.48",
 ]
 
 [project.optional-dependencies]

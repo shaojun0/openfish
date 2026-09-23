@@ -1,8 +1,8 @@
-"""SQLAlchemy declarative base, plus the timestamp helpers every table shares.
+"""SQLAlchemy declarative base, plus the helpers every table shares.
 
-Models inherit from :class:`Base`; the two functions are here rather than in a
-model module because both ``users`` and the RBAC tables need them, and a
-per-module copy is how the two used to drift apart.
+Models inherit from :class:`Base`; the functions are here rather than in a
+model module because several tables need them, and a per-module copy is how the
+two used to drift apart.
 """
 
 from __future__ import annotations
@@ -22,8 +22,19 @@ def iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
 
 
+def in_check(column: str, values: tuple[str, ...]) -> str:
+    """SQL for ``column IN ('a', 'b', …)`` — the body of a CHECK constraint.
+
+    A vocabulary a table refuses to store is generated from the same tuple the
+    services validate against, so the two can never disagree about what the
+    column accepts.
+    """
+    joined = ", ".join(f"'{value}'" for value in values)
+    return f"{column} IN ({joined})"
+
+
 class Base(DeclarativeBase):
     pass
 
 
-__all__ = ["Base", "iso", "utcnow"]
+__all__ = ["Base", "in_check", "iso", "utcnow"]

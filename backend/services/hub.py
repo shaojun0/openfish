@@ -26,12 +26,12 @@ Layout
       catalog.json            optional explicit list
       lodash-4.17.21.tgz      scanned as name + version
 
-``config/model_routes.json``::
+``model_routes`` (database table)::
 
-    {"routes": [{"name": ..., "provider": ..., "base_url": ...}]}
+    one row per route — name, provider, kind, base_url, path, api_key, …
 
-The model-route document is the one catalog an administrator edits in the
-browser rather than on disk; :mod:`services.model_routes` owns it.
+The model-route table is the one catalog an administrator edits in the browser
+rather than on disk; :mod:`services.model_routes` owns it.
 """
 
 from __future__ import annotations

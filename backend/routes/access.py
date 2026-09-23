@@ -14,20 +14,35 @@ no permission level should be able to hand out the bypass:
 
 * only an existing **superuser** may set the ``is_superuser`` flag, and never
   in a way that would leave the server with zero superusers.
+
+Every mutating route binds its body as a view parameter (``body: …Request``)
+instead of reading ``request.get_json`` by hand — the models are the ones the
+OpenAPI document has always advertised for these operations.  ``@validate_request()``
+sits *below* the blueprint-wide ``admin:roles`` guard and the per-view
+``require_permission`` where present, so an unauthorized caller gets
+``401``/``403`` and is never answered by the binder.
 """
 
 from __future__ import annotations
 
 import logging
 
-from flask import Blueprint, jsonify, request
+from flask import jsonify
+from flask_openapi3 import APIBlueprint, validate_request
 
 from auth.decorators import current_principal
 from errors import BadRequestError, ForbiddenError
 from openapi import api_operation, array_of, errors, json_body, ok
+from schemas import (
+    CreateRoleRequest,
+    GrantRoleRequest,
+    SetRolePermissionsRequest,
+    SetSuperuserRequest,
+    UserListQuery,
+)
 from services.authz import AuthzService
 
-access_bp = Blueprint("access", __name__)
+access_bp = APIBlueprint("access", __name__)
 logger = logging.getLogger("cpypiserver.access")
 
 #: Statuses every route here can return, on top of the specific ones.
@@ -50,10 +65,6 @@ def _authz() -> AuthzService:
     if authz is None:
         raise ForbiddenError(message="Authorization service unavailable")
     return authz
-
-
-def _body() -> dict:
-    return request.get_json(silent=True) or {}
 
 
 def _actor() -> str:
@@ -107,7 +118,8 @@ def list_roles():
     return jsonify(_authz().list_roles())
 
 
-@access_bp.route("/roles", methods=["POST"])
+@access_bp.post("/roles")
+@validate_request()
 @api_operation(
     summary="Create a role",
     description=(
@@ -119,13 +131,12 @@ def list_roles():
     request_body={"required": True, "content": json_body("CreateRoleRequest")},
     responses={"201": ok("Role created", "RoleInfo"), **_errors("400", "409")},
 )
-def create_role():
-    data = _body()
+def create_role(body: CreateRoleRequest):
     try:
         role = _authz().create_role(
-            code=data.get("code", ""),
-            name=data.get("name") or data.get("code", ""),
-            description=data.get("description"),
+            code=body.code,
+            name=body.name or body.code,
+            description=body.description,
         )
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
@@ -152,7 +163,8 @@ def delete_role(role_id: int):
     return jsonify({"deleted": role_id})
 
 
-@access_bp.route("/roles/<int:role_id>/permissions", methods=["PUT"])
+@access_bp.put("/roles/<int:role_id>/permissions")
+@validate_request()
 @api_operation(
     summary="Replace a role's permissions",
     description=(
@@ -165,13 +177,12 @@ def delete_role(role_id: int):
     request_body={"required": True, "content": json_body("SetRolePermissionsRequest")},
     responses={"200": ok("Role updated", "RoleInfo"), **_errors("400", "404")},
 )
-def set_role_permissions(role_id: int):
-    codes = _body().get("permissions")
-    if not isinstance(codes, list) or not all(isinstance(c, str) for c in codes):
-        raise BadRequestError("`permissions` must be a list of permission codes")
+def set_role_permissions(role_id: int, body: SetRolePermissionsRequest):
+    # `permissions` is `list[str]` in the model, which is exactly what the view
+    # used to re-check by hand.
     authz = _authz()
     try:
-        authz.set_role_permissions(role_id, codes)
+        authz.set_role_permissions(role_id, body.permissions)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     role = next((r for r in authz.list_roles() if r["id"] == role_id), None)
@@ -186,7 +197,8 @@ def set_role_permissions(role_id: int):
 #  Accounts
 # ══════════════════════════════════════════════════════════════════════
 
-@access_bp.route("/users")
+@access_bp.get("/users")
+@validate_request()
 @api_operation(
     summary="List accounts",
     description=(
@@ -196,15 +208,34 @@ def set_role_permissions(role_id: int):
         "`python cli.py create-admin <id>` work."
     ),
     tags=["Access control"],
+    parameters=[
+        {
+            "name": "limit",
+            "in": "query",
+            "required": False,
+            "description": "Accounts to return, clamped to 1..1000 (default 200).",
+            "schema": {"type": "integer", "default": 200},
+        },
+        {
+            "name": "offset",
+            "in": "query",
+            "required": False,
+            "description": "Accounts to skip; negatives are clamped to 0.",
+            "schema": {"type": "integer", "default": 0},
+        },
+    ],
     responses={"200": ok("Accounts", array_of("UserInfo")), **_errors()},
 )
-def list_users():
-    limit = request.args.get("limit", default=200, type=int)
-    offset = request.args.get("offset", default=0, type=int)
+def list_users(query: UserListQuery):
+    # The bounds stay in the view rather than on the model: a `?limit=5000` is
+    # clamped, not a 400 — the same choice `/-/v1/search` makes.
+    limit = 200 if query.limit is None else query.limit
+    offset = 0 if query.offset is None else query.offset
     return jsonify(_authz().list_users(limit=max(1, min(limit, 1000)), offset=max(0, offset)))
 
 
-@access_bp.route("/users/<int:user_id>/roles", methods=["POST"])
+@access_bp.post("/users/<int:user_id>/roles")
+@validate_request()
 @api_operation(
     summary="Grant a role",
     description="Idempotent: granting a role the account already holds returns `granted: false`.",
@@ -212,8 +243,8 @@ def list_users():
     request_body={"required": True, "content": json_body("GrantRoleRequest")},
     responses={"200": ok("Grant applied"), **_errors("400", "404")},
 )
-def grant_role(user_id: int):
-    code = (_body().get("role") or "").strip()
+def grant_role(user_id: int, body: GrantRoleRequest):
+    code = body.role.strip()
     if not code:
         raise BadRequestError("`role` is required")
     try:
@@ -240,7 +271,8 @@ def revoke_role(user_id: int, role_code: str):
     return jsonify({"user_id": user_id, "role": role_code, "revoked": revoked})
 
 
-@access_bp.route("/users/<int:user_id>/superuser", methods=["PUT"])
+@access_bp.put("/users/<int:user_id>/superuser")
+@validate_request()
 @api_operation(
     summary="Set the superuser flag",
     description=(
@@ -253,17 +285,14 @@ def revoke_role(user_id: int, role_code: str):
     request_body={"required": True, "content": json_body("SetSuperuserRequest")},
     responses={"200": ok("Flag updated"), **_errors("400", "404")},
 )
-def set_superuser(user_id: int):
+def set_superuser(user_id: int, body: SetSuperuserRequest):
     principal = current_principal() or {}
     if not principal.get("is_superuser"):
         raise ForbiddenError(
             message="Only a superuser may grant or revoke the superuser flag"
         )
 
-    value = _body().get("superuser")
-    if not isinstance(value, bool):
-        raise BadRequestError("`superuser` must be a boolean")
-
+    value = body.superuser
     authz = _authz()
     if not value and authz.count_superusers() <= 1:
         raise BadRequestError(

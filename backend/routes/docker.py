@@ -34,9 +34,19 @@ this server does **not** unpack a saved tarball and serve its layers as registry
 manifests/blobs.  With no upstream configured, a manifest or blob request for a
 local-only image returns 404 saying exactly that.
 
-⚠ Decorator order is load-bearing: ``@docker_bp.route`` must be the topmost
-line, or the guard is applied after registration and never runs.
-``scripts/check_auth_guards.py`` enforces this.
+⚠ Decorator order is load-bearing: the route decorator — ``@docker_bp.route``,
+or ``@docker_bp.get``/``@docker_bp.post`` where the view binds request input —
+must be the topmost line, or the guard is applied after registration and never
+runs. ``scripts/check_auth_guards.py`` enforces this.
+
+``GET /docker/v2/<name>/tags/list`` binds its ``?n=``/``?last=`` query and
+``POST /api/v1/docker`` binds its ``file`` part as view parameters instead of
+reading ``request`` by hand, which is what ``@validate_request()`` — placed
+*below* the guard, so an unauthorized request is answered ``401``/``403`` and
+never by the binder — installs.  The manifest and blob routes keep reading
+``Accept``/``Range`` out of ``request`` by hand: those headers are forwarded
+verbatim to the upstream registry, and no model should be validating a header
+the proxy exists to pass through.
 """
 
 from __future__ import annotations
@@ -45,9 +55,10 @@ import logging
 from urllib.parse import quote
 
 from flask import (
-    Blueprint, Response, jsonify, render_template, request,
+    Response, jsonify, render_template, request,
     send_from_directory, url_for,
 )
+from flask_openapi3 import APIBlueprint, validate_request
 
 from auth.decorators import require_permission
 from auth.permissions import DOCKER_DOWNLOAD, DOCKER_READ, DOCKER_UPLOAD
@@ -55,12 +66,13 @@ from config import settings
 from errors import BadRequestError, PypiError
 from openapi import api_operation, binary, errors, json_body, ok
 from routes.hub_common import spa_url, wants_json
+from schemas import DockerTagsQuery, DockerUploadForm
 from services import docker_registry as registry
 from services import hub, hub_upload
 
 logger = logging.getLogger("cpypiserver.docker")
 
-docker_bp = Blueprint("docker", __name__)
+docker_bp = APIBlueprint("docker", __name__)
 
 _DOCKER_SCHEMA = {
     "type": "object",
@@ -252,8 +264,27 @@ def docker_catalog():
     return jsonify(document)
 
 
-@docker_bp.route("/docker/v2/<path:name>/tags/list")
+def _tag_limit(value: str | None) -> int | None:
+    """``?n=`` read the way this route has always read it.
+
+    ``request.args.get("n", type=int)`` answered an unparseable ``n`` with
+    ``None`` — "no limit" — instead of rejecting the request, and a negative
+    ``n`` was clamped the same way.  Both live here rather than in a ``ge=`` on
+    the model, so the binding cannot turn either into a ``400``; the OCI
+    parameter documents ``minimum: 0`` and this is what honours it.
+    """
+    if value is None:
+        return None
+    try:
+        limit = int(value)
+    except ValueError:
+        return None
+    return limit if limit >= 0 else None
+
+
+@docker_bp.get("/docker/v2/<path:name>/tags/list")
 @require_permission(DOCKER_READ)
+@validate_request()
 @api_operation(
     summary="List repository tags",
     description=(
@@ -284,18 +315,18 @@ def docker_catalog():
         **errors("401", "403", "404", "502"),
     },
 )
-def docker_tags(name: str):
+def docker_tags(name: str, query: DockerTagsQuery):
     try:
         tags = registry.list_tags(name)
     except registry.DockerRegistryError as exc:
         return _registry_error(exc)
 
-    last = request.args.get("last", "")
+    last = query.last or ""
     if last:
         tags = [tag for tag in tags if tag > last]
-    limit = request.args.get("n", type=int)
+    limit = _tag_limit(query.n)
     truncated = False
-    if limit is not None and limit >= 0 and len(tags) > limit:
+    if limit is not None and len(tags) > limit:
         tags = tags[:limit]
         truncated = True
 
@@ -437,8 +468,9 @@ def docker_catalog_api():
     return jsonify(_docker_payload())
 
 
-@docker_bp.route("/api/v1/docker", methods=["POST"])
+@docker_bp.post("/api/v1/docker")
 @require_permission(DOCKER_UPLOAD)
+@validate_request()
 @api_operation(
     summary="Upload a docker artifact",
     description=(
@@ -480,9 +512,17 @@ def docker_catalog_api():
         **errors("400", "401", "403", "409", "413", "500"),
     },
 )
-def upload_docker_artifact():
-    upload = request.files.get("file")
-    if upload is None or not upload.filename:
+def upload_docker_artifact(form: DockerUploadForm):
+    # `form.file` is the `file` part, read out of `request.files` by the binder —
+    # see `schemas.DockerUploadForm` for why the field must be a
+    # `flask_openapi3.FileStorage` and not an optional one.  `filename` is also
+    # what tells a real part from a *text* field of the same name: the binder
+    # copies one of those into the model as a plain `str` (its schema is what
+    # sends it to `request.files`, but `FileStorage`'s validator then hands any
+    # value back untouched), and this check is what answers it with the 400 this
+    # route has always answered instead of an `AttributeError` 500.
+    upload = form.file
+    if not getattr(upload, "filename", None):
         raise BadRequestError("multipart/form-data 需要一个 file 字段")
     target = hub_upload.docker_target(settings.hub.docker_dir, upload.filename)
     hub_upload.save(target, upload)
@@ -491,7 +531,7 @@ def upload_docker_artifact():
         # `docker_target` refuses every name the scanner hides; reaching here
         # means the scanner's visibility rule changed under us.
         raise PypiError(
-            f"已写入 {target.name}，但 Docker 目录扫描未列出它；请检查 DOCKER_DIR 的可见性规则",
+            "已写入文件，但 Docker 目录扫描未列出它；请检查 DOCKER_DIR 的可见性规则",
             status_code=500,
         )
     return jsonify(entry), 201

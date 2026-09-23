@@ -23,6 +23,13 @@ HTTP Basic credentials and checks the wire shapes npm depends on:
   document (scoped and unscoped), recomputing the hashes instead of trusting
   them, resolving a persisted ``--tag next``, and refusing a re-publish, a
   forged shasum, a non-tarball body and a name/version mismatch;
+* the *binding* of that body: it arrives as the ``body: NpmPublishDocument``
+  view parameter rather than through ``request.get_json``, so the gate pins that
+  a non-object body is answered by the ``400`` envelope under ``body_params``,
+  that the guard still runs before the binder (an anonymous publish with an
+  unbindable body is ``401``, never ``400``), and that a JSON object missing a
+  key is still refused *in prose* by ``services/npm_publish.py`` — the model
+  parses, it does not police;
 * the read-through proxy: a package and a tarball fetched from a *fake* upstream
   running in a background thread, then served from cache with no second hit.
 
@@ -503,6 +510,44 @@ def main() -> int:
     anon_publish = anonymous.put(
         f"/npm/{PUB_NAME}", json=publish_document(PUB_NAME, "4.0.0", PUB_BYTES))
     check(anon_publish.status_code == 401, "anonymous PUT /npm/<pkg> (publish) -> 401")
+
+    section("Publish: the body is bound, not read by hand")
+    # `routes/npm.py` used to pull the document out of the request itself
+    # (`request.get_json(silent=True, force=True)`, then a `None` check).  It is
+    # now a view parameter — `body: NpmPublishDocument`, bound by
+    # `@validate_request()` sitting *below* the guard — and each of the three
+    # properties below fails silently on its own if that wiring is undone.
+    not_an_object = put(client, "/npm/openfish-not-an-object", ["not", "a", "document"])
+    not_an_object_body = not_an_object.get_json(silent=True) or {}
+    check(not_an_object.status_code == 400, "a JSON array as the publish body -> 400")
+    check(
+        isinstance((not_an_object_body.get("validation_error") or {}).get("body_params"), list),
+        "the unbound body is reported as validation_error.body_params",
+    )
+    check(
+        not_an_object.headers.get("X-Content-Type-Options") == "nosniff",
+        "the binding error carries X-Content-Type-Options: nosniff",
+    )
+
+    # The binder must not start rejecting documents the *service* accepts: the
+    # point of the model is to parse, not to police.  A missing key is still
+    # named in prose by services/npm_publish.py, not by the field-location
+    # envelope — inverting that would turn every npm 400 into a pydantic dump.
+    prose = put(client, "/npm/openfish-no-name", {"versions": {}, "_attachments": {}})
+    check(
+        prose.status_code == 400 and "name" in ((prose.get_json(silent=True) or {}).get("error") or ""),
+        "an object body missing a key is still refused by the service, by name",
+    )
+
+    # Order: `@require_permission` is applied before `@validate_request()` runs,
+    # so an anonymous publish is 401 even when the body cannot be bound at all.
+    # Binding first would answer 400 — an unauthenticated caller would then be
+    # able to tell a valid body from an invalid one.
+    anon_unbindable = anonymous.put("/npm/" + PUB_NAME, json=["not", "a", "document"])
+    check(
+        anon_unbindable.status_code == 401,
+        "anonymous PUT with an unbindable body -> 401 (guard runs before the binder)",
+    )
 
     section("Existing catalog routes still work")
     check(get(client, "/npm/-/ping").status_code == 200, "/npm/-/ping -> 200")
