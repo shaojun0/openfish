@@ -9,14 +9,11 @@ import site for everything they need.
 
 from __future__ import annotations
 
-import logging
 import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 
 from services.digest import compute_sha256, invalidate_digest_cache, store_digest
-
-logger = logging.getLogger("cpypiserver.index")
 
 
 class WatchdogIndex(ABC):
@@ -63,7 +60,6 @@ class WatchdogIndex(ABC):
         if obs is not None:
             obs.stop()          # type: ignore[union-attr]
             obs.join(timeout=3) # type: ignore[union-attr]
-            logger.info("Watchdog stopped for %s", self._dir)
 
     # ── Observer (shared across subclasses) ────────────────────────
 
@@ -72,7 +68,6 @@ class WatchdogIndex(ABC):
             from watchdog.observers import Observer
             from watchdog.events import FileSystemEventHandler
         except ImportError:
-            logger.warning("watchdog missing — '%s' will NOT auto-update", self._dir)
             return
 
         idx = self
@@ -100,7 +95,6 @@ class WatchdogIndex(ABC):
         observer.daemon = True
         observer.start()
         self._observer = observer
-        logger.info("Watchdog started on '%s' (recursive=%s)", self._dir, self._recursive)
 
 
 __all__ = [

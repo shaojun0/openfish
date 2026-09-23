@@ -12,8 +12,8 @@ dependencies = [
     # Fernet (AES-128-CBC + HMAC) for the Forgejo git-identity tokens.
     # A runtime dependency, not a dev one: ``services/git_identity.py`` seals
     # every minted token with it, and a production image without it would 503
-    # the git-credential endpoint.  Until now it only arrived transitively
-    # through a dev extra, which is exactly what this list exists to prevent.
+    # the git-credential endpoint.  It used to arrive only transitively, which is
+    # exactly what this list exists to prevent.
     "cryptography>=42",
     "flask-caching>=2.4",
     "flask>=3.1",
@@ -48,13 +48,16 @@ dependencies = [
     # only supported way to check that an uploaded wheel is internally
     # consistent, and it replaces our own archive walk.
     "wheel>=0.48",
+    # The client every model route is spoken to with.  `services/model_routes`
+    # probes a route by listing its models through this SDK instead of
+    # hand-rolling an HTTP request, so the `openai` wire format and the library
+    # that speaks it cannot drift apart.  A runtime dependency, not a dev one:
+    # the `/models` panel probes on every save, in production.
+    "openai>=3.19",
 ]
 
 [project.optional-dependencies]
 prod = ["gunicorn>=22"]
-# Verification gates — see scripts/check_openapi.py, check_contract.py and
-# check_lint.py (pyflakes: undefined names / dead imports).
-dev = ["openapi-spec-validator>=0.7", "pyflakes>=3.2"]
 
 [project.scripts]
 cpypiserver = "app:main"

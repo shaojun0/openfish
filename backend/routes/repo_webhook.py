@@ -20,13 +20,12 @@ Events and the action each one triggers (§5.4):
 
 The secret lives in ``FORGEJO_WEBHOOK_SECRET`` and nowhere else — not in a
 config file, not in a log line, not in a response.  The route is declared public
-with ``security=[]`` so ``scripts/check_auth_guards.py`` knows the anonymity is
-deliberate rather than an oversight; the HMAC check is the actual guard.
+with ``security=[]``: the anonymity is deliberate rather than an oversight — the
+HMAC check is the actual guard.
 
 Everything decision-shaped is a module-level function
-(:func:`verify_signature`, :func:`parse_event`, :func:`plan_actions`) so
-``scripts/check_agent_repos.py`` can exercise the whole policy offline, with a
-fake queue and no Flask app.
+(:func:`verify_signature`, :func:`parse_event`, :func:`plan_actions`) so the
+whole policy can be exercised offline, with a fake queue and no Flask app.
 """
 
 from __future__ import annotations
@@ -34,7 +33,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
@@ -51,7 +49,6 @@ from services.review_policy import (
     DEFAULT_CURATOR_MIN_INTERVAL_SECONDS,
 )
 
-logger = logging.getLogger("cpypiserver.routes.repo_webhook")
 
 repo_webhook_bp = Blueprint("repo_webhook", __name__)
 
@@ -382,7 +379,6 @@ def _default_enqueue() -> tuple[Callable[..., Any], Any] | None:
         try:
             queue = AgentQueue(bind)
         except Exception as exc:  # noqa: BLE001 - an unavailable queue is not fatal
-            logger.warning("could not build an AgentQueue: %s", exc)
             return None
     sender = getattr(queue, "enqueue", None)
     return (sender, queue) if callable(sender) else None
@@ -411,14 +407,10 @@ def enqueue_task(
                           payload=payload, dedup_key=dedup_key)
     if kind not in TASK_KIND:
         action.reason = f"未知任务类型（TASK_KIND={TASK_KIND}）"
-        logger.warning("webhook will not queue %s for repo %s: %s",
-                       kind, repo_id, action.reason)
         return action
     resolved = (enqueue, None) if enqueue is not None else _default_enqueue()
     if resolved is None:
         action.reason = "services.agent_queue 不可用（S0 未交付或队列未初始化）"
-        logger.warning("webhook would queue %s for repo %s: %s",
-                       kind, repo_id, action.reason)
         return action
     sender, _owner = resolved
     try:
@@ -430,11 +422,8 @@ def enqueue_task(
             action.delivered = True
         else:
             action.reason = "重复投递或该仓库在途任务已达上限，已抑制（未写入队列）"
-            logger.info("webhook suppressed %s for repo %s: %s",
-                        kind, repo_id, action.reason)
     except Exception as exc:  # noqa: BLE001 - a queue fault must not 500 a webhook
         action.reason = type(exc).__name__
-        logger.exception("webhook could not queue %s for repo %s", kind, repo_id)
     return action
 
 
@@ -477,7 +466,6 @@ def curator_enqueue_allowed(
             session, repo_id, mode=mode, min_interval_seconds=min_interval_seconds
         )
     except Exception as exc:  # noqa: BLE001 - never 500 a webhook
-        logger.warning("curator enqueue gate unavailable for repo %s: %s", repo_id, exc)
         return False, f"curator gate unavailable: {exc}"
 
 
@@ -518,9 +506,6 @@ def plan_actions(
             return actions
         head_sha = _head_sha(event)
         if not head_sha:
-            logger.info(
-                "push on %s carried no usable commit sha; nothing queued", event.branch,
-            )
             return actions
         if auto_review is not None:
             allowed = bool(auto_review)
@@ -529,7 +514,6 @@ def plan_actions(
             try:
                 allowed = bool(reader())
             except Exception as exc:  # noqa: BLE001 - policy trouble never blocks a push
-                logger.warning("auto_review policy lookup failed: %s", exc)
                 allowed = True
         if allowed:
             actions.append(QueuedAction(
@@ -583,16 +567,7 @@ def plan_actions(
         return actions
 
     if event.kind == "pull_request" and event.merged:
-        # The doc write-back is *synchronous*: the view calls
-        # :func:`backfill_pr_url` against the findings table directly (see the
-        # route below).  Queueing a ``backfill`` task here was pure waste — no
-        # handler implements that kind, so every merged PR produced a task that
-        # burned three attempts and landed in ``dead``.  The event is still
-        # ``handled`` (the write-back ran); nothing is queued.
-        logger.info(
-            "merged pull request %s: doc write-back runs inline, nothing queued",
-            event.pr_number,
-        )
+        pass
     return actions
 
 
@@ -659,12 +634,6 @@ def resolve_repo(session: Any, event: WebhookEvent) -> Any | None:
     if not found:
         return None
     if len(found) > 1:
-        logger.error(
-            "webhook 的仓库 %r 同时匹配 %d 个 repos 行（%s）；拒绝猜测，事件未处理，"
-            "请先修复命名冲突",
-            candidates, len(found),
-            ", ".join(str(getattr(row, "slug", row.id)) for row in found.values()),
-        )
         return None
     return next(iter(found.values()))
 
@@ -689,7 +658,6 @@ def backfill_pr_url(session: Any, repo_id: int, number: int, url: str) -> int:
     try:
         from models.agent_hub import AgentTask, Finding, ReviewRun  # noqa: PLC0415
     except ImportError:
-        logger.info("agent-hub tables not present yet; skipping pr_url backfill")
         return 0
     if not hasattr(Finding, "pr_url"):
         return 0
@@ -703,8 +671,6 @@ def backfill_pr_url(session: Any, repo_id: int, number: int, url: str) -> int:
             .first()
         )
         if task is None:
-            logger.info("no agent task records PR %s for repo %s; nothing linked",
-                        url, repo_id)
             return 0
         run_ids = [
             row[0]
@@ -733,7 +699,6 @@ def backfill_pr_url(session: Any, repo_id: int, number: int, url: str) -> int:
             session.commit()
     except Exception as exc:  # noqa: BLE001 - best-effort by design
         session.rollback()
-        logger.warning("could not backfill pr_url for repo %s: %s", repo_id, exc)
         return 0
     return updated
 
@@ -849,7 +814,6 @@ def delivery_seen(session: Any, key: str) -> bool:
         )
     except Exception as exc:  # noqa: BLE001 - never 500 a webhook
         session.rollback()
-        logger.warning("could not check webhook delivery key %s: %s", key[:16], exc)
         return False
 
 
@@ -898,13 +862,9 @@ def claim_delivery(
         # The unique key lost the race: a duplicate, handled deliberately rather
         # than swallowed.  This is the *expected* path for a replay.
         session.rollback()
-        logger.info(
-            "webhook delivery key %s already recorded; ignoring replay", key[:16],
-        )
         return False
     except Exception as exc:  # noqa: BLE001 - never 500 a webhook
         session.rollback()
-        logger.warning("could not record webhook delivery key %s: %s", key[:16], exc)
         return True
 
 
@@ -927,8 +887,8 @@ def claim_delivery(
         "`handled: false`, so Forgejo does not retry them forever."
     ),
     tags=["Repositories"],
-    # Anonymous on purpose: the HMAC is the credential.  `security=[]` is what
-    # tells scripts/check_auth_guards.py this is a decision, not an omission.
+    # Anonymous on purpose: the HMAC is the credential.  `security=[]` records
+    # that decision, so the missing guard is never read as an oversight.
     security=[],
     request_body={"required": True, "content": json_body()},
     responses={
@@ -944,8 +904,6 @@ def forgejo_webhook():
     # signature.  Distinguishing them would tell an attacker whether guessing is
     # even worth their time.
     if not verify_signature(body, header, secret=secret):
-        logger.warning("rejected forgejo webhook: signature mismatch (secret %s)",
-                       "configured" if secret else "unset")
         return jsonify({
             "error": "invalid_signature",
             "error_description": "webhook 签名校验失败",
@@ -973,23 +931,9 @@ def forgejo_webhook():
     hint = delivery_id()
     session = _session()
     if delivery_seen(session, key):
-        # The HMAC proves who signed it, not that it is new: a replay (or a
-        # Forgejo retry after a 2xx we failed to return) must not enqueue a
-        # second review.  The key is the signed body's digest, so stripping the
-        # (unsigned) delivery header does not make the replay look new.  Answer
-        # 200 so the forge stops retrying either way.
-        logger.info(
-            "webhook delivery body %s already accepted (header hint %r); ignoring replay",
-            key[:16], hint,
-        )
         return _duplicate_response(event)
     repo = resolve_repo(session, event)
     if repo is None:
-        # 200, not 404: an unimported repository is a permanent condition, and a
-        # 4xx makes Forgejo retry the delivery forever (the same reason unknown
-        # events answer 200).
-        logger.warning("webhook for unknown repository %r (%s)",
-                       event.forgejo_repo or event.repo_slug, event.kind)
         return jsonify({
             "ok": True,
             "event": event.kind,
@@ -1010,10 +954,6 @@ def forgejo_webhook():
     # what actually serialises them.  If it loses, answer as a duplicate instead
     # of queueing a second paid task.
     if not claim_delivery(session, key, repo_id=repo.id, event=event.kind):
-        logger.info(
-            "webhook delivery body %s claimed concurrently (header hint %r); ignoring replay",
-            key[:16], hint,
-        )
         return _duplicate_response(event)
 
     curator_mode, curator_interval = _repo_curator_policy(repo)
@@ -1032,9 +972,7 @@ def forgejo_webhook():
         curator_allowed=curator_allowed,
     )
     if not curator_allowed and curator_reason:
-        logger.info(
-            "webhook curator proposal suppressed for %s: %s", repo.slug, curator_reason,
-        )
+        pass
     queued: list[QueuedAction] = []
     for action in actions:
         queued.append(enqueue_task(
@@ -1063,10 +1001,6 @@ def forgejo_webhook():
         note = "push 目标不是默认分支，未入队"
     elif not handled:
         note = "事件已接受，但没有匹配的动作"
-    logger.info(
-        "webhook %s/%s for %s → %d queued, %d finding(s) updated",
-        event.kind, event.action, repo.slug, len(queued), updated,
-    )
     return jsonify({
         "ok": True,
         "event": event.kind,

@@ -6,12 +6,9 @@ Results stored in Flask-Caching SimpleCache.
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 from services.format import human_size
-
-logger = logging.getLogger("cpypiserver.stats")
 
 
 def compute(pkg_index, key_mgr) -> dict:

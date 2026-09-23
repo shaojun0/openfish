@@ -28,14 +28,15 @@ import { formatDate } from '@/utils/format'
  * The route table is the one hub catalog an administrator edits in the
  * browser.  Adding a route opens an inline editor **as the first row of the
  * table**; editing reuses the same row.  Saving validates the entry server
- * side, rewrites `MODELS_FILE` atomically and probes the URL, and the
+ * side, writes the `model_routes` row and probes the URL, and the
  * connectivity column shows whether the endpoint answers.  Everyone with
  * `model:read` may look; changing anything needs `model:write` (admin).
  *
  * A route is classified on two independent axes: `provider` is the wire format
  * and `kind` is the model function.  The editor keeps the kind in step with the
- * protocol's default (`mineru` → OCR) until the administrator picks one
- * explicitly.
+ * protocol's default (`chat`) until the administrator picks one explicitly —
+ * a document parser is an OpenAI-format route with `kind: 'ocr'`, not a protocol
+ * of its own.
  */
 const { t } = useI18n()
 const session = useSessionStore()
@@ -52,7 +53,7 @@ const LLM_KINDS: readonly string[] = ['chat', 'completion']
 
 const providerOptions = computed<string[]>(() => {
   const fromServer = routes.value?.providers ?? []
-  return fromServer.length ? fromServer : ['openai', 'mineru', 'anthropic']
+  return fromServer.length ? fromServer : ['openai', 'anthropic']
 })
 
 const kindOptions = computed<string[]>(() => {
@@ -186,8 +187,6 @@ function providerLabel(provider: string): string {
   switch (provider) {
     case 'openai':
       return t('models.providerOpenai')
-    case 'mineru':
-      return t('models.providerMineru')
     case 'anthropic':
       return t('models.providerAnthropic')
     default:
@@ -216,9 +215,15 @@ function kindLabel(kind: string): string {
   }
 }
 
-/** The kind a protocol implies when the administrator has not chosen one. */
-function defaultKindFor(provider: string): string {
-  return provider === 'mineru' ? 'ocr' : 'chat'
+/**
+ * The kind a protocol implies when the administrator has not chosen one.
+ *
+ * Both wire formats describe a chat model — a document parser is an OpenAI-format
+ * route whose kind is picked by hand (`ocr`). The parameter stays so a future
+ * protocol with a different default has one place to say so.
+ */
+function defaultKindFor(_provider: string): string {
+  return 'chat'
 }
 
 function onProviderChange(provider: string): void {

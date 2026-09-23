@@ -37,7 +37,7 @@ local-only image returns 404 saying exactly that.
 ⚠ Decorator order is load-bearing: the route decorator — ``@docker_bp.route``,
 or ``@docker_bp.get``/``@docker_bp.post`` where the view binds request input —
 must be the topmost line, or the guard is applied after registration and never
-runs. ``scripts/check_auth_guards.py`` enforces this.
+runs.  The guard must be in effect before the route registers.
 
 ``GET /docker/v2/<name>/tags/list`` binds its ``?n=``/``?last=`` query and
 ``POST /api/v1/docker`` binds its ``file`` part as view parameters instead of
@@ -69,10 +69,12 @@ from routes.hub_common import spa_url, wants_json
 from schemas import DockerTagsQuery, DockerUploadForm
 from services import docker_registry as registry
 from services import hub, hub_upload
+from services.logsafe import scrub
 
-logger = logging.getLogger("cpypiserver.docker")
 
 docker_bp = APIBlueprint("docker", __name__)
+
+_log = logging.getLogger("cpypiserver.docker")
 
 _DOCKER_SCHEMA = {
     "type": "object",
@@ -139,15 +141,28 @@ def _docker_entry_by_filename(filename: str) -> dict | None:
 def _registry_error(exc: registry.DockerRegistryError) -> Response:
     """The OCI error body a registry client expects, e.g. ``{"errors": [...]}``.
 
-    A ``5xx`` from this server means the *upstream* failed, and its message can
-    carry the upstream URL, a TLS error or a response body — internals the client
-    has no business seeing.  Those are logged and replaced with the generic OCI
-    ``UNAVAILABLE`` text.  A ``4xx`` is the client's own problem (an unknown
-    repository, a bad reference) and keeps its specific message, which is what a
-    ``docker pull`` shows the user.
+    ``code`` is an OCI constant the client switches on; the message is chosen
+    from the two tiers an error body may legitimately carry:
+
+    * A ``4xx`` is the client's own problem (an unknown repository, a bad
+      reference) and keeps its specific message — that is what a ``docker pull``
+      shows the user.  The messages on that tier are *ours*: ``docker_registry``
+      writes them from its own vocabulary and, at most, re-states the reference
+      the caller already sent, so they disclose nothing the caller did not
+      arrive with.
+    * From ``5xx`` up the failure is the *upstream's*: its message can carry the
+      upstream URL, a TLS error or a response body.  That is logged for the
+      operator and replaced with the generic OCI ``UNAVAILABLE`` text, so a probe
+      of this proxy cannot turn it into a map of the network behind it.
+
+    A new message on the 4xx tier therefore has to stay static — never
+    ``f"...{response.text}"`` or a URL — or it belongs on the redacted tier.
     """
     if exc.status >= 500:
-        logger.warning("docker upstream failure (%s): %s", exc.code, exc.message)
+        _log.error(
+            "docker registry %s (HTTP %s): %s",
+            exc.code, exc.status, scrub(exc.message), exc_info=exc,
+        )
         message = "upstream registry unavailable"
     else:
         message = exc.message

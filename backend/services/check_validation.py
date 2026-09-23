@@ -15,13 +15,11 @@ touches the real checkout — every seed is applied to a temporary copy
 is discarded.
 
 Everything external is injectable (the executor, the seeders, the copier), so
-the whole validator is exercised offline by ``scripts/check_agent_checks.py``
-with no model, no network and no git.
+the whole validator can be exercised offline with no model, no network and no git.
 """
 
 from __future__ import annotations
 
-import logging
 import re
 import shutil
 import tempfile
@@ -46,7 +44,6 @@ from services.gates import (
     run_suite,
 )
 
-logger = logging.getLogger("cpypiserver.check_validation")
 
 #: Directories a seeded copy never needs and must not pay to copy.
 COPY_IGNORE: tuple[str, ...] = (
@@ -338,7 +335,7 @@ def validate_check(
         try:
             seeds.extend(seeder(root))
         except Exception as exc:  # a broken seeder must not fail the check
-            logger.warning("fault seeder %s failed: %s", getattr(seeder, "__name__", seeder), exc)
+            pass
     attempted = 0
     detected: list[str] = []
     copy_fn = copier or _default_copier
@@ -348,7 +345,6 @@ def validate_check(
             try:
                 copy_fn(root, seeded)
             except OSError as exc:
-                logger.warning("cannot copy repo for seed %s: %s", seed.id, exc)
                 continue
             if not _apply_edits(seeded, seed):
                 continue

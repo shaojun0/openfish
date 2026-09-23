@@ -47,7 +47,7 @@ curl -H 'Accept: application/json' {{ base_url }}</code></pre>
     {% endif %}
 
     {% for c in categories %}
-    <h2>{{ c.name or c.key }}{% if c.description %} <span class="stats">— {{ c.description }}</span>{% endif %}</h2>
+    <h2>{{ c.name or c.slug }}{% if c.description %} <span class="stats">— {{ c.description }}</span>{% endif %}</h2>
     {% if c.tools %}
     <table>
         <thead>

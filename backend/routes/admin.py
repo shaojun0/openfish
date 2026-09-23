@@ -7,7 +7,6 @@ The HTML dashboard that used to live here is now part of the Vue SPA
 
 from __future__ import annotations
 
-import logging
 
 from flask import Blueprint, current_app, jsonify
 
@@ -17,7 +16,6 @@ from openapi import api_operation, errors, ok
 from services.stats import compute as compute_stats
 
 admin_bp = Blueprint("admin", __name__)
-logger = logging.getLogger("cpypiserver.admin")
 
 
 @admin_bp.route("/stats")
@@ -39,7 +37,6 @@ def stats():
         data = cache.get("admin_stats")
         if data is not None:
             return jsonify(data)
-    logger.warning("Stats cache miss — computing live")
     return jsonify(_compute())
 
 

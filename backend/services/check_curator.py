@@ -22,7 +22,6 @@ re-deriving anything.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,7 +45,6 @@ from services.gates import (
 )
 from services.review_policy import dump_yaml, parse_yaml
 
-logger = logging.getLogger("cpypiserver.check_curator")
 
 #: Marker every curator proposal PR carries, in the title and the body, so the
 #: proposal is auditable without reading the diff.
@@ -149,7 +147,6 @@ def apply_validations(manifest_path: str | Path, validations: Iterable[CheckVali
         raw = parse_yaml(path.read_text(encoding="utf-8"))
         manifest = CheckManifest.model_validate(dict(raw))
     except Exception as exc:  # a broken manifest is reported, not silently fixed
-        logger.warning("cannot rewrite %s: %s", path, exc)
         return 0
     proven = {item.check_id: bool(item.validated) for item in validations}
     changed = 0
@@ -161,7 +158,6 @@ def apply_validations(manifest_path: str | Path, validations: Iterable[CheckVali
     if changed:
         payload = manifest.model_dump(mode="json")
         path.write_text(dump_yaml(payload), encoding="utf-8")
-        logger.info("rewrote %s: %d check(s) validation status updated", path, changed)
     return changed
 
 
@@ -221,10 +217,6 @@ def curate_workspace(
         validations=tuple(validations),
         manifest_path=str(manifest) if manifest is not None else None,
         notes=tuple(notes),
-    )
-    logger.info(
-        "curator proposal: %d check(s), %d validated, gating=%s",
-        report.total, report.validated, report.gating,
     )
     return report
 

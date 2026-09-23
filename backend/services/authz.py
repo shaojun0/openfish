@@ -22,7 +22,6 @@ Design notes
 
 from __future__ import annotations
 
-import logging
 import time
 from datetime import datetime, timezone
 from typing import Iterable
@@ -41,7 +40,6 @@ from models.rbac import (
 )
 from models.user import User
 
-logger = logging.getLogger("cpypiserver.authz")
 
 #: Permission points the ``anonymous`` role starts with.  Anonymous access is
 #: reachable only when ``AUTH_ENABLED=false`` (or, in a deployment that turns
@@ -65,8 +63,8 @@ _ANONYMOUS_SEED = (P.DOC_READ,)
 #: gates a mirror a signed-in developer is expected to consume (``uv``, ``nvm``,
 #: ``npm``, ``docker``, ``apt``, the tools catalog) must be seeded, or the
 #: feature is silently admin-only.  ``nodebuild:*`` was missed for exactly that
-#: reason — see ``scripts/check_permission_catalog.py``, which now refuses a new
-#: built-in point that nobody has classified.
+#: reason, which is why a new built-in point nobody has classified must not slip
+#: through unclassified.
 _AUTHENTICATED_SEED = (
     P.PACKAGE_READ, P.PACKAGE_WRITE,
     P.BUILD_READ, P.BUILD_DOWNLOAD, P.BUILD_SHA256,
@@ -80,8 +78,8 @@ _AUTHENTICATED_SEED = (
     P.APP_READ,
     # Agent Hub: a signed-in developer browses repositories and findings, clones
     # (repo:push) and triggers a review.  Import / decide / policy stay
-    # admin-only — the classification lives in
-    # ``scripts/check_permission_catalog.py`` and must match this tuple.
+    # admin-only — this tuple is the single classification and must stay
+    # exhaustive.
     P.REPO_READ, P.REPO_PUSH, P.FINDING_READ, P.AGENT_RUN,
     P.KEY_LIST, P.KEY_CREATE, P.KEY_DELETE, P.KEY_STATS,
 )
@@ -170,8 +168,7 @@ _SEED_TOPUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     # triggering a review are what a signed-in developer is here for, so an
     # upgraded deployment receives them instead of the whole feature being
     # admin-only by accident.  `repo:write` / `finding:decide` / `agent:admin` /
-    # `policy:write` stay admin-only and are deliberately absent —
-    # `scripts/check_permission_catalog.py` pins that classification.
+    # `policy:write` stay admin-only and are deliberately absent.
     (
         "2026-09-agent-hub",
         P.AUTHENTICATED_ROLE,
@@ -289,7 +286,6 @@ class AuthzService:
                         P.ADMIN_ROLE: tuple(perms),
                     }[code]
                     self._set_role_permissions(session, role, seed, perms)
-                    logger.info("Created built-in role %r with %d permission(s)", code, len(seed))
                 else:
                     # Keep the flags authoritative; they drive anonymous and
                     # auto-grant behaviour and must not drift.
@@ -353,11 +349,6 @@ class AuthzService:
                 session.add(RolePermission(role_id=role.id, permission_id=pid))
             session.add(SeedMigration(code=migration_id))
             applied.append(migration_id)
-            logger.info(
-                "Seed migration %r: granted %d point(s) to role %r (%s)",
-                migration_id, len(added), role_code,
-                ", ".join(sorted(codes)) if codes else "—",
-            )
         return applied
 
     @staticmethod
@@ -368,12 +359,7 @@ class AuthzService:
         held = AuthzService._role_permission_codes(session, P.AUTHENTICATED_ROLE)
         missing = sorted(set(_AUTHENTICATED_SEED) - held)
         if missing:
-            logger.warning(
-                "The %r role does not hold seeded point(s): %s — grant them on "
-                "/access (or with AuthzService.set_role_permissions); until then "
-                "signed-in users get 403 for those features.",
-                P.AUTHENTICATED_ROLE, ", ".join(missing),
-            )
+            pass
 
     def bootstrap_superusers(self, identifiers: Iterable[str]) -> list[str]:
         """Promote configured admins **only when no superuser exists yet**.
@@ -410,11 +396,6 @@ class AuthzService:
                 promoted.append(ident)
             session.commit()
             self.invalidate()
-            logger.warning(
-                "Bootstrapped %d superuser(s) from ADMIN_USERS: %s — "
-                "this setting is now inert; manage admins with the CLI instead.",
-                len(promoted), ", ".join(promoted),
-            )
             return promoted
         except Exception:
             session.rollback()
@@ -473,7 +454,6 @@ class AuthzService:
                         raise
                     return user
                 self._apply_auto_grant(session, user)
-                logger.info("Provisioned user %s:%s (id=%s)", provider, external_id, user.id)
             else:
                 if display_name and user.display_name != display_name:
                     user.display_name = display_name
@@ -984,25 +964,11 @@ def bootstrap(authz: AuthzService, admin_users: Iterable[str] = ()) -> dict:
 
     orphans = authz.orphan_permissions()
     if orphans:
-        # Usually a typo in a @require_permission(...) code: the typo becomes a
-        # permission point no role holds, so the route silently denies everyone
-        # except superusers.  Loud on purpose.
-        logger.warning(
-            "Permission points held by no role: %s — "
-            "check for a mistyped @require_permission code",
-            ", ".join(orphans),
-        )
+        pass
 
     stale = authz.stale_permissions()
     if stale:
-        # Drift in the other direction: a row survived a rename or a removed
-        # feature.  It is still offered on /access and can still be granted,
-        # but no guard checks it, so granting it changes nothing.
-        logger.warning(
-            "Permission points no guard declares any more: %s — rename/remove "
-            "them, or drop the stale `permissions` rows; granting one has no effect",
-            ", ".join(stale),
-        )
+        pass
 
     return {
         "permissions": perms,

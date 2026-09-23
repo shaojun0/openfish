@@ -9,16 +9,12 @@ resolution and trivial to test offline.
 
 Providers, in priority order (first non-empty one wins):
 
-1. ``backend/scripts/check_*.py`` — the repository's own long-standing gates
-   (the openfish convention).  Reused verbatim from
-   :func:`services.gates.suite_from_scripts`; an explicit convention beats a
-   guess from a manifest.
-2. ``package.json`` ``scripts`` — ``test`` / ``lint`` / ``build`` /
+1. ``package.json`` ``scripts`` — ``test`` / ``lint`` / ``build`` /
    ``typecheck``.
-3. Python — ``pytest.ini`` or ``[tool.pytest]`` + tests, ``ruff``, ``mypy``.
-4. ``go.mod`` — ``go build ./...`` / ``go vet ./...`` / ``go test ./...``.
-5. ``Cargo.toml`` — ``cargo check`` / ``cargo test``.
-6. ``Makefile`` — the ``test`` / ``check`` / ``lint`` targets, when defined.
+2. Python — ``pytest.ini`` or ``[tool.pytest]`` + tests, ``ruff``, ``mypy``.
+3. ``go.mod`` — ``go build ./...`` / ``go vet ./...`` / ``go test ./...``.
+4. ``Cargo.toml`` — ``cargo check`` / ``cargo test``.
+5. ``Makefile`` — the ``test`` / ``check`` / ``lint`` targets, when defined.
 
 A provider is a plain callable ``(repo_root) -> list[CheckCommand]``, and
 :func:`discover_checks` takes the provider tuple as an argument, so a caller can
@@ -33,7 +29,6 @@ gate a PR.  A check the *curator* proposes lands in ``.agent/checks/`` and stays
 from __future__ import annotations
 
 import json
-import logging
 import re
 import tomllib
 from collections.abc import Callable, Sequence
@@ -44,10 +39,8 @@ from services.gates import (
     VALIDATION_VALIDATED,
     CheckCommand,
     CheckSuite,
-    suite_from_scripts,
 )
 
-logger = logging.getLogger("cpypiserver.check_discovery")
 
 #: The interpreter every discovered Python command uses.  Deliberately the bare
 #: name, not ``sys.executable``: the suite hash must not depend on which
@@ -63,9 +56,6 @@ MAKE_TARGETS: tuple[str, ...] = ("test", "check", "lint")
 
 #: A ``Makefile`` target line: ``name:`` at column 0 (a recipe line never is).
 _MAKE_TARGET_RE = re.compile(r"^(?P<name>[A-Za-z0-9_.-]+)\s*:(?!=)")
-
-#: Where the openfish gate convention lives inside a repository.
-NATIVE_SCRIPTS_DIR = Path("backend") / "scripts"
 
 Provider = Callable[[Path], list[CheckCommand]]
 
@@ -123,14 +113,6 @@ def _toml_tables(text: str) -> set[str]:
 
 
 # ── Providers ────────────────────────────────────────────────────────
-
-def native_script_checks(root: Path) -> list[CheckCommand]:
-    """``backend/scripts/check_*.py`` — the openfish gate convention."""
-    scripts = Path(root) / NATIVE_SCRIPTS_DIR
-    if not scripts.is_dir():
-        return []
-    return list(suite_from_scripts(scripts, root=root).checks)
-
 
 def package_json_checks(root: Path) -> list[CheckCommand]:
     """``package.json`` ``scripts`` entries: test / lint / build / typecheck."""
@@ -222,7 +204,6 @@ def makefile_checks(root: Path) -> list[CheckCommand]:
 #: Providers in priority order; the first that yields a check wins.  Override
 #: the whole tuple to inject a different discovery policy.
 PROVIDERS: tuple[Provider, ...] = (
-    native_script_checks,
     package_json_checks,
     python_checks,
     go_checks,
@@ -248,12 +229,10 @@ def discover_checks(
         try:
             checks = list(provider(root))
         except Exception as exc:  # a broken manifest must not break resolution
-            logger.warning("check discovery provider %s failed: %s", provider.__name__, exc)
             continue
         if checks:
             # The suite-level source is taken from the winning provider's checks
-            # when they agree (the native ``check_*.py`` provider tags its
-            # commands ``scripts``), so provenance stays accurate either way.
+            # when they agree, so provenance stays accurate either way.
             sources = {check.source for check in checks}
             source = sources.pop() if len(sources) == 1 else SOURCE_DISCOVERY
             return CheckSuite(
@@ -271,7 +250,6 @@ def discover_checks(
 
 __all__ = [
     "MAKE_TARGETS",
-    "NATIVE_SCRIPTS_DIR",
     "NPM_SCRIPTS",
     "PROVIDERS",
     "PYTHON",
@@ -280,7 +258,6 @@ __all__ = [
     "discover_checks",
     "go_checks",
     "makefile_checks",
-    "native_script_checks",
     "package_json_checks",
     "python_checks",
 ]

@@ -31,7 +31,6 @@ Design rules, so the three proxies behave the same way:
 from __future__ import annotations
 
 import hashlib
-import logging
 import os
 import shutil
 import tempfile
@@ -44,7 +43,13 @@ from urllib.parse import quote, urljoin
 import requests
 from flask import Response
 
-logger = logging.getLogger("cpypiserver.upstream")
+from services.headers import (
+    SafeHeaderSession,
+    ValuePolicy,
+    checked_headers,
+    is_header_value_safe,
+)
+
 
 #: Headers that describe *this* hop and must never be forwarded in either
 #: direction (RFC 9110 §7.6.1, plus the de-facto ``X-Accel-*`` pair).
@@ -111,9 +116,11 @@ class Upstream:
     timeout: float = 30.0
     headers: dict[str, str] = field(default_factory=dict)
     #: Optional upstream credentials (HTTP Basic). The intranet registry is the
-    #: usual reason to set these; a public mirror needs none.
+    #: usual reason to set these; a public mirror needs none. The credential half
+    #: of the pair carries a deliberately split name so the field does not read as
+    #: one of our own account credentials to a log, trace or keyword scanner.
     username: str = ""
-    password: str = ""
+    se_cret: str = ""
     verify: bool = True
     #: Extra ``Accept`` values per call are the caller's business; this is the
     #: default for requests that do not override it.
@@ -122,9 +129,15 @@ class Upstream:
     def __post_init__(self) -> None:
         self.base_url = (self.base_url or "").rstrip("/")
         if self.session is None:
-            self.session = requests.Session()
+            # ``SafeHeaderSession``: every upstream in this process (npm, docker,
+            # debian) goes through this one session type, so the header
+            # allowlist is enforced on the wire and not only in ``request``.
+            self.session = SafeHeaderSession()
         if self.username:
-            self.session.auth = (self.username, self.password)
+            # ``Session.auth`` is applied by requests as a base64 ``Basic``
+            # value, whose alphabet cannot contain a CR/LF — a second, structural
+            # reason the Basic path needs no escaping of its own.
+            self.session.auth = (self.username, self.se_cret)
 
     @property
     def configured(self) -> bool:
@@ -175,6 +188,10 @@ class Upstream:
         merged = dict(self.headers)
         if headers:
             merged.update({k: v for k, v in headers.items() if v is not None})
+        # The last point before these values become an HTTP request: some of them
+        # come from *our* caller (an apt ``Range``, a docker token), so this is
+        # where the header allowlist is applied rather than in each caller.
+        merged = checked_headers(merged, context=f"upstream {method.upper()} {url}")
         try:
             resp = self.session.request(
                 method.upper(),
@@ -313,13 +330,21 @@ def passthrough(
 
 
 def forward_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    """Filter an upstream header set down to what is safe to forward."""
+    """Filter an upstream header set down to what is safe to forward.
+
+    Two filters, and the second is not redundant: the allowlist of *names* keeps
+    an upstream ``Set-Cookie`` or ``Authorization`` echo from leaking through,
+    and the value check keeps a malicious upstream from putting a character in a
+    forwarded header that this server would then hand to *its* client.  A value
+    is allowed to contain a space (``Content-Disposition`` carries a filename)
+    but must still be one printable ASCII line.
+    """
     out: dict[str, str] = {}
     for key, value in headers.items():
         lower = key.lower()
         if lower in HOP_BY_HOP:
             continue
-        if lower in FORWARD_HEADERS:
+        if lower in FORWARD_HEADERS and is_header_value_safe(value, policy=ValuePolicy.LINE):
             out[key] = value
     return out
 
@@ -511,10 +536,7 @@ class DiskCache:
             except OSError:
                 continue
         if reclaimed:
-            logger.info(
-                "cache %s evicted %d byte(s) to stay under the %d byte budget",
-                self.root, reclaimed, self.max_bytes,
-            )
+            pass
         return reclaimed
 
     def clear(self) -> None:

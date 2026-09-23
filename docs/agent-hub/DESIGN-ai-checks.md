@@ -21,24 +21,28 @@
 
 它由三条**代码机制**（不是文档约定）落实：
 
-| 机制 | 落点 | 断言它的 gate |
+| 机制 | 落点 | 断言内容 |
 | --- | --- | --- |
-| **冻结**：fix 从 base/approved 快照解析套件，事后重跑用同一份 `FrozenSuite`，绝不从改过的 working tree 重新解析 | `services/check_suite.py:freeze_suite`、`services/agent_runner.py`（`frozen_user` / `frozen_ai`） | `check_agent_checks.py` §P1.3「事后重跑用的是同一份冻结套件」 |
-| **路径守卫**：fix 不得写 `.agent/checks/**`、用户测试路径、`.agent/review-policy.yml`；curator 只许写 `.agent/checks/**`（+ 测试文件）。守卫在 `commit()` **之前**跑，违规直接 `failed`，不产生分支/PR | `services/check_suite.py:fix_guard_violations` / `curator_guard_violations`、`services/agent_runner.py:_guard_task_paths` | `check_agent_checks.py` §P1.3（改套件 → failed 且无 commit/push/PR） |
-| **未验证 ≠ 通过**：无可解析套件 → `unverified`；`unvalidated` 检查只报告不门控。`on_green` 对 `unverified` 一律不 push、不开 PR | `services/gates.py`（三态 `STATUS_*`）、`services/check_trust.py:assess_assurance` | `check_agent_checks.py` §P1.0/§P1.1 |
+| **冻结**：fix 从 base/approved 快照解析套件，事后重跑用同一份 `FrozenSuite`，绝不从改过的 working tree 重新解析 | `services/check_suite.py:freeze_suite`、`services/agent_runner.py`（`frozen_user` / `frozen_ai`） | 事后重跑用的是同一份冻结套件 |
+| **路径守卫**：fix 不得写 `.agent/checks/**`、用户测试路径、`.agent/review-policy.yml`；curator 只许写 `.agent/checks/**`（+ 测试文件）。守卫在 `commit()` **之前**跑，违规直接 `failed`，不产生分支/PR | `services/check_suite.py:fix_guard_violations` / `curator_guard_violations`、`services/agent_runner.py:_guard_task_paths` | 改套件 → failed 且无 commit/push/PR |
+| **未验证 ≠ 通过**：无可解析套件 → `unverified`；`unvalidated` 检查只报告不门控。`on_green` 对 `unverified` 一律不 push、不开 PR | `services/gates.py`（三态 `STATUS_*`）、`services/check_trust.py:assess_assurance` | 无套件 → `unverified`，不 push、不开 PR |
+
+这三条原本由 `backend/scripts/check_agent_checks.py` 离线断言；该目录已整体删除，
+类似断言现在只能由仓库的校验套件提供（`.agent/checks/` → `.agent/review-policy.yml`
+的 `checks:` → manifest 自动发现），解析不到就是 `unverified`。
 
 ### 1.1 历史缺陷（P1.0）
 
-`SubprocessRunnerAdapter` 旧实现：checkout 里没有 `backend/scripts/check_*.py`
-时 `_checkout_scripts()` 返回 `None`，`run_gates(scripts_dir=None)` 回退到
-**runner 镜像自己的** `backend/scripts`，并以 `cwd=checkout` 运行 openfish 的
-门禁 → 外来仓库假绿 → `pr_policy=on_green` 推分支、开 PR，实际什么都没验证。
+`SubprocessRunnerAdapter` 旧实现：checkout 里没有可解析的离线门禁脚本时
+`_checkout_scripts()` 返回 `None`，`run_gates(scripts_dir=None)` 回退到
+**runner 镜像内置的**门禁目录，并以 `cwd=checkout` 运行 openfish 的门禁 →
+外来仓库假绿 → `pr_policy=on_green` 推分支、开 PR，实际什么都没验证。
+（那个镜像内置的门禁目录**已被整体删除**，这条假绿路径连素材都不剩。）
 
 修复：`SubprocessRunnerAdapter.run_gates()` 只在 checkout（或显式 operator
 覆盖）里解析套件；解析不到就是 `unverified`。**永远不会**回退到
 `services.gates.REPO_ROOT`。gate 断言：构建一个只有 README 的临时仓库，
-`run_gates` 必须返回 `state == "unverified"` 且结果里没有 `check_lint` 等镜像
-自带 gate。
+`run_gates` 必须返回 `state == "unverified"`，且结果里没有镜像自带的 gate。
 
 ---
 
@@ -85,14 +89,13 @@ curator 可以自由**增改** AI 套件；但**放松/删除/退休一个 activ
 **用户套件**（`resolve_user_suite`）：
 
 1. `.agent/review-policy.yml` 的 `checks:`（人写的命令，`validated`）
-2. 仓库自带：`backend/scripts/check_*.py`（openfish 约定）
-3. manifest 零配置发现（`services/check_discovery.py`，**纯读、不执行**）：
+2. manifest 零配置发现（`services/check_discovery.py`，**纯读、不执行**）：
    - `package.json` scripts → `npm run {test,lint,build,typecheck}`
    - `pyproject.toml`/`pytest.ini`/`tests/` → `pytest`；`[tool.ruff]`→`ruff`；`[tool.mypy]`→`mypy`
    - `go.mod` → `go build ./...` / `go vet ./...` / `go test ./...`（三条独立 check）
    - `Cargo.toml` → `cargo check` / `cargo test`
    - `Makefile` → 定义了才跑 `test`/`check`/`lint`
-4. 都没有 → 空套件 → `unverified`
+3. 都没有 → 空套件 → `unverified`
 
 单套件 `resolve_suite()` 保持 Phase 1 顺序：`.agent/checks/` → policy `checks:`
 → 自动发现 → `unverified`（先 AI 后用户，因为 Phase 1 只有一套）。
@@ -126,7 +129,7 @@ snapshot + hash + provenance + validation + run history 记为**索引/缓存**
 
 | 主体 | 可以 | 不可以 | 「不可以」的机械 guard |
 | --- | --- | --- | --- |
-| **AI / `fix`** | 改业务代码、commit、push `agent/*`、开 PR | 改 `.agent/checks/**`、改用户测试、改 `.agent/review-policy.yml`、合并、批准、改分支保护 | `fix_guard_violations()`（commit 前）→ `AgentRunnerError`；`RestrictedForgejoClient` 白名单；`assert_pushable()`（I4）；`check_agent_checks.py` 静态审计 |
+| **AI / `fix`** | 改业务代码、commit、push `agent/*`、开 PR | 改 `.agent/checks/**`、改用户测试、改 `.agent/review-policy.yml`、合并、批准、改分支保护 | `fix_guard_violations()`（commit 前）→ `AgentRunnerError`；`RestrictedForgejoClient` 白名单；`assert_pushable()`（I4）；`scan_forbidden_api()` 静态审计 |
 | **AI / `checks` 策展人** | 增改 AI 套件、开**独立** PR | 改用户套件、在「本次 run 会从中受益」时放松 check、合并 | `curator_guard_violations()`（commit 前）；`RestrictedForgejoClient`；§2.1 ratchet 的独立 PR + provenance |
 | **用户** | 改一切（含两套 check）、批准、合并 | — | 合并是唯一放行手段（§5） |
 | **openfish 平台** | 跑两套 check、记录 provenance、标注保证等级、开 PR、调度 | 调用任何合并/批准 API、代替用户决策 | `MAY_AUTO_MERGE = False`；`scan_forbidden_api()` 静态审计；客户端能力白名单 |
@@ -148,10 +151,10 @@ snapshot + hash + provenance + validation + run history 记为**索引/缓存**
    `RestrictedForgejoClient` 包住，白名单只有
    `create_pull_request`（+ 预留的评论方法），任何 merge/approve/protection
    调用抛 `AgentSurfaceError`。
-2. **静态审计（gate）**：`scan_forbidden_api()` 用 `ast` 扫
+2. **静态审计（离线自检）**：`scan_forbidden_api()` 用 `ast` 扫
    `services/agent_runner.py`、`services/agent_worker.py`、
    `services/repo_import.py`，字符串常量里的 API 路径与标识符里的方法名都查；
-   `check_agent_checks.py` 断言结果为空，并断言真实 `ForgejoClient` 不含任何
+   自检断言结果为空，并断言真实 `ForgejoClient` 不含任何
    危险方法。
 3. **Forgejo 侧（真正的红线）**：默认分支开启分支保护，要求人工批准、禁止
    直接 push；bot 账号不是 org owner、不授予 admin。配置步骤见
@@ -363,14 +366,16 @@ runner 仍然从 checkout/ `.agent/checks/**` 解析套件，DB 只被 *记录*�
 
 ## 11. 验收（离线）
 
+后端**不再有**仓库自带门禁（`backend/scripts/` 已整体删除）：校验套件按
+`.agent/checks/` → `.agent/review-policy.yml` 的 `checks:` → manifest 自动发现解析，
+由 `services/gates.py` 的 `run_suite()` 执行，解析不到即 `unverified`。
+
 ```bash
-cd backend
-.venv/bin/python -m services.gates        # 全部离线 gate（含 check_agent_checks）
-.venv/bin/python scripts/check_agent_checks.py   # 本设计的专项 gate
-cd .. && make gates                        # 人 / agent / CI 的同一入口
+make gates-frontend     # 人 / agent / CI 的同一入口（只剩前端 smoke）
 ```
 
-`scripts/check_agent_checks.py` 覆盖：假绿修复（外来仓库 → `unverified`）、三态、
+本设计的验收面（原 `check_agent_checks.py` 的离线断言，该脚本已随门禁目录整体
+删除，清单保留作为回归清单）：假绿修复（外来仓库 → `unverified`）、三态、
 解析顺序与纯发现、冻结 + 路径守卫、`OPENFISH_TASK_KIND`、`checks:` schema、
 **agent 无合并能力**、信任阶梯 L0–L3（含默认关闭）、两套解耦与治理 finding、
 证伪验证器与运行历史、**A 旧库 CHECK 迁移（数据保留 + 幂等）**、

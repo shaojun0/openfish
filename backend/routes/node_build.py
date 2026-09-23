@@ -26,13 +26,12 @@ Client setup::
 
 ⚠ Decorator order is load-bearing (see ``routes/python_build.py``): the
 ``@node_build_bp.route`` decorator must be the topmost line, or the guard is
-applied after registration and never runs.  ``scripts/check_auth_guards.py``
-enforces this.
+applied after registration and never runs.  The guard must be in effect before
+the route registers.
 """
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 from flask import (
@@ -49,8 +48,8 @@ from openapi import api_operation, binary, errors, html, ok
 from routes.hub_common import wants_json
 from services import build_mirror
 from services.format import human_size
+from services.headers import attachment_disposition
 
-logger = logging.getLogger("cpypiserver.node_build")
 node_build_bp = Blueprint("node_build", __name__)
 
 #: Auxiliary files node publishes next to the archives.  The index tracks only
@@ -325,7 +324,7 @@ def download(release_tag: str, filename: str):
     # The archives are already compressed; letting Flask re-encode them wastes
     # CPU and breaks the byte count a checksum verifies.
     resp.headers.pop("Content-Encoding", None)
-    resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    resp.headers["Content-Disposition"] = attachment_disposition(filename)
     return resp
 
 

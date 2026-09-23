@@ -23,8 +23,8 @@ Three views take their input as view parameters instead of reading ``request``
 by hand: ``list_findings`` binds its filter query (``query: FindingListQuery``)
 and ``decide_finding`` / ``put_policy`` bind their JSON bodies.  On each of them
 ``@validate_request()`` sits *below* the guard, so an unauthorized request is
-answered ``401``/``403`` and never by the binder —
-``scripts/check_request_binding.py`` pins that shape and order.  The path
+answered ``401``/``403`` and never by the binder — that shape and order are part
+of the external contract, so changing them needs care.  The path
 variables stay plain Flask arguments: ``<int:finding_id>`` is Flask's own
 converter, and ``<path:slug>`` is validated by :func:`_checked_slug`, whose
 message is what the console shows for a traversal attempt.
@@ -32,7 +32,6 @@ message is what the console shows for a traversal attempt.
 
 from __future__ import annotations
 
-import logging
 import re
 
 from flask_openapi3 import APIBlueprint, validate_request
@@ -49,7 +48,6 @@ from services import review_policy
 # of flask-openapi3 is all this module uses, and the library's own document is
 # never served — `/openapi.json` is built from `@api_operation` in `openapi/`.
 findings_bp = APIBlueprint("findings", __name__, doc_ui=False)
-logger = logging.getLogger("cpypiserver.findings_routes")
 
 #: A repository slug (``<owner>/<name>``) as it may appear in a URL.  Flask has
 #: no converter for "one or more segments, but never ``..``", so the pattern is
@@ -388,7 +386,12 @@ def decide_finding(finding_id: int, body: FindingDecisionRequest):
             confirmed_by=body.confirmed_by,
         )
     except findings_service.DecisionInvalidError as exc:
-        return {"error": exc.code, "message": exc.message}, 409
+        # ``exc.code`` is the §5.3 constant (``finding_decision_invalid``) the
+        # client switches on; the *reason* stays server-side.  ``exc.message``
+        # names the action it refused and is one more sentence an attacker gets
+        # for free — the §6.1 table is already public in this endpoint's own
+        # OpenAPI description, so a generic message costs the client nothing.
+        return {"error": exc.code, "message": "finding decision rejected"}, 409
     except findings_service.FindingNotFoundError as exc:
         return {"error": "not_found", "message": str(exc)}, 404
     return result
@@ -460,7 +463,6 @@ def _enqueue_fix(finding, payload: dict) -> int | None:
         payload=payload,
         priority=0,
     )
-    logger.info("finding %s: queued fix task %s", finding.id, task_id)
     return int(task_id) if task_id is not None else None
 
 
@@ -559,7 +561,7 @@ def put_policy(slug: str, body: ReviewPolicyRequest):
             payload, source=review_policy.SOURCE_FILE, path=_repo_root_for(name)
         )
     except review_policy.PolicyValidationError as exc:
-        raise BadRequestError(exc.message) from exc
+        raise BadRequestError("the review policy is invalid") from exc
     canonical = review_policy.dump(document)
     return {
         "slug": name,

@@ -6,8 +6,9 @@ so this file stays short regardless of how many features are added.
 
 from __future__ import annotations
 
-import os
 import logging
+import os
+import sys
 
 from flask import Response, jsonify
 from flask_openapi3 import OpenAPI
@@ -21,18 +22,7 @@ from extensions.cache import CacheExtension
 from extensions.index_ext import IndexExtension
 from extensions.error_handlers import ErrorHandlersExtension
 from extensions.stats_refresh import StatsRefreshExtension
-from services.logsafe import install as install_log_sanitizer
-
-# ── Logging ──────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=getattr(logging, settings.server.log_level.upper(), logging.INFO),
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-)
-# Escape CR/LF and other control characters in every record before a handler
-# writes it.  Untrusted values (a document id, a role code, an upstream error
-# body) reach `logger.info("%s", value)` all over the tree; one filter at the
-# root is what keeps a crafted value from forging a second log line.
-install_log_sanitizer()
+from services import logsafe
 
 
 # ── Request-binding error envelope ──────────────────────────────────
@@ -109,8 +99,7 @@ def _validation_error_response(exc: ValidationError) -> Response:
 # anything an operator drops into ``static/certs/``.  The only asset a browser
 # needs before it has a session is the compiled Vue bundle, and ``routes/spa.py``
 # serves that one directory explicitly.  This also means an unguarded endpoint
-# can no longer hide behind the ``static`` endpoint — see
-# scripts/check_auth_guards.py.
+# can no longer hide behind the ``static`` endpoint.
 # `OpenAPI` is a `Flask` subclass: every existing blueprint keeps working, and
 # the routes that need request binding live on an `APIBlueprint` (see
 # `routes/pypi.py` and `register_api` in `routes/__init__.py`).
@@ -118,9 +107,9 @@ def _validation_error_response(exc: ValidationError) -> Response:
 # `doc_ui=False` deliberately imports only the request-binding half of
 # flask-openapi3.  Its bundled documentation surface (`/openapi/`,
 # `/openapi/openapi.json`, `/openapi/static/…`) would register three more
-# anonymous endpoints — flagged by `scripts/check_auth_guards.py` — and would
-# publish a *second* OpenAPI document next to the repository's own, which stays
-# the single source of truth (`backend/openapi/`, served at `/openapi.json`).
+# anonymous endpoints and would publish a *second* OpenAPI document next to the
+# repository's own, which stays the single source of truth
+# (`backend/openapi/`, served at `/openapi.json`).
 app = OpenAPI(
     __name__,
     static_folder=None,
@@ -132,6 +121,22 @@ app.config.from_mapping(settings.model_dump())
 app.secret_key = settings.server.secret_key
 app.config["MAX_CONTENT_LENGTH"] = settings.storage.max_content_length
 os.makedirs(settings.storage.packages_dir, exist_ok=True)
+
+# ── Logging ─────────────────────────────────────────────────────────
+# Installed *before* the extensions, because `ErrorHandlersExtension` redacts
+# every 5xx body and logs the original message instead: that log line is where
+# an operator sees the driver error, the upstream URL or the path a client must
+# no longer be shown, so it has to be configured by the time the first response
+# can be refused.  `LOG_LEVEL` was declared in `config/server.py` without being
+# wired to anything; this is the one place a handler is attached, so the level is
+# set here.  `logsafe` adds the single log-injection filter (newlines can forge a
+# record) to the root logger here rather than at each call site.
+logging.basicConfig(
+    level=getattr(logging, settings.server.log_level.upper(), logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stderr,
+)
+logsafe.install()
 
 # ── Trust reverse-proxy headers (X-Forwarded-Proto, etc.) ──────────
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
@@ -164,12 +169,6 @@ if settings.auth.basic_username:
     _bootstrap_ids.append(settings.auth.basic_username)
 
 _authz_summary = bootstrap_authz(app.extensions["authz"], _bootstrap_ids)
-logging.getLogger("cpypiserver").info(
-    "Authorization ready: %d permission point(s), %d role(s), %d superuser(s) total",
-    _authz_summary["permissions"]["total"],
-    len(app.extensions["authz"].list_roles()),
-    app.extensions["authz"].count_superusers(),
-)
 
 # ── Run ─────────────────────────────────────────────────────────────
 

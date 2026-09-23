@@ -13,7 +13,7 @@ Every step here delegates to a library that owns the concern:
 
 What is left in this module is policy, not mechanism: the extension allow-list,
 the size cap, which steps run and what happens when a scanner is unavailable.
-Two behaviours are deliberate and are asserted by ``scripts/check_security.py``:
+Two behaviours are deliberate:
 
 1. the filename is reduced to a safe basename *first*, so every later step — the
    error strings that echo a name, the temporary archive and the destination
@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import logging
 import os
 import tarfile
 import tempfile
@@ -48,7 +47,6 @@ from wheel.wheelfile import WheelError, WheelFile
 from config import settings
 from services.paths import contained, safe_name
 
-logger = logging.getLogger("cpypiserver.safe")
 
 _MIME_MAP: dict[str, list[str]] = {
     "whl": ["application/zip", "application/x-zip-compressed", "application/x-zip", "application/octet-stream"],
@@ -103,7 +101,6 @@ def _pin_guarddog_cache() -> None:
 
     resources = _bundled_guarddog_resources()
     if resources is None:
-        logger.warning("GuardDog resources not found — falling back to its own cache path")
         return
 
     pinned_until = int(time.time()) + _CACHE_PIN_SECONDS
@@ -118,11 +115,9 @@ def _pin_guarddog_cache() -> None:
         try:
             payload = json.loads(bundled.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            logger.warning("GuardDog cache: cannot read %s (%s)", bundled.name, exc)
             continue
         payload["downloaded_timestamp"] = pinned_until
         target.write_text(json.dumps(payload), encoding="utf-8")
-    logger.debug("GuardDog top-package cache pinned in %s", cache_dir)
 
 
 def _get_guarddog():
@@ -137,7 +132,6 @@ def _get_guarddog():
         return _guarddog
     _guarddog_init_attempted = True
     if not settings.security.guarddog_enabled:
-        logger.info("GuardDog disabled by configuration")
         return None
     try:
         _pin_guarddog_cache()
@@ -146,13 +140,11 @@ def _get_guarddog():
 
         scanner = PypiPackageScanner()
         _guarddog, _guarddog_extract = scanner, safe_extract
-        logger.info("GuardDog ready — %d source-code rule(s)", len(scanner.analyzer.yara_ruleset))
         return scanner
     except Exception as exc:  # noqa: BLE001 — an import that fails for any reason disables the scan
         msg = f"GuardDog unavailable ({type(exc).__name__}: {exc})"
         if settings.security.guarddog_required:
             raise RuntimeError(msg) from exc
-        logger.warning("%s — scans disabled", msg)
         return None
 
 
@@ -182,13 +174,11 @@ def _get_clamd():
         cd = clamd.ClamdNetworkSocket(host=host, port=settings.security.clamav_port, timeout=settings.security.clamav_timeout)
         cd.ping()
         _clamd = cd
-        logger.info("ClamAV connected — %s:%d", host, settings.security.clamav_port)
         return cd
     except Exception as exc:
         msg = f"ClamAV unreachable ({host}:{settings.security.clamav_port}): {exc}"
         if settings.security.clamav_required:
             raise RuntimeError(msg) from exc
-        logger.warning("%s — scans disabled", msg)
         return None
 
 
@@ -204,7 +194,6 @@ def _check_mime(content: bytes, ext: str) -> tuple[bool, str]:
     try:
         detected = magic.from_buffer(content, mime=True)
     except Exception as exc:
-        logger.warning("python-magic failed: %s", exc)
         return True, ""
     allowed = _MIME_MAP.get(ext)
     if allowed is None:
@@ -285,7 +274,6 @@ def _scan_guarddog(archive: Path, extract_dir: Path) -> tuple[bool, str]:
     except Exception as exc:
         if settings.security.guarddog_required:
             raise RuntimeError(f"GuardDog scan failed: {exc}") from exc
-        logger.warning("GuardDog scan error: %s", exc)
         return True, "GuardDog error — passed through"
 
     score = result.get("risk_score") or {}
@@ -295,12 +283,7 @@ def _scan_guarddog(archive: Path, extract_dir: Path) -> tuple[bool, str]:
         {str(risk["threat_rule"]) for risk in (result.get("risks") or []) if risk.get("threat_rule")}
     )
     if value >= settings.security.guarddog_min_risk_score:
-        logger.warning(
-            "GuardDog rejected %s: risk %.1f/10 (%s) from %s",
-            archive.name, value, label, ", ".join(rules) or "unknown rule",
-        )
         return False, f"Malicious package indicators (risk {value:.1f}/10): {', '.join(rules[:4]) or label}"
-    logger.info("GuardDog clean: %s (risk %.1f/10, %s)", archive.name, value, label)
     return True, f"GuardDog {label}"
 
 
@@ -314,7 +297,6 @@ def _scan_clamav(file_obj) -> tuple[bool, str]:
     except Exception as exc:
         if settings.security.clamav_required:
             raise RuntimeError(f"ClamAV scan failed: {exc}") from exc
-        logger.warning("ClamAV scan error: %s", exc)
         return True, "ClamAV error — passed through"
     finally:
         file_obj.seek(0)
@@ -402,5 +384,4 @@ def validate_file(file, filename: str) -> tuple[bool, str]:
     except ValueError:
         return False, "Invalid file path (path traversal)"
 
-    logger.info("Upload validated: %s (ext=.%s size=%.1f KB)", safe, matched_ext, size / 1024)
     return True, safe

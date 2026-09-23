@@ -27,14 +27,11 @@ The principal dict looks like::
 
 from __future__ import annotations
 
-import logging
 from flask import current_app, g, request, session
 
 from config import settings
 from auth.oauth import identity_from_info, introspect_token
 from models.user import User
-
-logger = logging.getLogger("cpypiserver.auth")
 
 
 # ── Plumbing ─────────────────────────────────────────────────────────
@@ -77,13 +74,11 @@ def _identify(
     """Provision (find-or-create) the account and install it as the principal."""
     authz = _authz()
     if authz is None:
-        logger.error("authz service unavailable — cannot authenticate")
         return False
     user = authz.provision_user(provider, external_id, display_name, email)
     if user is None:
         return False
     if not user.is_active:
-        logger.warning("Rejected login for deactivated account %r", user.external_id)
         return False
     g.auth_user = _principal(user, method, **extra)
     g.auth_method = method
@@ -209,7 +204,6 @@ def _identify_oauth_token(token: str, *, method: str = "introspect") -> bool:
         return False
     external_id, display_name, email = identity_from_info(info)
     if not external_id:
-        logger.warning("Introspection response carried no usable identity: %r", info)
         return False
     return _identify(
         "oauth2", external_id,

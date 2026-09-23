@@ -504,7 +504,7 @@ export default {
   models: {
     title: 'Model routing',
     description:
-      'Model endpoints for downstream intranet DSH, read from MODELS_FILE; every route is classified by wire format and model function.',
+      'Model endpoints for downstream intranet DSH, kept in the `model_routes` database table; every route is classified by wire format and model function.',
     scaffoldTitle: 'Administrators maintain this table in the browser',
     scaffoldDesc:
       'openfish registers, displays and connectivity-checks routes; it does not proxy inference. DSH reads this table and decides its own upstream and credentials. An administrator holding model:write can add, edit and delete routes right here.',
@@ -525,7 +525,6 @@ export default {
       'Config file {source} was not found; showing an empty table. Saving a route creates it.',
     parseError: 'Failed to parse the config file',
     providerOpenai: 'OpenAI format',
-    providerMineru: 'MinerU format',
     providerAnthropic: 'Anthropic format',
     providerUnknown: 'Unknown format',
     kindChat: 'Chat',
@@ -880,7 +879,7 @@ export default {
     mintForbidden: 'This account does not hold repo:push; minting answers 403.',
     cloneUrl: 'Clone URL',
     username: 'Username',
-    password: 'Password (token)',
+    tokenLabel: 'Password (token)',
     ticketScope: 'Ticket scope',
     ticketRead: 'read:repository (read-only)',
     ticketWrite: 'write:repository (writable)',

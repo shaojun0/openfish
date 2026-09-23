@@ -47,7 +47,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import logging
 import os
 import re
 import tarfile
@@ -62,7 +61,6 @@ from services.fileio import read_json
 from services.format import iso_from_timestamp, utc_now_iso
 from services.upstream import DiskCache, Upstream, UpstreamError
 
-logger = logging.getLogger("cpypiserver.npm")
 
 #: How long a packument fetched from the upstream registry is trusted.
 PACKUMENT_TTL = 300.0
@@ -206,7 +204,6 @@ def _read_tarball_manifest(path: Path) -> dict[str, Any] | None:
                 return None
             data = json.loads(handle.read().decode("utf-8"))
     except (OSError, ValueError, tarfile.TarError) as exc:
-        logger.warning("ignoring unreadable npm tarball %s: %s", path, exc)
         return None
     return data if isinstance(data, dict) else None
 
@@ -722,7 +719,6 @@ class NpmRegistry:
         try:
             response = client.get_bytes(name, headers=headers, max_bytes=PACKUMENT_MAX_BYTES)
         except UpstreamError as exc:
-            logger.info("npm upstream packument %s failed: %s", name, exc)
             return None, str(exc)
         if response.status_code == 404:
             return None, "notfound"
@@ -828,7 +824,6 @@ class NpmRegistry:
         try:
             response = client.request("GET", f"{package}/-/{filename}", stream=True)
         except UpstreamError as exc:
-            logger.info("npm upstream tarball %s/%s failed: %s", package, filename, exc)
             return None, str(exc)
         if response.status_code == 404:
             response.close()
@@ -891,7 +886,6 @@ class NpmRegistry:
                 headers={"Accept": FULL_ACCEPT, **self._auth_headers()},
             )
         except UpstreamError as exc:
-            logger.info("npm upstream search failed, degrading to local results: %s", exc)
             return []
         raw = document.get("objects") if isinstance(document, dict) else None
         if not isinstance(raw, list):

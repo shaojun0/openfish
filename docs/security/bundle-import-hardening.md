@@ -101,35 +101,28 @@ CVE-2025-4330 / 4138 / 12718 / 4435 都在这些补丁版本里才修好。也�
 补丁版**有**这个 filter，但**没有**它的修复。
 
 镜像基线是 `python:3.12-slim`（浮动标签），构建时自然满足；如果哪天把它钉到某个具体
-补丁号，**不要低于 3.12.11**。门禁本身不受影响：白名单是第一道，`filter` 是第二道。
+补丁号，**不要低于 3.12.11**。解包策略本身不受影响：白名单是第一道，`filter` 是第二道。
 
-## 6. 门禁
+## 6. 加固应满足的断言
 
-`backend/scripts/check_debian_offline.py`（`make gates-backend` 自动发现）新增一节
-「bundle import hardening」，用一个**合法离线包**重打包出各种恶意形状，payload 逐字节
-不变，所以清单的自校验一定通过——被拒只能是解包策略在说话：
+这些断言原先由离线门禁脚本覆盖；`backend/scripts/` 门禁目录已整体删除（连同
+`make gates-backend`），因此下表改为**手工 / 自建检查的验收清单**：用一个**合法离线包**
+重打包出各种恶意形状，payload 逐字节不变，所以清单的自校验一定通过——被拒只能是
+解包策略在说话：
 
 | 断言 | 说明 |
 | --- | --- |
 | `..` 成员被拒 | 且仓库一个字节没变 |
 | 绝对路径成员被拒 | 同上 |
 | 软链 / 硬链 / FIFO / 设备节点成员被拒 | 四种类型逐一 |
-| 超过 `MAX_BUNDLE_MEMBERS` 被拒 | 门禁临时调低常量，不构造两万个成员 |
-| 解压后超过 `DEBIAN_OFFLINE_MAX_MB` 被拒 | 门禁把上限设在「本包 + 1 MiB」，再加一个 4 MiB 成员 |
+| 超过 `MAX_BUNDLE_MEMBERS` 被拒 | 检查时临时调低常量，不构造两万个成员 |
+| 解压后超过 `DEBIAN_OFFLINE_MAX_MB` 被拒 | 检查时把上限设在「本包 + 1 MiB」，再加一个 4 MiB 成员 |
 | 每次拒绝都没留下暂存目录 | 原子性 |
 | 带 setuid 成员的包仍能正常导入 | 不是一刀切拒绝 |
-| setuid/setgid 位到不了仓库 | Linux CI 另断言组/其他写位也被剥掉 |
+| setuid/setgid 位到不了仓库 | 在 Linux 上另需断言组/其他写位也被剥掉 |
 
-`backend/scripts/check_security.py` 另加：`contained`（词法）放行指向外部的软链组件，
-而 `contained_resolved` 拒绝它——这正是新增这个变体的理由。
-
-复现（全部离线）：
-
-```bash
-cd backend
-.venv/bin/python scripts/check_debian_offline.py
-.venv/bin/python scripts/check_security.py
-```
+另一条要验的边界：`services.paths.contained()`（词法检查）会放行指向外部的软链组件，
+而 `contained_resolved()` 拒绝它——这正是新增这个变体的理由。
 
 ## 7. 残余限制（不做的部分）
 

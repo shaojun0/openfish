@@ -41,7 +41,6 @@ cross-database claim testable offline.
 from __future__ import annotations
 
 import html
-import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -50,8 +49,6 @@ from typing import Any, Mapping, Sequence
 from sqlalchemy import Select, and_, case, func, literal, or_, select
 
 from models.agent_hub import Finding, FindingEvidence, RepoCommit, RepoIssue
-
-logger = logging.getLogger("cpypiserver.repo_context")
 
 
 # ── Budgets and limits ───────────────────────────────────────────────
@@ -232,8 +229,8 @@ def _contains(column, term: str):
     database-specific alternatives:
 
     * PostgreSQL ``ILIKE`` does not exist in SQLite, and ``tsvector`` / FTS5 are
-      each one-dialect-only — using either would break ``check_database.py``'s
-      promise that one schema runs on both.
+      each one-dialect-only — using either would break the promise that one
+      schema runs on both.
     * SQLite's bare ``LIKE`` is already ASCII-case-insensitive, but PostgreSQL's
       is case-sensitive for ``text``; wrapping **both sides** in ``lower()``
       gives one behaviour on both.
@@ -683,10 +680,7 @@ def _result(
 ) -> dict[str, Any]:
     omitted = max(0, matched - len(items))
     if omitted:
-        logger.debug(
-            "repo_context: repo=%s matched=%s returned=%s omitted=%s budget_used=%s/%s",
-            repo_id, matched, len(items), omitted, used, budget,
-        )
+        pass
     return {
         "repo_id": repo_id,
         "query": dict(query),

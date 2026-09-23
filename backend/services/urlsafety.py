@@ -1,7 +1,8 @@
 """SSRF guard for outbound HTTP built from a request.
 
 The model-routing panel lets an administrator probe a URL before saving it, and
-the probe is issued by the *server*: ``requests.get(base_url + path)``.  Without
+the probe is issued by the *server*: it lists the endpoint's models from
+``services.model_routes.probe``.  Without
 a guard that is a server-side request forgery primitive — ``http://127.0.0.1``,
 ``http://169.254.169.254/latest/meta-data/`` or any other host the process can
 reach becomes a way to read what only the server can see.
@@ -34,14 +35,12 @@ caller is an authenticated administrator, and the residual is documented in
 from __future__ import annotations
 
 import ipaddress
-import logging
 import socket
 from collections.abc import Iterable
 from typing import NoReturn
 
 from pydantic import AnyHttpUrl, TypeAdapter, ValidationError
 
-logger = logging.getLogger("cpypiserver.urlsafety")
 
 _HTTP_URL = TypeAdapter(AnyHttpUrl)
 
@@ -103,7 +102,6 @@ def _blocked_reason(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> s
 
 def _refuse(url: str, reason: str) -> NoReturn:
     """Log the refusal (so a probe of the metadata address is visible) and raise."""
-    logger.warning("outbound URL refused: %s (%s)", url, reason)
     raise UnsafeUrlError(reason)
 
 

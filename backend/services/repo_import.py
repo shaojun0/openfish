@@ -32,9 +32,9 @@ normal case here (vllm), not the edge case:
 Everything external is injectable.  :class:`RepoImportService` takes a Forgejo
 client and a commit reader; the default implementations are
 :class:`ForgejoClient` (HTTP, ``requests``) and :class:`GitCommitReader` (a
-shallow read-only bare copy plus the ``git`` CLI, §3.1).  ``scripts/
-check_agent_repos.py`` substitutes both and runs the whole pipeline offline —
-no Forgejo, no network, no Flask.
+shallow read-only bare copy plus the ``git`` CLI, §3.1).  Both can be
+substituted, so the whole pipeline runs offline — no Forgejo, no network, no
+Flask.
 
 Configuration lives in :mod:`config.forgejo` (``FORGEJO_*`` / ``IMPORT_*`` /
 ``GIT_MIRROR_DIR``) and is read once, when the process builds its settings; this
@@ -48,7 +48,6 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import os
 import re
 import shutil
@@ -66,8 +65,7 @@ from config import settings
 from config.forgejo import ForgejoConfig
 from services.agent_runner import POLICY_RELPATH, mask_secrets
 from services.git_auth import credential_args, git_env, git_host_of
-
-logger = logging.getLogger("cpypiserver.repo_import")
+from services.headers import SafeHeaderSession, checked_headers
 
 
 # ── Configuration (owned by config/forgejo.py) ───────────────────────
@@ -368,8 +366,8 @@ class RateLimiter:
 # S0 owns ``models/agent_hub.py``.  The names below are the §4.2 contract; they
 # are imported here so the dependency is explicit and pyflakes can see it.  A
 # test that must run before S0 lands swaps the classes through
-# :func:`set_models` — that is what keeps ``check_agent_repos.py`` independent
-# of the rest of the build.
+# :func:`set_models` — that seam is what keeps this module independent of the
+# rest of the build.
 
 from models.agent_hub import ImportJob, Repo, RepoCommit, RepoIssue  # noqa: E402
 
@@ -484,7 +482,6 @@ class Cursor:
         try:
             data = json.loads(raw)
         except (TypeError, ValueError):
-            logger.warning("ignoring unparseable import cursor %r", raw)
             return cls(phase=phase)
         if not isinstance(data, dict) or data.get("v") != CURSOR_VERSION:
             return cls(phase=phase)
@@ -557,7 +554,7 @@ class ForgejoClient:
         self.config = config or ImportConfig.from_settings()
         self.base_url = self.config.base_url
         self.timeout = self.config.http_timeout
-        self.session = session or requests.Session()
+        self.session = session or SafeHeaderSession()
         self.limiter = limiter or RateLimiter(self.config.max_rate)
         self._sleep = sleeper
         self._token = self.config.admin_token
@@ -569,11 +566,16 @@ class ForgejoClient:
         return bool(self.base_url)
 
     def _headers(self) -> dict[str, str]:
+        """Request headers for one Forgejo API call.
+
+        The token is a configured secret, so the mapping is checked against the
+        header allowlist here, at the boundary, instead of in each caller.
+        """
         headers = {"Accept": "application/json", "User-Agent": "openfish-agent-hub/1"}
         token = (self._token or "").strip()
         if token:
             headers["Authorization"] = f"token {token}"
-        return headers
+        return checked_headers(headers, context="forgejo API request")
 
     def _api(self, path: str) -> str:
         return f"{self.base_url}/api/v1/{path.lstrip('/')}"
@@ -608,16 +610,12 @@ class ForgejoClient:
                 )
             except requests.RequestException as exc:
                 last = exc
-                logger.warning("forgejo %s %s failed (%d/%d): %s",
-                               method, url, attempt, attempts, exc)
             else:
                 if response.status_code not in RETRY_STATUSES:
                     return response
                 last = ForgejoError(
                     f"Forgejo {method} {url} → HTTP {response.status_code}"
                 )
-                logger.warning("forgejo %s %s → HTTP %d (%d/%d)",
-                               method, url, response.status_code, attempt, attempts)
             if attempt < attempts:
                 self._sleep(RETRY_BACKOFF_SECONDS[min(attempt - 1,
                                                       len(RETRY_BACKOFF_SECONDS) - 1)])
@@ -664,7 +662,6 @@ class ForgejoClient:
             # The contents API wraps base64 at 60 columns; b64decode tolerates it.
             return base64.b64decode(content).decode("utf-8")
         except (ValueError, UnicodeDecodeError):
-            logger.warning("Forgejo contents API returned undecodable %s", path)
             return None
 
     # -- migration ----------------------------------------------------
@@ -909,6 +906,7 @@ class ForgejoClient:
         token = self.config.source_token
         if token and source.kind != "git":
             headers["Authorization"] = f"Bearer {token}"
+        headers = checked_headers(headers, context=f"source probe {url}")
         self.limiter.wait()
         try:
             response = self.session.request(
@@ -1140,10 +1138,6 @@ class GitCommitReader:
             # always has HEAD, which is the forge's real default branch.
             if reference == "HEAD":
                 raise
-            logger.warning(
-                "branch %r not found in the mirror for %s; falling back to HEAD",
-                reference, forgejo_repo,
-            )
             raw = self._git([*log_argv[:-1], "HEAD"], cwd=destination)
         for line in raw.splitlines():
             if not line.strip():
@@ -1350,8 +1344,6 @@ class RepoImportService:
         })
         self.session.add(job)
         self._commit()
-        logger.info("import job %s queued for %s (mode=%s, phase=%s)",
-                    job.id, source.slug, mode, start_phase)
         return job
 
     # ── execution ────────────────────────────────────────────────────
@@ -1405,7 +1397,6 @@ class RepoImportService:
         except RepoImportError as exc:
             return self._fail(job, cursor, exc, steps)
         except Exception as exc:  # noqa: BLE001 - a pipeline step must not 500 a worker
-            logger.exception("import job %s crashed in phase %s", _get(job, "id"), cursor.phase)
             return self._fail(job, cursor, exc, steps)
 
         return ImportOutcome(
@@ -1455,8 +1446,6 @@ class RepoImportService:
         cursor.extras["probe_reachable"] = bool(probe.get("reachable"))
         cursor.extras["probe_detail"] = str(probe.get("detail") or "")
         cursor.phase = "migrate"
-        logger.info("import %s: validated %s (reachable=%s)",
-                    _get(job, "id"), source.slug, probe.get("reachable"))
         return True
 
     def _step_migrate(self, job: Any, cursor: Cursor) -> bool:
@@ -1474,8 +1463,6 @@ class RepoImportService:
         existing = _get(repo, "forgejo_repo")
         if existing:
             forgejo_repo = str(existing)
-            logger.info("import %s: reusing existing forgejo repo %s",
-                        _get(job, "id"), forgejo_repo)
         else:
             document = self.client.trigger_migration(
                 source,
@@ -1508,12 +1495,6 @@ class RepoImportService:
         state = self.client.migration_state(forgejo_repo)
         finished = bool(self.client.migration_finished(state))
         if not finished:
-            # No progress this step: the phase *is* the wait.  Persist the poll
-            # count (so the budget survives a restart) and let the caller come
-            # back; reporting a forward step here would let a slow migration
-            # consume a bounded-step caller's whole budget in one call.
-            logger.info("import %s: migration still running (poll %d/%d)",
-                        _get(job, "id"), cursor.migrate_polls, self.config.poll_attempts)
             self._mirror_state(job, cursor, forgejo_repo=forgejo_repo)
             return False
         self._mirror_state(job, cursor, forgejo_repo=forgejo_repo)
@@ -1549,14 +1530,12 @@ class RepoImportService:
         try:
             text = self.client.read_file(forgejo_repo, str(POLICY_RELPATH).replace("\\", "/"))
         except Exception as exc:  # noqa: BLE001 - policy I/O never fails an import
-            logger.warning("could not read the review policy of %s: %s", forgejo_repo, exc)
             text = ""
         if text and text.strip():
             try:
                 defaults = parse_document(parse_yaml(text), source=SOURCE_FILE).defaults
             except Exception as exc:  # noqa: BLE001
-                logger.warning("ignoring unparsable review policy of %s: %s",
-                               forgejo_repo, exc)
+                pass
         values: dict[str, Any] = {
             "auto_review": bool(defaults.auto_review),
             "curator": str(defaults.curator),
@@ -1564,7 +1543,6 @@ class RepoImportService:
         }
         if any(_get(repo, name) != value for name, value in values.items()):
             _assign(repo, {**values, "updated_at": _now()})
-            logger.info("cached review policy %s for %s", values, _get(repo, "slug"))
 
     def _clear_repo_policy(self, repo: Any) -> None:
         """Drop a cached policy so the row falls back to the platform defaults.
@@ -1576,8 +1554,6 @@ class RepoImportService:
         names = ("auto_review", "curator", "curator_min_interval_seconds")
         if any(_get(repo, name) is not None for name in names):
             _assign(repo, {name: None for name in names} | {"updated_at": _now()})
-            logger.info("cleared cached review policy of imported mirror %s",
-                        _get(repo, "slug"))
 
     def _step_mirror_issues(self, job: Any, cursor: Cursor) -> bool:
         if not bool(cursor.extras.get("include_issues", True)):
@@ -1637,16 +1613,7 @@ class RepoImportService:
             total=self.config.max_issues if cursor.partial else None,
             done=stored,
         )
-        logger.debug("import %s: mirrored %d issue(s) from offset %d",
-                     _get(job, "id"), written, offset)
         if truncated:
-            # A ceiling hit ends the *full* mirror: the job finishes `partial`
-            # and the REST layer says so.  Silently continuing, or reporting
-            # 20 000 as "all of it", is the failure mode §8.2 exists to stop.
-            logger.warning(
-                "import %s: issue ceiling %d reached — marking job partial",
-                _get(job, "id"), self.config.max_issues,
-            )
             cursor.phase = "index_commits"
         elif short_page:
             cursor.phase = "index_commits"
@@ -1673,8 +1640,6 @@ class RepoImportService:
                 forgejo_repo, branch=branch, page=page, per_page=self.config.page_size,
             )
         except Exception as exc:  # noqa: BLE001 - the API is optional, git is not absent
-            logger.warning("import %s: commit API failed (%s); falling back to git",
-                           _get(job, "id"), exc)
             page_result = None
         rows = list(getattr(page_result, "items", []) or []) if page_result else []
         source = "api"
@@ -1814,8 +1779,6 @@ class RepoImportService:
                 _assign(job, {"error": note})
         self._commit()
         status = "partial" if cursor.partial else "done"
-        logger.info("import job %s finished (%s): %d issue(s), %d commit(s)",
-                    _get(job, "id"), status, stored, cursor.commits_seen)
         return ImportOutcome(
             job_id=int(_get(job, "id") or 0),
             status=status,
@@ -1851,7 +1814,6 @@ class RepoImportService:
         try:
             self._commit()
         except Exception:  # noqa: BLE001 - never mask the original failure
-            logger.exception("could not persist failure for import job %s", _get(job, "id"))
             self.session.rollback()
         return ImportOutcome(
             job_id=int(_get(job, "id") or 0),
@@ -2082,7 +2044,6 @@ def read_policy_auto_review(repo_root: str | Path | None = None) -> bool:
             except TypeError:
                 continue
             except Exception as exc:  # noqa: BLE001 - policy trouble never blocks a webhook
-                logger.warning("review policy lookup failed: %s", exc)
                 return True
             if value is None:
                 break

@@ -21,11 +21,8 @@ No other file needs to change.
 
 from __future__ import annotations
 
-import logging
 from abc import ABC, abstractmethod
 from collections import deque
-
-logger = logging.getLogger("cpypiserver.ext")
 
 
 class Extension(ABC):
@@ -53,14 +50,9 @@ class ExtensionRegistry:
     def __init__(self, extensions: list[Extension]) -> None:
         self._extensions = extensions
         self._order = _topological_sort(extensions)
-        logger.info(
-            "Extension order: %s",
-            " → ".join(e.name for e in self._order),
-        )
 
     def init_all(self, app) -> None:
         for ext in self._order:
-            logger.debug("Init extension: %s", ext.name)
             ext.init_app(app)
 
     def teardown_all(self, app) -> None:
@@ -68,7 +60,7 @@ class ExtensionRegistry:
             try:
                 ext.teardown(app)
             except Exception:
-                logger.exception("Teardown failed for %s", ext.name)
+                pass
 
 
 def _topological_sort(extensions: list[Extension]) -> list[Extension]:

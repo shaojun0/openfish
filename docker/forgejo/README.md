@@ -152,8 +152,8 @@ G2（`git clone http://<host>/git/<owner>/<repo>.git` 成功）是 §0.1 的硬�
 ## 9. 分支保护（**红线**：agent 永不自动合并）
 
 openfish 的代码层已经**拿不到**合并/批准能力（`services/agent_surface.py` 的
-能力白名单 + `scripts/check_agent_checks.py` 的静态审计），但真正保证
-「只有人能放行」的是 Forgejo 分支保护本身——即使 openfish 有 bug 也翻不过去。
+能力白名单），但真正保证「只有人能放行」的是 Forgejo 分支保护本身——即使
+openfish 有 bug 也翻不过去。
 
 对每个被 review 的仓库，在 Forgejo Web UI 配置（Settings → Branches →
 `main`/默认分支）：
@@ -166,7 +166,7 @@ openfish 的代码层已经**拿不到**合并/批准能力（`services/agent_su
 | Enable Merge Whitelist / Restrict merge | 仅人类账号（**不含 bot**） | agent 账号即使拿到 token 也不能点合并 |
 | Block on Rejected Reviews | ✅ | 驳回后必须重审 |
 | Dismiss stale approvals / Require approval after push | ✅ | agent 追加提交后旧批准失效 |
-| Enable Status Check（可选） | `gates` | 与 `make gates` 同一入口 |
+| Enable Status Check（可选） | `gates` | 与 CI 前端冒烟同一入口 |
 
 账号侧要求：
 

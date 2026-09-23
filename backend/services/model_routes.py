@@ -14,14 +14,24 @@ tolerated.  This module owns the whole lifecycle of a route:
   route and commit it.  The **table is the source of truth**; a shipped route
   set arrives as ``config/model_routes.seed.sql``, and nothing is imported from
   JSON.
-* **Probe** — :func:`probe` performs one connectivity check against a route's
-  URL and :func:`record_health` remembers the answer **on that route's row**, so
-  a rename keeps its probe result and a delete takes it away.
+* **Probe** — :func:`probe` asks the endpoint for its model list through the
+  OpenAI client and :func:`record_health` remembers the answer **on that route's
+  row**, so a rename keeps its probe result and a delete takes it away.
+
+Every outbound request a route provokes is made by that client, never by a
+hand-rolled HTTP call: :class:`openai.OpenAI` speaks the ``openai`` wire format
+natively and reaches every other route through the same call (see
+:func:`probe_url`).  One client means the format the table stores, the library
+that speaks it and the headers :func:`request_headers` builds are one behaviour
+instead of three that have to be kept in step.
 
 Every route is classified on two independent axes:
 
-* ``provider`` — the **wire format** (``openai`` / ``mineru`` / ``anthropic``).
-  It decides the request shape and the default endpoint ``path``.
+* ``provider`` — the **wire format** (``openai`` / ``anthropic``).  It decides
+  the request shape and the default endpoint ``path``.  A MinerU-style
+  document-parse endpoint is an ``openai`` route with ``kind`` ``ocr``, not a
+  protocol of its own: it answers the OpenAI format, so it is spoken to the same
+  way as any other OpenAI-compatible endpoint.
 * ``kind`` — the **purpose** (``chat`` / ``completion`` / ``embedding`` /
   ``rerank`` / ``ocr`` / ``asr`` / ``tts``).  It is what a downstream client
   consults to decide whether a route may back an LLM provider, an embedding
@@ -47,16 +57,21 @@ which re-seals the rows that predate this.
 Validation lives here rather than in the route layer because there are three
 callers — the panel, the seed path and the runner — and a rule that only two of
 them apply is a rule that will drift.
+
+The key is also a **header value** the moment it is used, so its character set is
+an allowlist (:func:`is_header_safe`) rather than a CR/LF blocklist, and the
+allowlist is enforced both when a key is accepted and again when one is read back
+out — a rule checked only on the write path says nothing about the rows that are
+already there.
 """
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-import requests
+import openai
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -72,10 +87,15 @@ from models.model_route import (
     ModelRoute,
 )
 from services.format import utc_now_iso
+from services.headers import (
+    UnsafeHeaderError,
+    ValuePolicy,
+    checked_headers,
+    is_header_value_safe,
+)
 from services.sealing import SealingKeyMissing, SecretSealer
 from services.urlsafety import UnsafeUrlError, check_outbound_url
 
-logger = logging.getLogger("cpypiserver.model_routes")
 
 #: What ``source`` reports in the API payload.  The field predates the move to
 #: the database, when it named the file being read; it is now a stable label the
@@ -87,14 +107,12 @@ SOURCE = "model_routes"
 PAYLOAD_VERSION = 1
 
 #: The kind a route falls back to when it does not name one, keyed by protocol.
-#: Each protocol has one dominant purpose — an ``openai``- or ``anthropic``-shaped
-#: endpoint is a chat model unless it says otherwise, and ``mineru`` *is* a
-#: document-parse (OCR) protocol — so a row whose kind was never filled in still
-#: classifies the same way.
+#: Both formats describe a chat model unless the route says otherwise — a
+#: document-parse endpoint (``kind: ocr``) is an OpenAI-format route like any
+#: other — so a row whose kind was never filled in still classifies the same way.
 DEFAULT_KINDS: dict[str, str] = {
     "openai": "chat",
     "anthropic": "chat",
-    "mineru": "ocr",
 }
 
 #: Spellings seen in hand-written input that map onto a canonical provider.
@@ -103,8 +121,6 @@ PROVIDER_ALIASES: dict[str, str] = {
     "openai-compatible": "openai",
     "openai_compatible": "openai",
     "openai_compat": "openai",
-    "mineru": "mineru",
-    "miner": "mineru",
     "anthropic": "anthropic",
     "claude": "anthropic",
 }
@@ -112,15 +128,31 @@ PROVIDER_ALIASES: dict[str, str] = {
 #: Endpoint used when a route does not name one itself.
 DEFAULT_PATHS: dict[str, str] = {
     "openai": "/v1/chat/completions",
-    "mineru": "/file_parse",
     "anthropic": "/v1/messages",
 }
 
 #: Route names that would collide with the probe endpoint's own path.
 RESERVED_NAMES: frozenset[str] = frozenset({"probe"})
 
-#: A probe is a liveness check, not an inference call.
+#: A probe labels itself, so its traffic is recognisable in an upstream's logs.
+#: It overrides the client's own ``User-Agent`` rather than adding to it.
 _PROBE_USER_AGENT = "cpypiserver-model-probe/1.0"
+
+#: The Anthropic Messages API version a probe declares.  Anthropic's endpoint
+#: refuses a request that names no version, so even a route with no key sends it.
+ANTHROPIC_VERSION = "2023-06-01"
+
+def is_header_safe(value: Any) -> bool:
+    """Whether *value* may be written into an HTTP header as one printable line.
+
+    The rule itself lives in :func:`services.headers.is_header_value_safe` — this
+    is a thin, model-route-shaped alias so that both ends of a route's key
+    (accepted by :func:`normalize_api_key`, read back by
+    :func:`effective_api_key`) and the send site (:func:`request_headers`) name
+    the same predicate.  One rule, three callers: that is what keeps the
+    write-side rule and the send-side rule from drifting apart.
+    """
+    return is_header_value_safe(value, policy=ValuePolicy.TOKEN)
 
 #: Environment variable holding the master key every route's ``api_key`` is
 #: sealed under.  Derived from :class:`config.keys.KeysConfig`, which owns the
@@ -205,9 +237,8 @@ def default_kind(provider: Any) -> str:
 def normalize_kind(value: Any, provider: Any) -> str:
     """Validate a route's kind for storage, raising :class:`ValueError`.
 
-    A blank value means "the default for this protocol" (``chat``, or ``ocr``
-    for ``mineru``), which is what keeps rows written before this field existed
-    working.
+    A blank value means "the default for this protocol" (``chat``), which is what
+    keeps rows written before this field existed working.
     """
     text = str(value or "").strip().lower()
     if not text:
@@ -312,13 +343,18 @@ def normalize_api_key(value: Any) -> str:
     the device-auth page without ever reading it back).
 
     This validates the *plaintext*, before :func:`seal_api_key` wraps it: the
-    envelope is what is stored, but the header is built from what came out.
+    envelope is what is stored, but the header is built from what came out — and
+    ``normalize_api_key`` never sees the plaintext again, which is why
+    :func:`effective_api_key` re-checks it on the way out.
+
+    The allowlist itself lives in :func:`is_header_safe`, so the rule that runs
+    here and the rule that runs at the send site are one rule.
     """
     text = str(value or "").strip()
     if not text:
         return ""
-    if any(ord(char) < 33 or ord(char) == 127 for char in text):
-        raise ValueError("api_key 不能包含空格、制表符或控制字符")
+    if not is_header_safe(text):
+        raise ValueError("api_key 不能包含空格、制表符、控制字符或非 ASCII 字符")
     return text
 
 
@@ -366,25 +402,47 @@ def effective_api_key(route: Mapping[str, Any]) -> tuple[str, str]:
     :func:`migrate_plaintext_keys` has run, and what lets
     :func:`probe_target` authenticate an unsaved draft, whose key arrives from
     the request body and was never stored at all.
+
+    The plaintext is re-checked with :func:`is_header_safe` on the way out, and
+    an unsafe value is treated as **no key at all**.  Writing one is already
+    impossible through :func:`normalize_api_key`, but *reading* one is a
+    different crossing of the same boundary: this value is about to become an
+    ``Authorization`` / ``x-api-key`` header, and the row it came from may
+    predate the validation, or have been written straight into the database, or
+    carry characters that a future writer accepted.  Dropping it here means the
+    char that reaches a header is always from the allowlist, whatever the row
+    holds — a rule enforced only on the write path is not enforced on the copy
+    that already exists.
     """
     raw = str(route.get("api_key") or "").strip()
     if not raw:
         return "", "none"
     sealer = api_key_sealer()
     if not sealer.is_sealed(raw):
-        return raw, "plaintext"
+        return _safe_plaintext(raw, route, "plaintext")
     try:
-        return sealer.unseal(raw), "stored"
+        return _safe_plaintext(sealer.unseal(raw), route, "stored")
     except Exception as exc:  # noqa: BLE001
-        # ``SealingKeyMissing`` (no master key) and ``InvalidToken`` (corrupt, or
-        # sealed under a different key) both mean "this deployment cannot read
-        # this row", and neither may take the table down.
-        logger.warning(
-            "model route %r has a sealed api_key that cannot be opened (%s)",
-            route.get("name") or "unnamed",
-            exc.__class__.__name__,
-        )
         return "", "unreadable"
+
+
+def _safe_plaintext(
+    plaintext: Any,
+    route: Mapping[str, Any],
+    source: str,
+) -> tuple[str, str]:
+    """*plaintext* when it may become a header value, else ``("", source)``.
+
+    A stored-but-unsendable key is reported the same way an unopenable envelope
+    is: as a route that authenticates with nothing, plus a warning naming the
+    route so an operator can see which row to re-enter.
+    """
+    text = str(plaintext or "").strip()
+    if not text:
+        return "", source
+    if not is_header_safe(text):
+        return "", source
+    return text, source
 
 
 def migrate_plaintext_keys(session: Session) -> list[str]:
@@ -409,7 +467,6 @@ def migrate_plaintext_keys(session: Session) -> list[str]:
         resealed.append(row.name)
     if resealed:
         session.commit()
-        logger.warning("Re-sealed the stored API key of %d model route(s)", len(resealed))
     return resealed
 
 
@@ -668,7 +725,13 @@ def record_health(session: Session, name: str, health: Mapping[str, Any]) -> Non
 # ── Connectivity probe ───────────────────────────────────────────────
 
 def endpoint_url(route: Mapping[str, Any]) -> str:
-    """``base_url`` + ``path`` as one probe URL."""
+    """``base_url`` + ``path`` as one URL — the *inference* endpoint.
+
+    This is what a downstream client posts a conversation to, and what
+    ``/api/v1/models/resolved`` publishes as ``endpoint_url``.  It is deliberately
+    **not** what the probe requests: a probe lists models, and no route serves a
+    model listing at its inference path (see :func:`probe_url`).
+    """
     base = normalize_base_url(route.get("base_url"))
     path = str(route.get("path") or "").strip()
     if not path:
@@ -676,23 +739,103 @@ def endpoint_url(route: Mapping[str, Any]) -> str:
     return base.rstrip("/") + (path if path.startswith("/") else "/" + path)
 
 
+def probe_url(route: Mapping[str, Any]) -> str:
+    """The URL a probe asks for a model list — ``{base_url}/models``.
+
+    Listing models is the cheapest call an endpoint answers and the only one that
+    both proves reachability and exercises the credential, so it is what a probe
+    sends.  The OpenAI client appends ``/models`` to the ``base_url`` it is given,
+    which is why a route's ``base_url`` must be the API root: a gateway that only
+    serves ``/v1/models`` is registered as ``https://host/v1``.
+
+    ``anthropic`` is the one format whose listing is not served relative to that
+    root — it is ``GET {root}/v1/models`` — and its base URL is published both
+    with and without the trailing ``/v1``, so that single segment is normalised
+    here.  Only this listing URL is adjusted; the inference endpoint above is
+    whatever the administrator configured.
+    """
+    base = normalize_base_url(route.get("base_url")).rstrip("/")
+    if canonical_provider(route.get("provider")) == "anthropic":
+        root = base[: -len("/v1")] if base.endswith("/v1") else base
+        return f"{root}/v1/models"
+    return f"{base}/models"
+
+
 def request_headers(route: Mapping[str, Any]) -> dict[str, str]:
-    """Auth headers for the route's provider, when a key is configured.
+    """Every header a probe sends — the route's auth plus its probe label.
 
     Uses :func:`effective_api_key`, so a route whose key is sealed probes
     authenticated too — otherwise a perfectly good route would report ``auth``
-    after every check.
+    after every check.  ``anthropic`` authenticates with ``x-api-key`` and the API
+    version; every other format with ``Authorization: Bearer``.
+
+    Every value this returns is checked against :func:`is_header_safe`, and a key
+    that fails is dropped rather than sent: an API key is an opaque secret that
+    ends up in an outbound header, so the only safe shape is "a short line of
+    printable ASCII" and anything else must be refused rather than passed on.  The
+    dropping happens inside :func:`effective_api_key`, and the final mapping goes
+    through :func:`services.headers.checked_headers`, so the mapping that leaves
+    this function is known-safe by construction — this is the send site, and the
+    check here is the one that actually hands the value to the HTTP client.
+
+    The mapping is passed to the client as ``default_headers`` (see
+    :func:`probe_client`) rather than letting the client build its own
+    ``Authorization``, so the credential is assembled in exactly one place even
+    though the request itself is the SDK's.
     """
     headers = {"User-Agent": _PROBE_USER_AGENT, "Accept": "*/*"}
     api_key, _source = effective_api_key(route)
-    if not api_key:
-        return headers
-    if canonical_provider(route.get("provider")) == "anthropic":
-        headers["x-api-key"] = api_key
-        headers["anthropic-version"] = "2023-06-01"
-    else:
-        headers["Authorization"] = f"Bearer {api_key}"
-    return headers
+    if api_key and is_header_safe(api_key):
+        if canonical_provider(route.get("provider")) == "anthropic":
+            headers["x-api-key"] = api_key
+            headers["anthropic-version"] = ANTHROPIC_VERSION
+        else:
+            headers["Authorization"] = f"Bearer {api_key}"
+    return checked_headers(headers, context="model route probe")
+
+
+def probe_client(
+    route: Mapping[str, Any],
+    *,
+    url: str,
+    timeout: float,
+) -> tuple[openai.OpenAI, dict[str, Any]]:
+    """The client one probe speaks through, plus its per-request header overrides.
+
+    Returns ``(client, extra_headers)``.  *url* is the listing URL
+    :func:`probe_url` derived, and the client's ``base_url`` is that URL minus its
+    ``models`` segment because the SDK joins the two itself — so the URL the
+    health payload reports is by construction the URL that was requested.
+
+    Three deliberate settings:
+
+    * the credential is **not** handed to the SDK as ``api_key``.  ``Authorization``
+      travels as a per-request override instead: :func:`request_headers` still
+      builds it (the one place a route becomes headers), and a route with no key
+      passes ``Omit`` — which is what makes the SDK send no ``Authorization`` at
+      all.  ``anthropic`` needs exactly that, since it authenticates with
+      ``x-api-key`` and its ``Bearer`` would be an unknown header beside it.  An
+      empty ``api_key`` also keeps the SDK from adding a header of its own, and
+      ``_enforce_credentials=False`` is required because it otherwise refuses to
+      build a credential-less client — a legitimate route here;
+    * ``http_client`` keeps ``follow_redirects`` off.  A redirect would move the
+      probe to a host :func:`services.urlsafety.check_outbound_url` never saw;
+    * ``max_retries=0``: a probe is one attempt with the timeout the panel asked
+      for, and the SDK's retry budget would multiply it and report a latency
+      nobody requested.
+    """
+    headers = request_headers(route)
+    extra_headers = {"Authorization": headers.pop("Authorization", openai.Omit())}
+    client = openai.OpenAI(
+        api_key="",
+        _enforce_credentials=False,
+        base_url=url[: -len("models")],
+        default_headers=headers,
+        timeout=timeout,
+        max_retries=0,
+        http_client=openai.DefaultHttpxClient(follow_redirects=False),
+    )
+    return client, extra_headers
 
 
 def _classify(status_code: int) -> str:
@@ -726,16 +869,37 @@ def _unreachable(url: str, error: str, latency_ms: int | None = None) -> dict[st
     }
 
 
-def probe(route: Mapping[str, Any], *, timeout: float = 5.0) -> dict[str, Any]:
-    """Check that a route's URL answers — no inference request is sent.
+def _reachable(url: str, status_code: int, latency_ms: int) -> dict[str, Any]:
+    """One HTTP answer, classified — the payload both probe outcomes share."""
+    status = _classify(status_code)
+    return {
+        "reachable": True,
+        "ok": status == "ok",
+        "status": status,
+        "http_status": status_code,
+        "latency_ms": latency_ms,
+        "url": url,
+        "error": None,
+        "checked_at": _checked_at(),
+    }
 
-    Any HTTP response proves the endpoint is reachable; the ``status`` field
-    says what came back (``ok``, ``auth``, ``method``, ``not_found``, …), so a
-    POST-only endpoint that answers ``405`` to our ``GET`` is still reported as
-    reachable rather than as a failure.
+
+def probe(route: Mapping[str, Any], *, timeout: float = 5.0) -> dict[str, Any]:
+    """Ask a route's endpoint for its model list — no inference request is sent.
+
+    The request is the OpenAI client's own model listing (``GET {base}/models``,
+    or ``GET {root}/v1/models`` for ``anthropic`` — see :func:`probe_url`), which
+    is the cheapest call an endpoint answers and the one that exercises the
+    credential as well as the connection: a key the upstream rejects comes back as
+    ``auth`` instead of as a healthy route.
+
+    Any HTTP response proves the endpoint is reachable; the ``status`` field says
+    what came back (``ok``, ``auth``, ``method``, ``not_found``, …), so an
+    endpoint that answers ``405`` to a listing is still reported as reachable
+    rather than as a failure.
     """
     try:
-        url = endpoint_url(route)
+        url = probe_url(route)
     except ValueError as exc:
         return _unreachable("", str(exc))
 
@@ -749,34 +913,40 @@ def probe(route: Mapping[str, Any], *, timeout: float = 5.0) -> dict[str, Any]:
     except UnsafeUrlError as exc:
         return _unreachable(url, str(exc))
 
-    headers = request_headers(route)
+    try:
+        client, extra_headers = probe_client(route, url=url, timeout=timeout)
+    except (UnsafeHeaderError, ValueError, TypeError) as exc:
+        # A key that cannot become a header value is reported like any other
+        # unusable route: the panel shows why, and nothing is sent.  ``ValueError``
+        # / ``TypeError`` are the client's own refusals (a base URL or an option it
+        # will not accept), which must not surface as a 500 either.
+        return _unreachable(url, str(exc))
+
     started = time.monotonic()
     try:
-        response = requests.get(
-            url,
-            headers=headers,
-            timeout=timeout,
-            # A redirect would move the request to a host the guard never saw;
-            # the probe only needs to know whether the configured URL answers.
-            allow_redirects=False,
-        )
-    except requests.RequestException as exc:
+        # The raw response, not the parsed page: a probe asserts what the endpoint
+        # answered, so a gateway whose listing is not OpenAI-shaped (an enriched
+        # ``models`` map, say) is reachable rather than a failure.
+        response = client.models.with_raw_response.list(extra_headers=extra_headers)
+    except openai.APIStatusError as exc:
+        # Every non-2xx — including the 3xx the client refuses to follow — arrives
+        # here, and the status is the answer the probe reports.
+        latency = int((time.monotonic() - started) * 1000)
+        return _reachable(url, exc.status_code, latency)
+    except openai.OpenAIError as exc:
         latency = int((time.monotonic() - started) * 1000)
         message = str(exc).strip() or exc.__class__.__name__
         return _unreachable(url, message[:300], latency)
+    else:
+        latency = int((time.monotonic() - started) * 1000)
+        # A non-streaming response has been read by the client already, so its
+        # connection goes back to the pool and ``client.close()`` below releases
+        # it; the status is all a probe keeps from the answer.
+        status_code = response.status_code
+    finally:
+        client.close()
 
-    latency = int((time.monotonic() - started) * 1000)
-    status = _classify(response.status_code)
-    return {
-        "reachable": True,
-        "ok": status == "ok",
-        "status": status,
-        "http_status": response.status_code,
-        "latency_ms": latency,
-        "url": url,
-        "error": None,
-        "checked_at": _checked_at(),
-    }
+    return _reachable(url, status_code, latency)
 
 
 def probe_target(payload: Mapping[str, Any], *, timeout: float = 5.0) -> dict[str, Any]:
@@ -814,6 +984,7 @@ def probe_and_record(
 
 
 __all__ = [
+    "ANTHROPIC_VERSION",
     "DEFAULT_KINDS",
     "DEFAULT_PATHS",
     "KINDS",
@@ -839,6 +1010,7 @@ __all__ = [
     "effective_api_key",
     "effective_kind",
     "endpoint_url",
+    "is_header_safe",
     "load",
     "mask_api_key",
     "migrate_plaintext_keys",
@@ -853,7 +1025,9 @@ __all__ = [
     "normalize_provider",
     "probe",
     "probe_and_record",
+    "probe_client",
     "probe_target",
+    "probe_url",
     "public_route",
     "raw_route",
     "record_health",

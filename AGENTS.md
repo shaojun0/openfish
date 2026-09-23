@@ -24,10 +24,12 @@
 8. **安全基元只有一份**：外部名字 → 路径用 `services/paths.py`，出站 URL 用
    `services/urlsafety.py`，日志转义用 `services/logsafe.py`。不要在这些关注点上
    手写第二份实现（例如自己写 `resolve()/relative_to()` 代替 `safe_join`）。
-   对应说明与门禁：`docs/security/pypiserver0920-findings.md`、
-   `backend/scripts/check_security.py`。
-9. **门禁必须全绿**：`python scripts/check_*.py` 全过才允许提交。门禁是自证验收，
-   不是可选项。
+   对应说明：`docs/security/pypiserver0920-findings.md`。
+9. **校验套件必须全绿**：本仓库不再自带 `backend/scripts/check_*.py`；一次改动的
+   校验套件按 `.agent/checks/` → `.agent/review-policy.yml` 的 `checks:` →
+   manifest 自动发现（`package.json` / `pyproject.toml` / `go.mod` / `Cargo.toml` /
+   `Makefile`）的顺序解析，解析不到就是 **unverified**，那不是「绿」。unverified
+   不允许据此开 PR。
 
 ## 执行流程（固定 6 步）
 
@@ -36,7 +38,7 @@ runner 会按下面的顺序调用你；每一步的输入都在工作目录 `/w
 1. **clone** — 只读副本，fetch 目标 `sha`。你**不改**这个 checkout 的既有分支。
 2. **read** — 先读本仓库的 `AGENTS.md` 与 `.agent/review-policy.yml`。
    没有 policy 文件时用平台内建的 `builtin-default`（只读，全 `autofix: false`）。
-3. **gates** — 跑 `backend/scripts/check_*.py`。汇总（`gate/passed/exit_code/
+3. **gates** — 跑解析出来的校验套件。汇总（`gate/passed/exit_code/
    duration_ms`）会原样贴进 PR 描述。失败时按下面边界决定自动修还是只报告。
 4. **review** — 按 policy 的 `rule_id` 逐条判定，产出 §9.5 的 findings JSON。
    `rule_id` 必须是规则，不是自由文本；每条 finding 要有 `file_path` + `symbol`，
@@ -95,7 +97,7 @@ runner 会按下面的顺序调用你；每一步的输入都在工作目录 `/w
 | 违反「一个关注点一份实现」的重复实现 | 缓存/存储策略替换 |
 | 缺文档、文档与路由表不一致 | 权限模型与角色设计 |
 | `openapi.json` 顺序等机械契约 | 协议面语义变更 |
-| gates 失败的直接修复 | 任何需要改 `model_routes.json` 的改动 |
+| gates 失败的直接修复 | 任何需要改模型路由表（`model_routes`）的改动 |
 
 规则归属写在 policy 文件里（`autofix: true|false`），**默认 false**。边界外的
 问题只写 finding，不生成修复分支。
@@ -109,30 +111,31 @@ runner 会按下面的顺序调用你；每一步的输入都在工作目录 `/w
 
 ## 门禁怎么跑
 
+本仓库**没有**自带的门禁脚本目录了，所以「跑门禁」= 跑解析出来的校验套件：
+
 ```bash
 cd backend
-python scripts/check_lint.py            # 未定义名 / 死导入（pyflakes）
-python scripts/check_openapi.py         # 契约与 schema 一致
-python scripts/check_agent_runtime.py   # 运行时协议（离线，假 adapter）
-# 其余 check_*.py 同理；runner 会跑离线全集并归一化
-# 根目录：make gates（离线全集 + 前端 smoke）/ make contract-gate（活服务契约）
+# 1) 版本化的套件（权威）：.agent/checks/checks.yml 或其中的 check_*.py
+# 2) 人工声明：.agent/review-policy.yml 的 checks:
+# 3) 自动发现：package.json scripts / pytest / ruff / mypy / go.mod / Cargo.toml / Makefile
 ```
 
-- 每个 gate 独立超时 120s；超时即 `failed`，不是「跳过」。
-- gates 汇总（`gate/passed/exit_code/duration_ms`）要给平台，PR 描述里原样贴。
-- 人与 CI 的同一入口是根 `Makefile` 的 `make gates`；runner 用
-  `services/gates.py` 跑同一批 `check_*.py` 并归一化，两边不会有两套真相。
-- 新增 gate = 新增一个 `backend/scripts/check_*.py`，会被自动发现；
-  `check_contract.py` 需要活的服务器，由 `make contract-gate` 单独跑。
+- 三者都没有 → 套件是 **unverified**：可以报告，但**不能**据此 push 或开 PR。
+- 每个 check 独立超时 120s；超时即 `failed`，不是「跳过」。
+- checks 汇总（`gate/passed/exit_code/duration_ms`）要给平台，PR 描述里原样贴。
+- 执行与归一化只有一处实现：`services/gates.py`（`resolve_suite` →
+  `run_suite` → `GateSummary`），不要在调用点另写一套判定。
+- 新增校验 = 在 `.agent/checks/` 加一条（agent 写的默认 `unvalidated`，只能报告；
+  只有通过证伪验证或被人工显式标为 `validated` 才能门控）。
 
 ## 明确的禁止项
 
 - 不推 `main` / `master` / 任何保护分支；只推 `agent/*`（I4）。
 - 不改 `.agent/review-policy.yml` 来让某条规则消失。
-- 不改 `model_routes.json`、权限模型、角色设计（§6.4 右列）。
+- 不改模型路由表（`model_routes`）、权限模型、角色设计（§6.4 右列）。
 - 不把密钥写进工作目录、提交、日志或 `result.json`。
 - 不为了变绿而弱化门禁、删测试、加 `# noqa` 掩盖问题。
-- 不引入新依赖（`pyproject.toml` 里只留真正被 import 的包）。
+- 不引入用不上的依赖（`pyproject.toml` 里只留真正被 import 的包；需要新能力时先按硬约束 1 找库，别自己写）。
 - 不做跨仓库推理：一个任务只在一个仓库内。
 
 ## 失败时怎么做

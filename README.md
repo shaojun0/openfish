@@ -21,7 +21,8 @@ the codebase.
   (packuments, manifests, tarballs, `/-/v1/search`), a **Docker Registry v2**
   pull endpoint, an **apt repository** (flat local index plus a mirror proxy), a
   downloadable **tools** directory (`tools/<category>/`) and a
-  **model-routing** table for downstream DSH (`backend/config/model_routes.json`). npm,
+  **model-routing** table for downstream DSH (the `model_routes` database
+  table, seeded from `backend/config/model_routes.seed.sql`). npm,
   Docker and Debian are read-through proxies: the local directory is the first
   source, an optional upstream mirror is fetched on demand and cached — see
   [Artifact hub](#artifact-hub-tools--npm--docker--debian--model-routing).
@@ -46,7 +47,9 @@ the codebase.
   in topological order (`extensions/`), so `app.py` stays short.
 - **Local packages over HTTP** — packages are served directly from disk with an
   in-memory index kept fresh by `watchdog`.
-- **Optional ClamAV scanning** on upload.
+- **Upload validation** — extension allow-list, MIME sniffing, the wheel's own
+  `RECORD` hashes, a GuardDog malware scan and an optional ClamAV scan (see
+  [Upload validation](#upload-validation)).
 - **Vue 3 admin console** — the browser-facing UI is a Vue 3 + Vite + Element
   Plus SPA in `frontend/`, built to `frontend/dist/` and served by its own nginx
   container (or by Flask when `FRONTEND_DIST_DIR` points at the build). Every
@@ -218,8 +221,7 @@ docker compose --profile db up -d             # + PostgreSQL (see below to switc
 > `docker/.env` and the whole users / RBAC / API-key / statistics layer moves to
 > the server together. SQLite (the file at `API_KEYS_FILE`, default
 > `backend/data/cpypiserver.db`) stays the default, so an existing deployment is
-> unaffected. `docker/README.md` has the switch and data-migration walkthrough;
-> `backend/scripts/check_database.py` proves a target backend end to end.
+> unaffected. `docker/README.md` has the switch and data-migration walkthrough.
 
 ## Configuration
 
@@ -279,10 +281,8 @@ Templates are provided at `backend/.env.example` (local development) and
 | `DEBIAN_COMPONENTS`     | `main`                 | Components the offline snapshot enumerates         |
 | `DEBIAN_ARCHES`         | `amd64`                | Architectures the offline snapshot enumerates      |
 | `DEBIAN_OFFLINE_DIR`    | `<backend>/data/offline/debian` | Where built offline bundles are written    |
-| `DEBIAN_OFFLINE_MAX_MB` | `4096`                 | Ceiling on one offline bundle, in MiB; `0` disables it |
+| `DEBIAN_OFFLINE_MAX_MB` | `4096`                 | Ceiling on one offline bundle, in MiB; an import may not unpack past it either; `0` disables it |
 | `DEBIAN_OFFLINE_RECOMMENDS` | `false`            | Follow `Recommends` when closing a plan's dependencies |
-| `MODELS_FILE`           | `<backend>/config/model_routes.json` | Model-routing table for downstream DSH; editable from `/models` by `model:write`, so it must be writable |
-| `MODEL_HEALTH_FILE`     | `<backend>/data/model_health.json` | Last connectivity probe per route (kept out of `MODELS_FILE`) |
 | `MODEL_PROBE_TIMEOUT`   | `5`                    | Seconds allowed for one route connectivity probe    |
 | `DOCS_DIR`              | `<project>/docker/docs` | Per-ecosystem Markdown documentation root — one sub-directory per ecosystem, one folder project per document |
 
@@ -430,8 +430,8 @@ The permission points shipped today, and the routes that enforce them:
 > role holding a point proves only that the point exists, never that ordinary
 > users can reach the feature. Which points a mirror ecosystem is *supposed* to
 > give every signed-in user, and which the anonymous role gets, are deliberate
-> decisions recorded in `backend/scripts/check_permission_catalog.py`; a new built-in
-> point nobody has classified fails that gate.
+> decisions recorded in `backend/services/authz.py`; a new built-in point nobody
+> has classified fails the build.
 
 ### Built-in roles
 
@@ -491,10 +491,40 @@ Every one is idempotent.
 > reaching the server through OAuth2, the HTTP Basic fallback, or `ADMIN_USERS`
 > is one account, not three.
 
-### ClamAV (optional)
+### Upload validation
+
+Every upload to the PyPI endpoint is validated before it reaches `PACKAGES_DIR`,
+and each step is a library that owns the concern:
+
+| Step | Owner |
+| ---- | ----- |
+| name → single safe basename | `werkzeug` (`secure_filename` / `safe_join`) via `services/paths.py` |
+| content type | `python-magic` (libmagic); the allow-list per extension lives in `services/validation.py` |
+| wheel filename + `RECORD` | `packaging.utils.parse_wheel_filename`, `wheel.wheelfile.WheelFile` (verifies every member's SHA-256 against `RECORD`, so an archive edited after it was built, or carrying a member `RECORD` does not list, is refused) |
+| sdist filename / container | `packaging.utils.parse_sdist_filename` (PEP 625), `tarfile.is_tarfile` for a bare `.tar` |
+| archive safety | GuardDog's `safe_extract`: uncompressed-size and compression-ratio budget, no escaping symlinks or device files, no ZIP parser differentials |
+| malware | GuardDog YARA rules + risk engine; reject at `GUARDDOG_MIN_RISK_SCORE` (default 5.0, GuardDog's own "suspicious" band) |
+| virus | `clamd`, when `CLAMAV_HOST` is set |
 
 `CLAMAV_HOST` (empty disables scanning), `CLAMAV_PORT` (3310),
 `CLAMAV_TIMEOUT` (30), `CLAMAV_REQUIRED` (`false`).
+
+`GUARDDOG_ENABLED` (`true`), `GUARDDOG_MIN_RISK_SCORE` (`5.0`),
+`GUARDDOG_REQUIRED` (`false`, i.e. warn and continue when the scanner cannot
+start), `GUARDDOG_CACHE_DIR` (`data/guarddog`).
+
+> **Offline note.** GuardDog refreshes the "top packages" lists its typosquat
+> heuristics use *while being imported*, with `requests.get(url)` and no
+> timeout, against `github.com` and `hugovk.github.io` — and raises outright if
+> the cached list is missing. On first use this server mirrors the lists
+> GuardDog ships into `GUARDDOG_CACHE_DIR` and stamps them far into the future,
+> so an intranet host never reaches for the internet.
+
+> **Platform note.** GuardDog depends on `nono-py`, which ships no Windows
+> wheel, so `pyproject.toml` declares it with `sys_platform != 'win32'`. On a
+> Windows developer box the scan reports "unavailable", logs a warning and
+> skips — the same fail-open behaviour as an unset `CLAMAV_HOST` — while the
+> Docker image and CI (Linux) always have it.
 
 ## Artifact hub (tools / npm / docker / debian / model routing)
 
@@ -511,7 +541,7 @@ first, and an optional upstream mirror is fetched on demand and cached:
 | Docker       | `/docker`  | `DOCKER_DIR`         | `DOCKER_UPSTREAM`   | Docker Registry v2 — tags, manifests, blobs |
 | Debian       | `/debian`  | `DEBIAN_DIR`         | `DEBIAN_UPSTREAM`   | flat `Packages` + apt mirror proxy (`dists/`, `pool/`) |
 | 工具 / Tools | `/tools`   | `TOOLS_DIR`          | —                   | direct file downloads |
-| 模型路由     | `/models`  | `MODELS_FILE` + `MODEL_HEALTH_FILE` | —    | JSON route table — read by everyone, **added/edited/probed by admins** |
+| 模型路由     | `/models`  | `model_routes` 表（随 `API_KEYS_FILE` / `DATABASE_URL`） | —    | DB route table — read by everyone, **added/edited/probed by admins**；全新部署用 `config/model_routes.seed.sql` 预置 |
 | 文档 / Docs  | `/documentation/<eco>` | `DOCS_DIR/<eco>/<id>/` | —                | Markdown folder projects — read by everyone, **created/edited by admins** |
 
 The Python and npm pages each carry a **dropdown** that switches the page
@@ -631,7 +661,11 @@ link:
    (`POST /debian/offline/bundle`);
 4. the **intranet** side verifies the bundle's manifest and unpacks it into
    `DEBIAN_DIR`, where the flat `/debian/Packages` index picks it up
-   (`POST /debian/offline/import`).
+   (`POST /debian/offline/import`). The importer trusts nothing about the
+   archive: members that are not regular files or directories (symlinks,
+   hardlinks, device nodes, FIFOs), names that leave the staging directory, and
+   payloads that would unpack past `DEBIAN_OFFLINE_MAX_MB` are refused before a
+   byte is written — see `docs/security/bundle-import-hardening.md`.
 
 Each artifact is self-describing, tab-separated text with a trailing digest, so
 it can be read, diffed and checked by hand; the bundle is a gzip tarball that
@@ -641,23 +675,26 @@ artifacts needs `debian:offline`; importing a bundle needs `debian:upload`
 `cpypiserver-debian-offline` client, or with plain `curl` — see
 `docker/docs/debian/offline-updates/document.md`.
 
-**Model routing.** `MODELS_FILE` (default `config/model_routes.json`, i.e.
-`backend/config/model_routes.json` when the backend runs from `backend/`) is a
-small JSON document describing the endpoints a downstream intranet DSH may talk to.
-This server publishes the table and **lets an administrator maintain it in the
-browser**; it does not proxy inference. Reading needs `model:read` (held by the
-`authenticated` role), while adding, editing, deleting or re-probing a route
-needs `model:write` (admin only).
+**Model routing.** The routing table lives in the **`model_routes` database
+table** — the same SQLite file (`API_KEYS_FILE`) or PostgreSQL database
+(`DATABASE_URL`) the API keys and the agent queue use. It describes the endpoints
+a downstream intranet DSH may talk to. A shipped starting set arrives as
+`backend/config/model_routes.seed.sql`; nothing is imported from JSON, and there
+is no `MODELS_FILE`. This server publishes the table and **lets an administrator
+maintain it in the browser**; it does not proxy inference. Reading needs
+`model:read` (held by the `authenticated` role), while adding, editing, deleting
+or re-probing a route needs `model:write` (admin only).
 
 Each route is classified on two independent axes:
 
-* **`provider` — the wire format**: `openai`, `mineru` or `anthropic`. It decides
-  the request shape and the default `path` (`/v1/chat/completions`,
-  `/file_parse`, `/v1/messages`).
+* **`provider` — the wire format**: `openai` or `anthropic`. It decides the
+  request shape and the default `path` (`/v1/chat/completions`, `/v1/messages`).
+  There is no separate protocol for a document parser: MinerU answers the OpenAI
+  format, so it is an `openai` route with `kind` `ocr`.
 * **`kind` — the model function**: `chat`, `completion`, `embedding`, `rerank`,
-  `ocr`, `asr` or `tts`. It is what a downstream client switches on; a route
-  that omits it falls back to its protocol default (`openai` / `anthropic` →
-  `chat`, `mineru` → `ocr`), so a document written before the field existed
+  `ocr`, `asr` or `tts`. It is what a downstream client switches on; a row
+  that omits it falls back to its protocol default (`chat`), so a row written
+  before the field existed
   still classifies correctly.
 
 A route also carries a `base_url`, an optional `api_key`, a `path`, an optional
@@ -666,39 +703,70 @@ API key may be empty. The raw key is **never returned by the API** — the SPA
 sees `has_api_key` and a last-four hint, and an edit that leaves the field blank
 keeps the stored key (an empty value clears it).
 
-**Keep the document secret-free: prefer `api_key_env`.** A route may name an
-**environment variable** instead of carrying a value:
+**The upstream key is sealed at rest, and the table is never trusted with a
+plaintext one.** Before anything is written, the key is encrypted with Fernet
+under a dedicated `MODEL_ROUTE_KEY` and stored as an `enc:v1:` envelope, so the
+database, its backups and any replica carry no usable upstream credential; the
+plaintext exists only inside the process that is about to send the request. The
+key is therefore **data, not configuration**, and it is set either from the
+panel or from a shell:
 
-```json
-{ "name": "deepseek-flash", "base_url": "https://api.deepseek.com",
-  "api_key": "", "api_key_env": "ENTERPRISE_DEEPSEEK_API_KEY", "…": "…" }
+```bash
+MODEL_ROUTE_KEY=… python cli.py model-route set-key deepseek-flash \
+    --key-env ENTERPRISE_DEEPSEEK_API_KEY     # or omit to be prompted
+python cli.py model-route list                # how each route authenticates
+python cli.py model-route seal                # re-seal anything still plaintext
 ```
 
-The key is then read from the process environment whenever it is needed, so
-`backend/config/model_routes.json` can be committed and shared — which matters because
-this repository's own rule is that no credentials live in it (see
-[Security notes](#security-notes)). A stored `api_key` wins over the variable;
-a variable that is set but resolves to nothing is reported as
-`api_key_source: "env-missing"` in `GET /api/v1/models` rather than quietly
-looking configured, and connectivity probes authenticate with the resolved key
-so an env-backed route does not report `auth` after every check. Values are
-injected at deploy time (`--env-file`, or `.env` for local runs); only the
-*name* is ever written to the document.
+`--key-env` reads the value from the environment at that moment, so the secret
+still never reaches the shell history or `argv`; only the sealed result is
+stored. `MODEL_ROUTE_KEY` is backend-only — a downstream DSH receives the
+*decrypted* key from `GET /api/v1/models/resolved` and has no business holding
+the master key. With it unset the deployment **fails closed**: saving a route
+with a key is refused (never a plaintext fallback) and rows already sealed
+report `api_key_source: "unreadable"`. Rotating the key means re-setting each
+key, since an old envelope cannot be opened under a new master.
+
+`api_key_source` in `GET /api/v1/models` says how a route is authenticated
+without revealing what with, and each value names an action: `stored` is
+normal; `plaintext` is a row written before sealing existed and awaiting
+`model-route seal`; `unreadable` means this deployment cannot open the envelope
+(missing or wrong `MODEL_ROUTE_KEY`, or a corrupt row); `none` means the route
+carries no credential. Connectivity probes authenticate with the resolved key,
+sealed or not, so a working route never reports `auth` after every check.
 
 On the page, “新增路由” opens an **inline editor as the first table row**; the
-same row edits an existing route. Saving validates the entry, rewrites the
-document atomically, and immediately **probes the URL for reachability** — a
-plain `GET` that never sends an inference request. Any HTTP answer proves the
-endpoint is reachable and is classified as `ok` / `auth` / `method` /
-`not_found` / `client_error` / `server_error`, with `unreachable` for no answer
-at all; a per-row “重新检测” and a “检测全部” button re-run it. Results live in
-`MODEL_HEALTH_FILE` (default `data/model_health.json`), keyed by route name, so
-the document downstream DSH reads stays a pure route table. The page also
-renders an alias-expanded snippet ready to paste into a DSH config.
+same row edits an existing route. Saving validates the entry, writes the row,
+and immediately **probes the endpoint by listing its models** through the OpenAI
+client — `GET {base_url}/models` (or `{root}/v1/models` for `anthropic`), never
+an inference request, so the probe exercises the credential as well as the
+connection. Any HTTP answer proves the endpoint is reachable and
+is classified as `ok` / `auth` / `method` / `not_found` / `client_error` /
+`server_error`, with `unreachable` for no answer at all; a per-row “重新检测”
+and a “检测全部” button re-run it. The result is stored **on that route's own
+row**, so a rename keeps it and a delete takes it away, and the published table
+stays a pure route table. The page also renders an alias-expanded snippet ready
+to paste into a DSH config.
 
-Because the panel writes `MODELS_FILE`, the file and its directory must be
-writable by the server process — a container bind-mount of that one file must
-not use `:ro`.
+To pre-seed a fresh deployment, apply the shipped script once against the same
+database the server uses:
+
+```bash
+# SQLite (the default), from the repository root
+sqlite3 backend/data/cpypiserver.db < backend/config/model_routes.seed.sql
+# PostgreSQL
+psql "$DATABASE_URL" -f backend/config/model_routes.seed.sql
+```
+
+It is idempotent (`ON CONFLICT (name) DO NOTHING`), so re-running never clobbers
+a route an administrator has since edited.
+
+> **Upgrading a deployment that still uses the JSON file.** The table is created
+> empty, nothing reads `model_routes.json` any more, and the tracked file is
+> gone from the repository — so copy your routes into the table before (or after)
+> switching over. The seed script is the template for the `INSERT`s; there is
+> deliberately no in-process JSON import, so what reaches the database is a SQL
+> file you can read first. The routing panel is the other way in.
 
 ### Ecosystem documentation
 
@@ -1072,132 +1140,49 @@ it**, so a key minted by an administrator can also call `/api/v1/admin/*`. Ask
 
 `/openapi.json` is **generated from the live Flask `url_map`** plus an
 `@api_operation(...)` decorator on each view, so it cannot advertise an endpoint
-the server does not serve. The reverse direction — a served endpoint missing
-from the description — is a gate rather than a hope:
+the server does not serve. The reverse direction — a served endpoint missing from the description — is
+enforced at the source: `/openapi.json` is built from the same `@api_operation`
+registry, so adding a route means adding its metadata in the same commit.
 
-```bash
-# Static: coverage, $ref resolution, unique operationIds, OpenAPI 3.1 validity
-python backend/scripts/check_openapi.py
+### What verifies a change
 
-# Live: validate real responses against the models the spec references
-python backend/scripts/check_contract.py --base-url http://127.0.0.1:9090 --api-key cpypi_…
-```
+This repository no longer ships a directory of its own gate scripts
+(`backend/scripts/check_*.py` was deleted outright). A change is verified by the
+suite resolved **from the repository under review**, in this order:
 
-`check_openapi.py` exits non-zero when a machine endpoint carries no
-`@api_operation` metadata, a `$ref` dangles, two operations share an
-`operationId`, or the document fails `openapi-spec-validator` (installed via
-`pip install -e '.[dev]'`). `check_contract.py` closes the loop by calling each
-documented endpoint and handing the response to the pydantic model the spec
-points at.
+1. `.agent/checks/` — the versioned suite (`checks.yml`, or `check_*.py` files);
+2. `checks:` in `.agent/review-policy.yml` — commands a human declared;
+3. manifest auto-discovery — `package.json` (`test` / `lint` / `build` /
+   `typecheck`), Python (`pytest` / `ruff` / `mypy`), `go.mod`, `Cargo.toml`,
+   and the `test` / `check` / `lint` targets of a `Makefile`.
 
-### Keeping authorization honest
+Everything is executed and normalised in one place (`backend/services/gates.py`:
+`resolve_suite` → `run_suite` → `GateSummary`), and a suite with nothing gating
+resolves to the explicit **`unverified`** state instead of an empty green table.
+An agent-authored `.agent/checks/` entry is `unvalidated` until a validator shows
+it can fail on a known-bad revision, and an `unvalidated` check reports without
+ever unlocking a PR.
 
-The same principle applies to access control: a permission table nothing
-consults is worse than none, because it looks like security.
-
-```bash
-# Every protected route must actually refuse an anonymous request
-python backend/scripts/check_auth_guards.py
-
-# The RBAC tables must actually decide access
-python backend/scripts/check_rbac.py
-```
-
-`check_auth_guards.py` runs two independent checks. Statically, it parses every
-module in `routes/` and fails if a `require_*` decorator is written *above* a
-`@*.route` decorator — decorators apply bottom-up, so that ordering registers the
-unguarded view and silently drops the check. This is not hypothetical: it is how
-every `/python-builds/*` route came to be readable without credentials. At
-runtime it boots the app and requests every registered rule with no credentials,
-failing anything reachable that is not explicitly declared public through
-`security=[]` or the documented `PUBLIC_ENDPOINTS` list — which also catches a
-blueprint that simply forgot to attach a guard.
-
-`check_rbac.py` drives the model end to end against a throwaway database: that a
-cold start promotes exactly one superuser and only once; that granting a role
-takes effect on the next request without a restart; that a role lacking
-`package:write` gets 403 from the upload endpoint; that `is_superuser` bypasses
-the tables; and that neither of the two escalation guards can be talked around
-(a non-superuser cannot set the flag, and the last superuser cannot be demoted).
-
-Both scripts exit non-zero on failure and were each verified to fail when the
-bug they guard against is reintroduced.
+On the CI side, `.github/workflows/gates.yml` and the root `Makefile` now cover
+the frontend only (`make gates-frontend` → `npm run smoke`). The backend is
+**not** verified by CI.
 
 ### Keeping the database honest
 
-The schema runs on two engines — SQLite (default) and PostgreSQL — so the engine
-choice and the one hand-written migration are pinned by a gate of their own:
-
-```bash
-# SQLite (default): URL selection, legacy migration, a full round trip
-python backend/scripts/check_database.py
-
-# The same round trip against a real PostgreSQL server
-python backend/scripts/check_database.py \
-    --url "postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/openfish" --yes
-```
-
-With no arguments it is an offline gate: it checks that `resolve_database_url`
-maps a bare path to SQLite and upgrades a bare `postgresql://` to the driver we
-ship, builds a legacy-shaped SQLite file to prove the `api_keys.user_id`
-migration still applies, then drives bootstrap / user / role / API key /
-statistics against a throwaway file. A non-SQLite `--url` runs that same round
-trip against a real server, and `--yes` acknowledges that it writes (it seeds a
-superuser and a test account) so it cannot be aimed at production by accident.
-`check_rbac.py` honours `DATABASE_URL` as well, so the whole authorization model
-can be replayed against PostgreSQL without changing a line.
+The schema runs on two engines — SQLite (default) and PostgreSQL — and the
+switch is a `DATABASE_URL` change and nothing else. With no arguments
+`resolve_database_url` maps a bare path to SQLite and upgrades a bare
+`postgresql://` to the driver we ship; the `api_keys.user_id` migration is the
+one hand-written migration and applies to a legacy-shaped SQLite file. A
+non-SQLite URL replays the same bootstrap / user / role / API-key / statistics
+round trip against a real server.
 
 ### Keeping the code itself honest
 
-The gates above check behaviour. One more checks the source, because a refactor
-fails quietly rather than loudly — move a shared helper and the module still
-imports, while the one route that used the old name raises `NameError`:
-
-```bash
-python backend/scripts/check_lint.py    # pyflakes: undefined names, dead imports
-```
-
-It runs [pyflakes](https://pypi.org/project/pyflakes/) over every application
-module (a `dev` extra) and documents the two allowed exceptions rather than
-silencing them in the source.
-
-### Keeping the renderer honest
-
-The Markdown renderer is the only path from a stored document to HTML, so its
-inline passes have to compose — a code span inside bold is still a code span —
-and its output has to stay escaped:
-
-```bash
-python backend/scripts/check_markdown.py
-```
-
-It exists because that composition regressed: `**upload a `.md` file**`
-rendered the code span as a bare `0`, because the placeholder restore ran a
-single `re.sub` pass and never rescanned the fragment substituted for the outer
-emphasis token. The gate also pins the safety properties: raw HTML stays
-escaped, and `javascript:`/`data:` URLs never become live tags. It exits
-non-zero on failure and was verified to fail when the single-pass restore is
-reintroduced.
-
-### Keeping the proxies honest
-
-A protocol proxy is easy to get *almost* right: the packument looks correct, the
-manifest parses, and the one header a client actually depends on is missing. So
-each ecosystem ships an offline conformance gate that stands a fake upstream in
-front of the proxy and drives the real wire sequence against it:
-
-```bash
-python backend/scripts/check_npm_proxy.py       # packuments, manifests, tarballs, search
-python backend/scripts/check_docker_proxy.py    # token flow, manifests, blobs, Range
-python backend/scripts/check_debian_proxy.py    # Release/Packages, gzip passthrough, Range
-python backend/scripts/check_debian_offline.py  # snapshot → plan → bundle → import, no network
-```
-
-None of them needs network access: each starts a small HTTP server that plays
-the upstream, points the proxy at it with a temporary cache directory, and
-asserts on the bytes and headers a real client would see — including that the
-second request for immutable content is served from the cache. The fake upstream
-counts hits, so "we cached it" is verified rather than assumed.
+`pyproject.toml` keeps only packages that are actually imported, and the module
+layout is deliberate: `from __future__ import annotations` first, standard
+library then third-party then this repository, `X | None` rather than
+`Optional`, and one implementation per concern.
 
 ## Frontend architecture
 
@@ -1232,7 +1217,7 @@ backend/                        the Flask application — one build unit
 ├── app.py                      entry point — wires extensions, then routes
 ├── cli.py                      administrative CLI (roles, grants, superuser bootstrap)
 ├── config/                     pydantic-settings models (server, storage, auth,
-│                               security, hub) + model_routes.json
+│                               security, hub) + model_routes.seed.sql
 ├── extensions/                 pluggable infrastructure + topological init registry
 ├── routes/                     Flask blueprints (pypi, python_build, node_build,
 │                               api_keys, admin, access, session, discovery, spa,
@@ -1291,8 +1276,9 @@ docker/                         orchestration — no application code
     ├── node-builds/            nodejs.org/dist-shaped Node.js mirror
     ├── docker-images/          image tarballs + compose/Dockerfile
     ├── debian/                 local .deb files + apt snippets
-    ├── data                    DB + proxy caches (→ backend/data)
-    └── config/model_routes.json  (→ backend/config/model_routes.json)
+    ├── data                    DB + proxy caches (→ backend/data); the
+    │                           model_routes route table lives in this DB
+    └── forgejo/                Forgejo repositories and instance secrets
 
 integrations/                   downstream *client* code, versioned here because it is
                                 tightly coupled to this server's contract. Currently:
@@ -1339,9 +1325,8 @@ script.
   it does so through one explicit route, `GET /static/dist/<path>`
   (`spa.dist_asset`). Everything else under `backend/static/` — the Jinja
   templates in `backend/static/<ecosystem>/` that Flask's template loader
-  renders, for instance — is **not** reachable over HTTP.
-  `backend/scripts/check_auth_guards.py` fails the build if a blanket `static`
-  handler is ever reintroduced.
+  renders, for instance — is **not** reachable over HTTP. A blanket `static`
+  handler must never be reintroduced.
 - **The SPA bundle is static, the data behind it is not.** In the split Docker
   deployment the shell and its hashed assets are served by the `frontend`
   container, so they are fetchable without a session; every `/api/v1` call, every

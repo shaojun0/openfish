@@ -491,7 +491,7 @@ export default {
 
   models: {
     title: '模型路由',
-    description: '供下游内网 DSH 读取的模型端点表，来自 MODELS_FILE；每条路由按调用协议与模型功能分类。',
+    description: '供下游内网 DSH 读取的模型端点表，存在数据库的 model_routes 表里；每条路由按调用协议与模型功能分类。',
     scaffoldTitle: '管理员可在线维护路由表',
     scaffoldDesc:
       'openfish 只负责集中登记、展示与连通性检测，不代理推理请求；DSH 读取后自行决定 upstream 与鉴权方式。持有 model:write 的管理员可在本页新增、修改、删除路由。',
@@ -511,7 +511,6 @@ export default {
     missingDesc: '未找到配置文件 {source}，当前按空表展示；保存任意路由会自动创建该文件。',
     parseError: '配置文件解析失败',
     providerOpenai: 'OpenAI 格式',
-    providerMineru: 'MinerU 格式',
     providerAnthropic: 'Anthropic 格式',
     providerUnknown: '未知格式',
     kindChat: '对话',
@@ -856,7 +855,7 @@ export default {
     mintForbidden: '当前账号没有 repo:push，兑换会返回 403。',
     cloneUrl: 'clone 地址',
     username: '用户名',
-    password: '密码（token）',
+    tokenLabel: '密码（token）',
     ticketScope: '票据范围',
     ticketRead: 'read:repository（只读）',
     ticketWrite: 'write:repository（可写）',

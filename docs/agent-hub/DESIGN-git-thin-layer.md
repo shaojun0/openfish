@@ -25,7 +25,8 @@
 5. 收益：删除约 **1200 行**自有 git 逻辑（`git_identity.py` 795 行、`GitCommitReader` 174 行、
    `/git-credential` 及辅助 ~136 行、`GitIdentity` 模型 66 行、cli/指纹零头 ~60 行）外加 557 行
    门禁，再加一张表与 4 个环境变量；消灭缺陷 #3、#6、#7、#10–#13、#17 的成因；
-   `make gates` 全绿之外新增一条**边界门禁** `check_git_boundary.py`。
+   边界门禁 `check_git_boundary.py` 曾把这几条钉死，该脚本已随 `backend/scripts/`
+   门禁目录整体删除，人 / CI 的同一入口现在只剩 `make gates-frontend`（前端 smoke）。
 
 ---
 
@@ -304,7 +305,7 @@ DISABLE_REGISTRATION = true
 |---|---|---|
 | `backend/services/git_identity.py` | 795 行 | admin 铸票 + Fernet 落库模型整体废弃 |
 | `backend/models/agent_hub.py::GitIdentity` | ~65 行 | 同上 |
-| `backend/scripts/check_git_identity.py` | 557 行 | 被测对象消失 |
+| `backend/scripts/check_git_identity.py` | 557 行 | 被测对象消失（随后整个 `backend/scripts/` 门禁目录一并删除） |
 | `backend/routes/repos.py::git_credential` + `_git_identity_service` | ~120 行 | 端点废弃 |
 | `backend/services/repo_import.py::GitCommitReader` | 174 行 | openfish 不再碰 git 对象 |
 | `repo_import.py::_git_commits` / `fingerprint_source_paths` | ~35 行 | 同上 |
@@ -319,7 +320,7 @@ DISABLE_REGISTRATION = true
 | `backend/routes/repo_webhook.py` | E1–E7 修复 + delivery 去重 |
 | `backend/services/agent_runner.py` | `SubprocessRunnerAdapter` 的 clone/push 凭据改 env+helper；`assert_pushable` 保留；开 PR 用服务 token |
 | `backend/routes/repos.py` | 删 `/git-credential`；新增内部 `GET /internal/git-auth`；clone URL 展示沿用 `FORGEJO_PUBLIC_BASE_URL` |
-| `backend/config/hub.py` | Forgejo 配置从 `repo_import.CONFIG_ITEMS` 收敛成正式 settings 组（S4 待办） |
+| `backend/config/forgejo.py` | Forgejo 配置已从 `repo_import.CONFIG_ITEMS` 收敛成正式 settings 组（`ForgejoConfig`；`ImportConfig.from_settings()` 由它构造，`CONFIG_ITEMS` 已删除） |
 | `docker/nginx/nginx.conf` | `/git/` 加 `auth_request`；`location = /internal/git-auth { internal; }`；可选关闭 `/forgejo-api/` 对外 |
 | `docker/docker-compose.yml` | 环境变量增删（§6）；forgejo 服务配置调整 |
 | `docker/forgejo/forgejo.env.example` | 反向代理认证配置；`FORGEJO_IMAGE` tag 升级 |
@@ -334,7 +335,7 @@ DISABLE_REGISTRATION = true
 |---|---|
 | `backend/routes/internal.py`（或并入 `repos.py`） | `GET /internal/git-auth`：认证 → 返回 `X-Openfish-User/Email/Fullname`；对外 404 |
 | `backend/services/git_identity_map.py`（可选，~40 行） | 由 `user_id + external_id` 纯函数推导 Forgejo 用户名（`of-<id>-<sha256[:10]>`），**无状态、无落库** |
-| `backend/scripts/check_git_boundary.py` | 边界门禁（§10.2） |
+| `backend/scripts/check_git_boundary.py` | 边界门禁（§10.2）；**已随 `backend/scripts/` 门禁目录整体删除**，不再有离线脚本断言这几条边界 |
 | `docs/agent-hub/DESIGN-git-thin-layer.md` | 本文件 |
 
 ---
@@ -380,7 +381,9 @@ DISABLE_REGISTRATION = true
 | `repo_webhook` 响应语义 | 改 | 未知仓库 200、重复投递 200 `duplicate:true` |
 | runner `push`/`open_pr` 内部协议 | 不变 | `RunnerAdapter` Protocol 不动 |
 
-`openapi/` 与 `backend/scripts/check_contract.py`、`check_openapi.py` 必须同步，否则门禁红。
+`openapi/` 必须与视图、`description` 同步；原先做这件事的契约校验脚本（
+`backend/scripts/check_contract.py` / `check_openapi.py`）已随该目录整体删除，
+这条一致性现在没有仓库自带门禁兜底，只能靠评审。
 
 ---
 
@@ -438,7 +441,10 @@ DISABLE_REGISTRATION = true
 7. **停用用户**：`cli.py disable-user` 后，其 API Key 克隆私有仓库立刻 401。
 8. **泄漏扫描**：`ps`、`.git/config`、容器日志、`/work` 内均搜不到任何 token。
 
-### 10.2 新增边界门禁 `check_git_boundary.py`（离线）
+### 10.2 边界门禁 `check_git_boundary.py`（离线）
+
+> 该脚本已随 `backend/scripts/` 门禁目录整体删除，下面几条不再有自动断言，只作为
+> 设计约束与评审检查项保留。
 
 - `repo_import.py` 内不出现 `subprocess` / `GitCommitReader` / `--bare` / `git log`。
 - 全仓库不出现 `FORGEJO_ADMIN_TOKEN` / `GIT_IDENTITY_KEY` / `git_identities`。
@@ -446,10 +452,12 @@ DISABLE_REGISTRATION = true
 - `routes/repos.py` 无 `git-credential` 路由。
 - runner 的 clone URL 不携带凭据（凭据只从 env + helper 来）。
 
-### 10.3 既有门禁
+### 10.3 人 / CI 的入口（现状）
 
-`make gates`（`services.gates` 自动发现 + 前端 smoke）与 `make contract-gate` 全绿；
-`check_agent_repos.py` / `check_agent_runtime.py` 的断言随新协议更新。
+只剩根 `Makefile` 的 `make gates-frontend`（前端 smoke）——后端**不再有**仓库自带
+门禁：`backend/scripts/` 已整体删除，`make gates` / `make gates-backend` /
+`make contract-gate` 与 CI 的 backend job 一并删除。本设计的边界与契约一致性因此
+靠上表（§10.2）的评审检查项保证，不再有离线脚本。
 
 ---
 
@@ -462,7 +470,7 @@ DISABLE_REGISTRATION = true
 | **S3 Agent 凭据与闭环** | 服务账号 token；runner clone/commit/push；开 PR；`assert_pushable` + 分支保护；接线 worker（缺陷 #1/#2） | S1 | 中 |
 | **S4 Webhook 修复** | E1–E7 + delivery 去重 | 无 | 低 |
 | **S5 下游与文档** | DSH 插件 helper；`DEVELOPMENT.md` / `README.md` / `docker/forgejo/README.md` | S1 | 低 |
-| **S6 清理与门禁** | 删表迁移；env 废弃 warning；`check_git_boundary.py`；`check_git_identity.py` 删除 | S1–S4 | 低 |
+| **S6 清理与门禁** | 删表迁移；env 废弃 warning；边界门禁；旧门禁脚本删除（连同整个 `backend/scripts/` 目录） | S1–S4 | 低 |
 
 **建议先做 S1 的可行性实测（0.5 天）**：起一个临时 Forgejo（v16.0.1+），开反向代理认证，
 用 `curl -H 'X-WEBAUTH-USER: …'` 验证私有仓库 `/info/refs` 与 `git-receive-pack` 都能通过。

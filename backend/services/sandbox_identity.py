@@ -42,7 +42,6 @@ differently:
 
 from __future__ import annotations
 
-import logging
 import os
 import stat
 import tempfile
@@ -54,7 +53,6 @@ from typing import Any
 from config import settings
 from config.agent import AgentConfig
 
-logger = logging.getLogger("cpypiserver.sandbox_identity")
 
 # ── Configuration ────────────────────────────────────────────────────
 # The names are derived from :mod:`config.agent`, which owns these variables, so
@@ -303,20 +301,18 @@ def _sandbox_home(identity: SandboxIdentity) -> Path | None:
         raw = Path(tempfile.mkdtemp(prefix=SANDBOX_HOME_PREFIX, dir=str(base)))
         fd = _open_real_dir(raw)
     except OSError as exc:
-        logger.warning("cannot create a sandbox HOME under %s: %s", base, exc)
         return None
     try:
         home_stat = os.fstat(fd)
         if not stat.S_ISDIR(home_stat.st_mode) or home_stat.st_uid != os.geteuid():
-            logger.warning("refusing an unexpected sandbox HOME at %s", raw)
             return None
         try:
             os.fchown(fd, -1, identity.gid)
         except OSError as exc:
-            logger.debug("cannot chgrp the sandbox HOME %s: %s", raw, exc)
+            pass
         os.fchmod(fd, SANDBOX_HOME_MODE)
     except OSError as exc:
-        logger.warning("cannot prepare the sandbox HOME %s: %s", raw, exc)
+        pass
     finally:
         os.close(fd)
     _HOME_CACHE[key] = raw
@@ -358,11 +354,10 @@ def _relax(path: Path, gid: int) -> None:
     try:
         os.chown(path, -1, gid, follow_symlinks=False)
     except (OSError, NotImplementedError) as exc:
-        logger.debug("cannot chgrp %s: %s", path, exc)
+        pass
     try:
         st = os.lstat(path)
     except OSError as exc:
-        logger.debug("cannot stat %s: %s", path, exc)
         return
     if stat.S_ISLNK(st.st_mode):
         return
@@ -376,11 +371,11 @@ def _relax(path: Path, gid: int) -> None:
     try:
         os.chmod(path, mode)
     except OSError as exc:
-        logger.debug("cannot relax %s to %s: %s", path, oct(mode), exc)
+        pass
 
 
 def _walk_error(exc: OSError) -> None:
-    logger.debug("cannot walk work tree: %s", exc)
+    pass
 
 
 def _require_real_directory(path: Path) -> None:

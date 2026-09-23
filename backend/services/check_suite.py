@@ -26,7 +26,6 @@ writes a file either, so the whole invariant is unit-testable offline.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,7 +45,6 @@ from services.gates import (
     suite_fingerprint,
 )
 
-logger = logging.getLogger("cpypiserver.check_suite")
 
 #: The directory, relative to a repository root, that holds the versioned suite.
 CHECK_DIR_RELPATH = ".agent/checks"
@@ -54,7 +52,7 @@ CHECK_DIR_RELPATH = ".agent/checks"
 #: Manifest filenames accepted inside that directory (first match wins).
 CHECK_MANIFEST_NAMES: tuple[str, ...] = ("checks.yml", "checks.yaml")
 
-#: Script convention inside that directory, mirroring ``backend/scripts``.
+#: Script convention inside that directory: ``check_*.py``.
 CHECK_SCRIPT_GLOB = "check_*.py"
 
 #: Suite manifest schema version.
@@ -71,8 +69,8 @@ MANIFEST_VERSION = 1
 #: * every path a resolved (user) suite actually executes, plus the files that
 #:   *declare* how it runs (see :data:`SUITE_DECLARATION_NAMES`).  Freezing the
 #:   descriptor without freezing its entrypoints was the hole: a fix could
-#:   rewrite ``backend/scripts/check_lint.py`` or ``pyproject.toml`` and the
-#:   post-fix ``on_green`` re-run would execute the weakened suite.
+#:   rewrite ``check_lint.py`` or ``pyproject.toml`` and the post-fix
+#:   ``on_green`` re-run would execute the weakened suite.
 FIX_PROTECTED_PREFIXES: tuple[str, ...] = (CHECK_DIR_RELPATH,)
 FIX_PROTECTED_PATHS: tuple[str, ...] = (".agent/review-policy.yml",)
 
@@ -245,7 +243,6 @@ def _load_manifest(path: Path) -> CheckSuite:
     try:
         raw = _yaml_mapping(path.read_text(encoding="utf-8"))
     except Exception as exc:  # a broken manifest is a warning, not a crash
-        logger.warning("%s 解析失败：%s", path, exc)
         return CheckSuite(
             checks=[],
             source=SOURCE_AGENT_CHECKS,
@@ -254,7 +251,6 @@ def _load_manifest(path: Path) -> CheckSuite:
     try:
         manifest = CheckManifest.model_validate(dict(raw))
     except Exception as exc:
-        logger.warning("%s schema 不合法：%s", path, exc)
         return CheckSuite(
             checks=[],
             source=SOURCE_AGENT_CHECKS,
@@ -448,7 +444,7 @@ def _under(path: str, prefix: str) -> bool:
 def suite_script_paths(suite: "CheckSuite") -> set[str]:
     """Repo-relative script paths named on a resolved suite's ``argv``.
 
-    ``["python", "backend/scripts/check_lint.py"]`` yields that script; a bare
+    ``["python", "checks/check_lint.py"]`` yields that script; a bare
     ``pytest`` yields nothing (its configuration is covered by
     :data:`SUITE_DECLARATION_NAMES` instead).
     """

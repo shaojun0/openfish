@@ -1,11 +1,12 @@
-import { http } from './client'
+import { getJson, postJson, putJson } from './client'
 
 /**
  * Agent Hub API — the `docs/agent-hub/DEVELOPMENT.md` §5.3 REST surface.
  *
  * This module is deliberately thin, exactly like `./index.ts`: every function
- * hits the shared axios instance (`baseURL: /api/v1`, session cookie, the
- * common 401 redirect) and hands the raw JSON back.  Shaping the response for
+ * goes through the shared client's `getJson`/`postJson`/`putJson` helpers
+ * (`baseURL: /api/v1`, session cookie, the common 401 redirect) and hands the
+ * raw JSON back.  Shaping the response for
  * a table is the view's job; normalising it here would hide a contract change
  * from the page that has to deal with it.
  *
@@ -222,8 +223,7 @@ function clean(params) {
  * @returns {Promise<Repo[]|{items?: Repo[], repos?: Repo[], total?: number}>}
  */
 export async function fetchRepos(params = {}) {
-  const { data } = await http.get('/repos', { params: clean(params) })
-  return data
+  return getJson('/repos', { params: clean(params) })
 }
 
 /**
@@ -234,8 +234,7 @@ export async function fetchRepos(params = {}) {
  * @param {{slug?: string, name?: string, default_branch?: string, kind?: string, description?: string}} payload
  */
 export async function createRepo(payload) {
-  const { data } = await http.post('/repos', payload)
-  return data
+  return postJson('/repos', payload)
 }
 
 /**
@@ -249,7 +248,7 @@ export async function createRepo(payload) {
  * @returns {Promise<ImportJob>}
  */
 export async function importRepo(payload) {
-  const { data } = await http.post('/repos/import', payload)
+  const data = await postJson('/repos/import', payload)
   return asImportJob(data)
 }
 
@@ -259,8 +258,7 @@ export async function importRepo(payload) {
  * @returns {Promise<Repo>}
  */
 export async function fetchRepo(slug) {
-  const { data } = await http.get(`/repos/${repoPath(slug)}`)
-  return data
+  return getJson(`/repos/${repoPath(slug)}`)
 }
 
 /**
@@ -273,8 +271,7 @@ export async function fetchRepo(slug) {
  * @returns {Promise<object>}
  */
 export async function fetchRepoRunner(slug) {
-  const { data } = await http.get(`/repos/${repoPath(slug)}/runner`)
-  return data
+  return getJson(`/repos/${repoPath(slug)}/runner`)
 }
 
 /**
@@ -289,8 +286,7 @@ export async function fetchRepoRunner(slug) {
  * @returns {Promise<object>}
  */
 export async function fetchGitCredential(slug) {
-  const { data } = await http.get(`/repos/${repoPath(slug)}/git-credential`)
-  return data
+  return getJson(`/repos/${repoPath(slug)}/git-credential`)
 }
 
 /**
@@ -300,7 +296,7 @@ export async function fetchGitCredential(slug) {
  * @returns {Promise<RepoIssue[]|{items?: RepoIssue[], issues?: RepoIssue[], total?: number, page?: number, per_page?: number}>}
  */
 export async function fetchRepoIssues(slug, params = {}) {
-  const { data } = await http.get(`/repos/${repoPath(slug)}/issues`, {
+  const data = await getJson(`/repos/${repoPath(slug)}/issues`, {
     params: clean(params),
   })
   return data
@@ -313,7 +309,7 @@ export async function fetchRepoIssues(slug, params = {}) {
  * @returns {Promise<RepoIssue & {comments?: Array<{author?: string, body?: string, created_at?: string}>}>}
  */
 export async function fetchRepoIssue(slug, number) {
-  const { data } = await http.get(
+  const data = await getJson(
     `/repos/${repoPath(slug)}/issues/${encodeURIComponent(String(number))}`,
   )
   return data
@@ -325,8 +321,7 @@ export async function fetchRepoIssue(slug, number) {
  * @returns {Promise<ImportJob>}
  */
 export async function syncRepo(slug) {
-  const { data } = await http.post(`/repos/${repoPath(slug)}/sync`)
-  return data
+  return postJson(`/repos/${repoPath(slug)}/sync`)
 }
 
 /**
@@ -337,7 +332,7 @@ export async function syncRepo(slug) {
  * @returns {Promise<ImportJob>}
  */
 export async function fetchImportJob(jobId) {
-  const { data } = await http.get(`/imports/${encodeURIComponent(String(jobId))}`)
+  const data = await getJson(`/imports/${encodeURIComponent(String(jobId))}`)
   return asImportJob(data)
 }
 
@@ -351,7 +346,7 @@ export async function fetchImportJob(jobId) {
  * @returns {Promise<{items?: unknown[], results?: unknown[], truncated?: boolean}>}
  */
 export async function searchRepoContext(slug, params) {
-  const { data } = await http.get(`/repos/${repoPath(slug)}/context/search`, {
+  const data = await getJson(`/repos/${repoPath(slug)}/context/search`, {
     params: clean(params),
   })
   return data
@@ -381,8 +376,7 @@ export async function fetchFindingEvidence(slug, findingId, params = {}) {
  * @returns {Promise<Finding[]|{items?: Finding[], findings?: Finding[], total?: number}>}
  */
 export async function fetchFindings(params = {}) {
-  const { data } = await http.get('/findings', { params: clean(params) })
-  return data
+  return getJson('/findings', { params: clean(params) })
 }
 
 /**
@@ -391,8 +385,7 @@ export async function fetchFindings(params = {}) {
  * @param {number|string} id
  */
 export async function fetchFinding(id) {
-  const { data } = await http.get(`/findings/${encodeURIComponent(String(id))}`)
-  return data
+  return getJson(`/findings/${encodeURIComponent(String(id))}`)
 }
 
 /**
@@ -405,7 +398,7 @@ export async function fetchFinding(id) {
  * @param {{action: 'fix'|'acknowledge'|'wontfix'|'false_positive', owner?: string, due?: string, reason?: string, confirmed_by?: string}} payload
  */
 export async function decideFinding(id, payload) {
-  const { data } = await http.post(
+  const data = await postJson(
     `/findings/${encodeURIComponent(String(id))}/decide`,
     payload,
   )
@@ -422,7 +415,7 @@ export async function decideFinding(id, payload) {
  * @returns {Promise<{finding_id: number, task_id: number|null, kind: string, queued: boolean}>}
  */
 export async function fixFinding(id, payload = {}) {
-  const { data } = await http.post(
+  const data = await postJson(
     `/findings/${encodeURIComponent(String(id))}/fix`,
     payload,
   )
@@ -436,8 +429,7 @@ export async function fixFinding(id, payload = {}) {
  * @returns {Promise<AgentTask[]|{items?: AgentTask[], tasks?: AgentTask[], total?: number}>}
  */
 export async function fetchAgentTasks(params = {}) {
-  const { data } = await http.get('/agent/tasks', { params: clean(params) })
-  return data
+  return getJson('/agent/tasks', { params: clean(params) })
 }
 
 /**
@@ -446,20 +438,17 @@ export async function fetchAgentTasks(params = {}) {
  * @returns {Promise<AgentTask>}
  */
 export async function createAgentTask(body) {
-  const { data } = await http.post('/agent/tasks', body)
-  return data
+  return postJson('/agent/tasks', body)
 }
 
 /** @param {number|string} id @returns {Promise<AgentTask>} */
 export async function retryAgentTask(id) {
-  const { data } = await http.post(`/agent/tasks/${encodeURIComponent(String(id))}/retry`)
-  return data
+  return postJson(`/agent/tasks/${encodeURIComponent(String(id))}/retry`)
 }
 
 /** @param {number|string} id @returns {Promise<AgentTask>} */
 export async function cancelAgentTask(id) {
-  const { data } = await http.post(`/agent/tasks/${encodeURIComponent(String(id))}/cancel`)
-  return data
+  return postJson(`/agent/tasks/${encodeURIComponent(String(id))}/cancel`)
 }
 
 /**
@@ -471,8 +460,7 @@ export async function cancelAgentTask(id) {
  * @returns {Promise<{task_id?: number, status?: string|null, result_ref?: string|null, log_ref?: string|null}>}
  */
 export async function fetchAgentTaskLog(id) {
-  const { data } = await http.get(`/agent/tasks/${encodeURIComponent(String(id))}/log`)
-  return data
+  return getJson(`/agent/tasks/${encodeURIComponent(String(id))}/log`)
 }
 
 // ── Review policy (§7) ──────────────────────────────────────────────
@@ -483,8 +471,7 @@ export async function fetchAgentTaskLog(id) {
  * @param {string} slug
  */
 export async function fetchPolicy(slug) {
-  const { data } = await http.get(`/policies/${repoPath(slug)}`)
-  return data
+  return getJson(`/policies/${repoPath(slug)}`)
 }
 
 /**
@@ -495,6 +482,5 @@ export async function fetchPolicy(slug) {
  * @param {unknown} policy
  */
 export async function savePolicy(slug, policy) {
-  const { data } = await http.put(`/policies/${repoPath(slug)}`, policy)
-  return data
+  return putJson(`/policies/${repoPath(slug)}`, policy)
 }

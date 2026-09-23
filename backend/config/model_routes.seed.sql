@@ -35,13 +35,15 @@
 -- the route as `api_key_source: "none"` rather than pretending it is configured.
 --
 -- Each route is classified on two independent axes:
---   provider  the wire format  — openai / mineru / anthropic
+--   provider  the wire format  — openai / anthropic
 --   kind      the model function — chat / completion / embedding / rerank /
 --                                  ocr / asr / tts
 -- A downstream DSH registers only chat / completion routes as LLM providers;
 -- the rest are registry entries for other consumers.  `kind` defaults from the
--- protocol (openai, anthropic → chat; mineru → ocr) but is written out here so
--- the seed says exactly what it means.
+-- protocol (openai, anthropic → chat) but is written out here so the seed says
+-- exactly what it means.  There is no separate protocol for a document parser:
+-- MinerU speaks the OpenAI format, so an OCR route is `provider = 'openai'` with
+-- `kind = 'ocr'`.
 
 -- The intranet default model: its `aliases` include `default`, which is what a
 -- downstream DSH adopts as the agent default.
@@ -69,7 +71,7 @@ VALUES
 ON CONFLICT (name) DO NOTHING;
 
 -- Disabled examples, kept as templates: one non-chat kind (never registered as
--- an LLM provider downstream) and one non-openai protocol.
+-- an LLM provider downstream) and one non-chat wire format.
 INSERT INTO model_routes
   (name, provider, kind, base_url, path, model, api_key,
    aliases, enabled, description, created_at, updated_at)
@@ -85,9 +87,9 @@ INSERT INTO model_routes
   (name, provider, kind, base_url, path, model, api_key,
    aliases, enabled, description, created_at, updated_at)
 VALUES
-  ('mineru-ocr', 'mineru', 'ocr', 'http://10.0.0.12:8000',
-   '/file_parse', 'mineru', '',
+  ('mineru-ocr', 'openai', 'ocr', 'http://10.0.0.12:8000',
+   '/v1/chat/completions', 'mineru', '',
    '["ocr"]', false,
-   '文档解析 / OCR 示例，尚未上线。mineru 协议本身就是 OCR 功能，kind 缺省即为 ocr。',
+   '文档解析 / OCR 示例，尚未上线。MinerU 走 OpenAI 格式，因此 provider=openai、kind=ocr；path 按该服务的 OpenAI 兼容端点填写。',
    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 ON CONFLICT (name) DO NOTHING;

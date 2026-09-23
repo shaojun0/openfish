@@ -50,7 +50,6 @@ app.py                     创建 Flask 应用，禁用内置 static handler
 | 模型 | `models/` | SQLAlchemy 表：users / roles / permissions / user_roles / role_permissions / api_keys / stats |
 | 描述 | `openapi/` | OpenAPI 3.1 元数据注册表、spec 生成、渲染器 |
 | 模板 | `static/<生态>/*.html` | **机器面** Jinja 模板（`pip`/`uv`/`nvm` 直接解析，不跑 JS），由 Flask 自带模板加载器（`template_folder="static"`）渲染，**不对外公开** |
-| 门禁 | `scripts/check_*.py` | 13 个离线回归门禁 |
 
 ### 代码约定（熵减规则）
 
@@ -65,7 +64,7 @@ app.py                     创建 Flask 应用，禁用内置 static handler
 | **模块头** | 每个模块以 `from __future__ import annotations` 开头，其后先标准库、再三方、再本仓库，各段内部按字母序。 |
 | **类型写法** | 一律 `X \| None`，不使用 `typing.Optional`；公共函数写全签名。 |
 | **日志** | 模块级 `logger = logging.getLogger("cpypiserver.<域>")`，不使用 `log` / `_log`。 |
-| **依赖** | `pyproject.toml` 里只留真正被 import 的包；`cryptography` / `pyjwt` 已因无人使用而删除。`scripts/check_lint.py`（pyflakes）把这套约定变成可执行门禁：未定义名、死导入一律失败。 |
+| **依赖** | `pyproject.toml` 里只留真正被 import 的包；`cryptography` / `pyjwt` 已因无人使用而删除。 |
 | **契约稳定** | `/openapi.json` 的 `components.schemas` 顺序是确定的（`_build_schemas` 对引用集合排序），因此契约变更在 diff 里只显示真正改动的行。 |
 | **分区注释** | 长模块用 `# ── 标题 ────…` 分段，与既有模块保持一致的视觉节奏。 |
 | **模板归属** | 机器面 Jinja 模板写在 `static/<生态>/`，用 `render_template("<生态>/<文件>.html", …)` 渲染；浏览器页面属于 `frontend/` 的 Vue SPA，唯一例外是设备授权页（`routes/device.py` 内的自包含字符串模板）。 |
@@ -96,7 +95,7 @@ app.py                     创建 Flask 应用，禁用内置 static handler
 
 | 根 | 含义 | 谁用它 |
 | --- | --- | --- |
-| `BACKEND_ROOT` = `backend/` | 代码、模板、本机状态 | `packages/` `data/` `certs/` `config/model_routes.json` `static/<生态>/` |
+| `BACKEND_ROOT` = `backend/` | 代码、模板、本机状态 | `packages/` `data/` `certs/` `config/model_routes.seed.sql` `static/<生态>/` |
 | `PROJECT_ROOT` = 仓库根 | 部署包与两个构建单元 | `docker/` `backend/` `frontend/` `integrations/` |
 | `CATALOGS_ROOT` = `docker/` | 操作员投放的制品库 | `tools/` `npm/` `node-builds/` `docker-images/` `debian/` `docs/` `python-build-standalone/` |
 
@@ -231,7 +230,7 @@ compose 文件里。随仓库提交的样例目录移到了 `docker/examples/`�
 # ── 后端（含依赖）──────────────────────────────────────────────
 cd backend
 python -m venv .venv && source .venv/bin/activate
-pip install -e '.[dev]'
+pip install -e .
 cp .env.example .env
 python cli.py create-admin <账号>
 python app.py                       # http://127.0.0.1:9090
@@ -243,15 +242,13 @@ npm run dev                         # http://127.0.0.1:5173，代理到后端
 npm run build                       # → frontend/dist
 npm run smoke                       # jsdom 全路由冒烟
 
-# ── 门禁（14 个，均可从任意目录运行）───────────────────────────
-backend/.venv/bin/python backend/scripts/check_openapi.py
-#   check_openapi / check_auth_guards / check_auth_disabled / check_rbac /
-#   check_database / check_markdown / check_permission_catalog /
-#   check_permission_labels / check_device_flow / check_npm_proxy /
-#   check_docker_proxy / check_debian_proxy / check_debian_offline / check_lint
-#   （pyflakes：未定义名 / 死导入）
-#   另有 check_contract.py，需要对着活服务跑（--base-url + --api-key）
-#   check_database.py 还支持 --url <PostgreSQL URL> --yes，对任一后端回归
+# ── 校验套件 ───────────────────────────────────────────────────
+# 本仓库不再自带 backend/scripts/check_*.py。一次改动的校验套件按
+#   .agent/checks/ → .agent/review-policy.yml 的 checks: → manifest 自动发现
+#   （package.json scripts / pytest·ruff·mypy / go.mod / Cargo.toml / Makefile）
+# 的顺序解析，解析不到就是 unverified（不是绿）。执行与归一化在
+# services/gates.py（resolve_suite → run_suite → GateSummary）。
+# 根目录 Makefile 现在只有 make gates-frontend（前端 smoke）。
 
 # ── 容器（需要 Docker Compose v2；仓库自带的 docker-compose 1.25 解析不了）──
 cd docker
@@ -269,12 +266,9 @@ docker build -t openfish-frontend frontend/
 
 ## 验证证据
 
-* **13 个离线门禁全部通过**（从仓库根运行，与迁移前基线一致；`check_openapi`
-  现在还会执行完整的 OpenAPI 3.1 结构校验，`check_lint` 用 pyflakes
-  兜住"改名后漏改调用点"这类只有单条路由才炸的静默错误，新增的
-  `check_database` 覆盖引擎选择、旧库补列迁移与目标后端的完整往返）。
+* **前端冒烟**：`npm run smoke` 全路由渲染无 Vue 警告（`make gates-frontend`）。
 * **PostgreSQL 后端端到端验证**：用真实 `postgres:16-alpine`（16.15）实例，
-  `check_database.py --url postgresql+psycopg://…` 与 `check_rbac.py`
+  当时用 `check_database.py --url postgresql+psycopg://…` 与 `check_rbac.py`
   （`DATABASE_URL` 指向该实例）全部通过——建表、superuser 冷启动、用户 /
   角色 / 权限、API key 的创建与校验、统计计数自增、删除级联，行为与 SQLite
   一致；`/health` 报告 `{"dialect": "postgresql", "driver": "psycopg"}`。
@@ -291,7 +285,8 @@ docker build -t openfish-frontend frontend/
   `/.well-known/api-catalog` 200、同名前缀的机器面目录匿名 401 / 携带 Basic
   凭据 200、`POST /` 命中后端、`/auth` 回调命中后端、SPA 资源 200 且带
   `Cache-Control: public, immutable`。
-* **后端镜像内可跑门禁**：容器内执行 `scripts/check_auth_guards.py` 通过。
+* **后端镜像可正常启动并响应**：容器内 `/health`、`/openapi.json` 与匿名 401
+  的机器面目录都按预期工作。
 * **前端冒烟**：`npm run smoke` 全路由渲染无 Vue 警告。
 
 ---
@@ -303,8 +298,7 @@ docker build -t openfish-frontend frontend/
    users / roles / permissions / api_keys / api_key_stats 整体搬到服务端，
    没有"两张表在 SQLite、三张在 PostgreSQL"的混合模式（跨库删除无法回滚）。
    切换不搬运数据：新库首次启动建空表，账号与角色用 `cli.py` 重建，API key
-   只能重发（库里只有 SHA-256）。`scripts/check_database.py` 对任一后端跑
-   完整的 bootstrap / 用户 / 角色 / key / 统计回归。
+   只能重发（库里只有 SHA-256）。
    `docker-compose.postgres.yml` 只是让 backend 等 db 健康检查的覆盖层；
    应用自身有最多 60s 的连接重试，不用它也起得来。
 2. **SPA 壳匿名可取。** 见上文"安全取舍"，恢复旧行为的改法已写在边缘配置注释里。

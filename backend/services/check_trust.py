@@ -35,7 +35,6 @@ Everything in this module is pure: it takes already-computed
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -50,7 +49,6 @@ from services.gates import (
     render_summary,
 )
 
-logger = logging.getLogger("cpypiserver.check_trust")
 
 #: The assurance ladder, weakest first.
 ASSURANCE_L0 = "L0"
@@ -162,7 +160,6 @@ def check_l3_eligible(
         if record.flake_rate > criteria.max_flake_rate:
             return False
         if criteria.require_never_weakened and record.weakened:
-            logger.debug("L3: %s has a recorded weakening run", check_id)
             return False
     return True
 

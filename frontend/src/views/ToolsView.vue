@@ -44,7 +44,7 @@ const visibleCategories = computed<ToolCategory[]>(() => {
 })
 
 function matches(tool: ToolEntry, category: ToolCategory, needle: string): boolean {
-  return [tool.name, tool.filename, tool.description ?? '', category.key, ...tool.tags]
+  return [tool.name, tool.filename, tool.description ?? '', category.slug, ...tool.tags]
     .join(' ')
     .toLowerCase()
     .includes(needle)
@@ -158,7 +158,7 @@ onMounted(load)
       <div v-else v-loading="loading" class="categories">
         <el-card
           v-for="category in visibleCategories"
-          :key="category.key"
+          :key="category.slug"
           class="category"
           shadow="never"
         >

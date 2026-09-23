@@ -18,13 +18,10 @@ from __future__ import annotations
 
 import errno
 import json
-import logging
 import os
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable
-
-logger = logging.getLogger("cpypiserver.fileio")
 
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -39,7 +36,6 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
         except OSError as exc:
             if exc.errno not in (errno.EBUSY, errno.EXDEV):
                 raise
-            logger.debug("cannot rename onto %s (%s); rewriting in place", path, exc)
             with open(path, "wb") as fh:
                 fh.write(data)
     finally:
@@ -108,12 +104,10 @@ def read_json(path: Path, default: Any = None) -> Any:
     except FileNotFoundError:
         return default
     except OSError as exc:
-        logger.warning("cannot read %s: %s", path, exc)
         return default
     try:
         return json.loads(text)
     except ValueError as exc:
-        logger.warning("ignoring malformed %s: %s", path, exc)
         return default
 
 

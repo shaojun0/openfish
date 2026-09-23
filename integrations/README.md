@@ -34,8 +34,7 @@ DSH（DeepSeek Harness）的**企业内网模式**插件。它让 DSH：
 | 身份探测 | `GET /api/v1/session` | 匿名（返回 `authenticated:false`） |
 
 这些接口由 `backend/routes/device.py`、`backend/services/device_auth.py` 和
-`backend/services/model_routes.py::resolve` 提供，回归门槛是
-`backend/scripts/check_device_flow.py`。
+`backend/services/model_routes.py::resolve` 提供。
 
 ### 安装
 

@@ -25,7 +25,6 @@ sits *below* the blueprint-wide ``admin:roles`` guard and the per-view
 
 from __future__ import annotations
 
-import logging
 
 from flask import jsonify
 from flask_openapi3 import APIBlueprint, validate_request
@@ -43,7 +42,6 @@ from schemas import (
 from services.authz import AuthzService
 
 access_bp = APIBlueprint("access", __name__)
-logger = logging.getLogger("cpypiserver.access")
 
 #: Statuses every route here can return, on top of the specific ones.
 _PROTECTED = ("401", "403", "500")
@@ -140,7 +138,6 @@ def create_role(body: CreateRoleRequest):
         )
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
-    logger.info("access: %s created role %r", _actor(), role["code"])
     return jsonify(role), 201
 
 
@@ -159,7 +156,6 @@ def delete_role(role_id: int):
         _authz().delete_role(role_id)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
-    logger.info("access: %s deleted role id=%s", _actor(), role_id)
     return jsonify({"deleted": role_id})
 
 
@@ -188,8 +184,6 @@ def set_role_permissions(role_id: int, body: SetRolePermissionsRequest):
     role = next((r for r in authz.list_roles() if r["id"] == role_id), None)
     if role is None:
         raise BadRequestError("role not found")
-    logger.info("access: %s set role %r permissions to %s",
-              _actor(), role["code"], sorted(role["permissions"]))
     return jsonify(role)
 
 
@@ -252,7 +246,7 @@ def grant_role(user_id: int, body: GrantRoleRequest):
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     if granted:
-        logger.info("access: %s granted role %r to user id=%s", _actor(), code, user_id)
+        pass
     return jsonify({"user_id": user_id, "role": code, "granted": granted})
 
 
@@ -266,8 +260,7 @@ def grant_role(user_id: int, body: GrantRoleRequest):
 def revoke_role(user_id: int, role_code: str):
     revoked = _authz().revoke_role(user_id, role_code)
     if revoked:
-        logger.info("access: %s revoked role %r from user id=%s",
-                  _actor(), role_code, user_id)
+        pass
     return jsonify({"user_id": user_id, "role": role_code, "revoked": revoked})
 
 
@@ -304,6 +297,4 @@ def set_superuser(user_id: int, body: SetSuperuserRequest):
         authz.set_superuser(user_id, value)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
-    logger.warning("access: %s set is_superuser=%s on user id=%s",
-                 _actor(), value, user_id)
     return jsonify({"user_id": user_id, "is_superuser": value})

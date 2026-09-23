@@ -5,6 +5,11 @@
 > `backend/routes/repos.py` 是 S6 的交付物（已改），列在第 ③ 节仅供对齐与复核。
 > 锚点都用内容而不是行号（行号会漂移）。
 
+> ⚠ 现状更新：下方提到的 `backend/scripts/` 门禁目录已整体删除（连同 Makefile 的
+> `make gates` / `contract-gate` 目标与 CI 的 backend job），因此本文里的门禁命令与
+> 「新增门禁」清单已失效，仅作为当时的交付记录保留。校验套件现在按 `.agent/checks/`
+> → policy `checks:` → manifest 自动发现解析。
+
 ---
 
 ## ① `docs/agent-hub/DEVELOPMENT.md` §13 开放问题第 1 条

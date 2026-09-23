@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json as _json
-import logging
 import re
 import tempfile
 from pathlib import Path
@@ -26,7 +25,6 @@ from schemas import FormatQuery, PyPIUploadForm, SimpleProjectPath
 from services.paths import contained
 from services.validation import validate_file
 
-logger = logging.getLogger("cpypiserver")
 pypi_bp = APIBlueprint("pypi", __name__, doc_ui=False)
 
 

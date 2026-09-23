@@ -275,7 +275,7 @@ onMounted(load)
             </el-button>
           </div>
         </el-descriptions-item>
-        <el-descriptions-item :label="t('repoGitPreview.password')">
+        <el-descriptions-item :label="t('repoGitPreview.tokenLabel')">
           <div class="repo-git-preview__line">
             <code class="repo-git-preview__code">{{ ticket.password }}</code>
             <el-button link type="primary" @click="copy(ticket?.password, 'password')">

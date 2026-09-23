@@ -40,8 +40,8 @@ owns the catalogue rows; S1 owns the guards that use them.
 ⚠ Decorator order is load-bearing, as everywhere else: the route decorator —
 ``@repo_bp.route`` for a view that binds nothing, ``@repo_bp.get``/``post``/
 ``patch``/``put`` where the view binds request input — must be the topmost line
-so the guard is applied before registration.  ``scripts/check_auth_guards.py``
-fails the build otherwise.
+so the guard is applied before registration.  A guard written above the route
+decorator registers nothing and never runs.
 
 Seven views bind their request input as view parameters instead of reading
 ``request`` by hand, which is what ``@validate_request()`` — placed *below* the
@@ -58,7 +58,6 @@ value can become the binding's ``400``.
 from __future__ import annotations
 
 import json
-import logging
 from datetime import datetime
 
 from flask import current_app, jsonify, request
@@ -82,7 +81,6 @@ from schemas import (
 )
 from services import git_identity, repo_import, repo_runner
 
-logger = logging.getLogger("cpypiserver.routes.repos")
 
 # `doc_ui=False` for the same reason `app.py` passes it: the request-binding half
 # of flask-openapi3 is all this module uses, and the library's own document is
@@ -90,8 +88,9 @@ logger = logging.getLogger("cpypiserver.routes.repos")
 repo_bp = APIBlueprint("repos", __name__, doc_ui=False)
 
 #: §5.1 permission points come from ``auth.permissions`` — one definition, one
-#: import.  ``check_permission_catalog.py`` resolves a guard argument by name
-#: against that module, so a local re-declaration here would be unresolvable.
+#: import.  Every built-in point must be explicitly classified there, and a
+#: guard argument is resolved by name against that module, so a local
+#: re-declaration here would be unresolvable.
 
 #: Page size ceiling.  A repo may hold 20 000 mirrored issues; an uncapped
 #: ``?per_page=`` is how one GET turns into an OOM.
@@ -592,7 +591,6 @@ def _render_markdown(body: str) -> str | None:
         try:
             return str(renderer(body))
         except Exception as exc:  # noqa: BLE001 - rendering is optional
-            logger.warning("markdown render failed for issue body: %s", exc)
             return None
     return None
 
@@ -797,7 +795,6 @@ def create_repo(body: RepoCreateRequest):
     except IntegrityError as exc:
         _session().rollback()
         raise _conflict(exc, slug) from exc
-    logger.info("local repo %s created (kind=%s)", slug, kind)
     return jsonify(repo_to_dict(repo, include_last_import=False)), 201
 
 
@@ -1127,7 +1124,6 @@ def update_runner(slug: str, body: RunnerPatchRequest):
         runner = _runner_service().update(repo.id, **changes)
     except repo_runner.RepoRunnerError as exc:
         raise BadRequestError(str(exc)) from exc
-    logger.info("runner %s updated for repo %s", runner.id, slug)
     return jsonify(runner.to_dict())
 
 
@@ -1181,7 +1177,6 @@ def put_runner_credential(slug: str, body: RunnerCredentialRequest):
         # gap: 503, and this module never falls back to a plaintext write.  The
         # response deliberately quotes neither the token nor the upstream detail.
         raise PypiError("runner 凭据未写入", status_code=503) from exc
-    logger.info("runner credential stored for repo %s", slug)
     return jsonify(runner.to_dict())
 
 
@@ -1205,7 +1200,6 @@ def put_runner_credential(slug: str, body: RunnerCredentialRequest):
 def delete_runner_credential(slug: str):
     repo = _repo_or_404(slug)
     runner = _runner_service().clear_credential(repo.id)
-    logger.info("runner credential cleared for repo %s", slug)
     return jsonify(runner.to_dict())
 
 

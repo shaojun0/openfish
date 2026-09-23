@@ -32,7 +32,7 @@ can read without the SPA. Templates live under ``static/<ecosystem>/``.
 
 ⚠ Decorator order is load-bearing (see ``routes/python_build.py``): the route
 decorator must be the topmost line, or the guard is applied after registration
-and never runs. ``scripts/check_auth_guards.py`` enforces this.
+and never runs.  The guard must be in effect before the route registers.
 
 The write routes bind their input as view parameters instead of reading
 ``request`` by hand: ``body: ModelRouteRequest`` on the model-route writes and
@@ -40,13 +40,12 @@ The write routes bind their input as view parameters instead of reading
 the guard, so an unauthorized write is answered ``401``/``403`` and never by the
 binder. The model-route bodies are dumped with ``exclude_unset=True`` because
 ``services.model_routes`` distinguishes *absent* from *null* — an omitted
-``kind``/``api_key`` keeps the stored value, an explicit null does not — and
-``scripts/check_request_binding.py`` pins that.
+``kind``/``api_key`` keeps the stored value, an explicit null does not — and that
+distinction is part of the wire contract, so it must not change.
 """
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 from flask import (
@@ -69,7 +68,6 @@ from schemas import ModelRouteProbeRequest, ModelRouteRequest, ToolUploadForm
 from services import hub, hub_upload, model_routes
 from services.sealing import SealingKeyMissing
 
-logger = logging.getLogger("cpypiserver.hub")
 
 hub_bp = APIBlueprint("hub", __name__)
 
@@ -122,7 +120,14 @@ _HEALTH_SCHEMA = {
         },
         "http_status": {"type": ["integer", "null"]},
         "latency_ms": {"type": ["integer", "null"]},
-        "url": {"type": "string", "description": "The exact URL that was probed"},
+        "url": {
+            "type": "string",
+            "description": (
+                "The exact URL that was probed — the endpoint's model listing "
+                "(`{base_url}/models`, or `{root}/v1/models` for `anthropic`), "
+                "not the route's inference `path`"
+            ),
+        },
         "error": {"type": ["string", "null"]},
         "checked_at": {"type": ["string", "null"]},
     },
@@ -175,7 +180,13 @@ _MODEL_ROUTE_SCHEMA = {
         },
         "model": {"type": "string"},
         "aliases": {"type": "array", "items": {"type": "string"}},
-        "path": {"type": "string"},
+        "path": {
+            "type": "string",
+            "description": (
+                "Inference endpoint below `base_url`, for the client that posts "
+                "conversations; the probe lists models instead and never calls it"
+            ),
+        },
         "enabled": {"type": "boolean"},
         "description": {"type": ["string", "null"]},
         "health": {
@@ -441,7 +452,7 @@ def upload_tool(form: ToolUploadForm):
         "read from the `model_routes` table. An empty table yields an empty "
         "list rather than an error, so the panel renders on a fresh install.\n\n"
         "Every route is classified on two independent axes: `provider` is the "
-        "wire format (`openai` / `mineru` / `anthropic`) and `kind` is the model "
+        "wire format (`openai` / `anthropic`) and `kind` is the model "
         "function (`chat` / `completion` / `embedding` / `rerank` / `ocr` / "
         "`asr` / `tts`). A route that names no `kind` falls back to its "
         "protocol default, so the table classifies correctly even for a row "
@@ -451,7 +462,9 @@ def upload_tool(form: ToolUploadForm):
         "it is configured (`plaintext` and `unreadable` are the two states worth "
         "acting on). Each route may carry the "
         "result of the last connectivity probe under `health` (see "
-        "`POST /api/v1/models/{name}/check`)."
+        "`POST /api/v1/models/{name}/check`); a probe lists the endpoint's models "
+        "through the OpenAI client, so it exercises the credential as well as the "
+        "connection."
     ),
     tags=["Hub"],
     responses={
@@ -523,7 +536,6 @@ def _write_failed(exc: Exception) -> PypiError:
     attacker would otherwise have to guess.  The operator still gets the detail
     — from the log, where it belongs.
     """
-    logger.error("cannot write the model-route table: %s", exc)
     return PypiError(
         "无法写入模型路由表（数据库不可写或连接中断）；详见服务日志",
         status_code=500,
@@ -541,7 +553,6 @@ def _no_sealing_key(exc: Exception) -> PypiError:
     fine, and the honest answer is "this box cannot store a key right now"
     rather than a 400 that blames the caller — or, worse, a plaintext row.
     """
-    logger.error("refusing to store a model-route API key: %s", exc)
     return PypiError(str(exc), status_code=500)
 
 
@@ -564,7 +575,8 @@ def _remember(route: dict) -> dict:
     summary="Add a model route",
     description=(
         "Validates one route, inserts it into the `model_routes` table and "
-        "immediately probes its URL for reachability. `name` and `description` "
+        "immediately probes it by listing the endpoint's models. `name` and "
+        "`description` "
         "are mandatory; `api_key` may be empty. `provider` names the wire format "
         "and `kind` the model function (defaulting by protocol when omitted). "
         "A non-empty `api_key` is sealed with `MODEL_ROUTE_KEY` before it is "
@@ -690,7 +702,10 @@ def delete_model_route(name: str):
     description=(
         "Runs the same connectivity check the create/update endpoints run, but "
         "against the request body instead of a stored route — the routing "
-        "panel's “检测” button uses it while a row is still being edited. "
+        "panel's “检测” button uses it while a row is still being edited. It asks "
+        "the endpoint for its model list through the OpenAI client, which proves "
+        "reachability and exercises the credential without sending an inference "
+        "request. "
         "`base_url` is the only required field. Nothing is written. Requires "
         "`model:write`."
     ),

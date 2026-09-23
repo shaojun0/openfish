@@ -30,14 +30,12 @@ environment, and the runner redacts it from logs and result.json.  This module
 never logs it and never reads ``FORGEJO_ADMIN_TOKEN``.
 
 Everything external is injectable (``session_factory``, ``forgejo_client``,
-``review_command``, …), so ``scripts/check_agent_runtime.py`` proves the wiring
-offline with fakes.
+``review_command``, …), so the whole wiring can be exercised offline with fakes.
 """
 
 from __future__ import annotations
 
 import json
-import logging
 import shlex
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -88,7 +86,6 @@ from services.sandbox_identity import (
     untrusted_popen_kwargs,
 )
 
-logger = logging.getLogger("cpypiserver.agent_worker")
 
 #: The headless command a deployment configures to ask a model for findings.
 #: Empty (the default) makes every review task fail loudly — never "done".  The
@@ -463,10 +460,6 @@ def build_search_fn(
             finally:
                 session.close()
         except Exception as exc:  # noqa: BLE001 - search is best-effort
-            logger.warning(
-                "context search unavailable for finding %r: %s",
-                finding.get("rule_id"), exc,
-            )
             return finding
         return _attach_evidence(finding, payload.get("items") or [])
 
@@ -639,11 +632,6 @@ def _make_ingest(
                 run.findings_new = int(summary.get("new", 0) or 0)
                 run.findings_matched = int(summary.get("matched", 0) or 0)
                 session.commit()
-            logger.info(
-                "agent task %s: findings ingested (new=%s matched=%s reactivated=%s)",
-                task_id, summary.get("new"), summary.get("matched"),
-                summary.get("reactivated"),
-            )
         finally:
             session.close()
 
@@ -695,7 +683,6 @@ def _record_pr_link(
             session.commit()
     except Exception as exc:  # noqa: BLE001 - a link is not worth a failed task
         session.rollback()
-        logger.warning("could not record the PR link for task %s: %s", task_id, exc)
     finally:
         session.close()
 
@@ -818,13 +805,8 @@ def record_check_artifacts(
                     base_sha=task.commit_sha,
                 )
         session.commit()
-        logger.info(
-            "agent task %s: recorded %d check run(s), curator=%s",
-            task.task_id, len(records), bool(report),
-        )
     except Exception as exc:  # noqa: BLE001 - an index failure is not a task failure
         session.rollback()
-        logger.warning("could not record check artifacts for task %s: %s", task.task_id, exc)
     finally:
         session.close()
 
@@ -863,11 +845,6 @@ def build_handler(
         # review-only task, which never authenticates for a write, still runs.
         git_token = loaded.credential.token if loaded.credential is not None else ""
         run_id = _open_review_run(claimed, task, sessions)
-        logger.info(
-            "agent task %s: repo=%s kind=%s sha=%s run=%s runner_credential=%s",
-            claimed.id, slug, task.kind, task.commit_sha[:12] or "<default-branch>", run_id,
-            loaded.credential.source if loaded.credential is not None else "none",
-        )
         sink = DbTaskSink(
             ingest=_make_ingest(int(claimed.repo_id), run_id, sessions),
             # The queue Worker owns running → done|failed so retry, back-off and
@@ -924,7 +901,6 @@ def _resolve_model_env(
     try:
         return resolve_model_env(session, route=route)
     except Exception as exc:  # noqa: BLE001 - review step fails loudly if it matters
-        logger.warning("模型路由解析失败：%s", exc)
         return {}
     finally:
         session.close()

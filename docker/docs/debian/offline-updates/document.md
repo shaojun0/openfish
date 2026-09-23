@@ -157,6 +157,12 @@ curl -fsS -H "Authorization: Bearer $OPENFISH_API_KEY" \
   `skipped_packages` 中，而不是悄悄进包。
 - **导入是原子的**：先整体解包校验，全部通过才写入 `DEBIAN_DIR`；任一文件失败
   则一个字节都不写。重复导入同一离线包时，摘要一致的包记为跳过。
+- **导入不信任离线包**：解包前先逐成员判定——目录与普通文件之外（软链、硬链、
+  设备节点、FIFO）直接拒绝整个包而不是跳过，成员路径必须落在暂存目录内；随后
+  再交给标准库 `tarfile` 的 `data` 过滤器复核一遍，并剥掉 setuid/setgid 与
+  组/其他写位。解压后的总大小与成员数也在这一步封顶（见下一节的
+  `DEBIAN_OFFLINE_MAX_MB`），压缩炸弹在写出第一个字节之前就被拒绝。判定与门禁
+  见 `docs/security/bundle-import-hardening.md`。
 - 导入后 `.deb` 会同时落在 `pool/...`（镜像布局）和仓库根目录（硬链接，供扁平
   `/debian/Packages` 索引使用），因此两种 apt 接入方式都能立即看到新包。
 
@@ -168,7 +174,7 @@ curl -fsS -H "Authorization: Bearer $OPENFISH_API_KEY" \
 | `DEBIAN_COMPONENTS` | `main` | 快照枚举的组件 |
 | `DEBIAN_ARCHES` | `amd64` | 快照枚举的架构 |
 | `DEBIAN_OFFLINE_DIR` | `<backend>/data/offline/debian` | 构建出的离线包存放目录 |
-| `DEBIAN_OFFLINE_MAX_MB` | `4096` | 单个离线包（及一次下载总量）上限，0 表示不限 |
+| `DEBIAN_OFFLINE_MAX_MB` | `4096` | 单个离线包（及一次下载总量）上限；导入侧同样按它封顶解压后的总大小；0 表示不限 |
 | `DEBIAN_OFFLINE_RECOMMENDS` | `false` | 是否把 `Recommends` 纳入依赖闭包 |
 
 ## 八、常见问题

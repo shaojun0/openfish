@@ -1,4 +1,8 @@
-import axios, { type AxiosError } from 'axios'
+import axios, {
+  type AxiosError,
+  type AxiosRequestConfig,
+  type AxiosResponse,
+} from 'axios'
 
 /**
  * Whether the deployment has authentication switched on.  The session store
@@ -11,7 +15,17 @@ export function setAuthEnabled(value: boolean): void {
   flags.authEnabled = value
 }
 
-export const http = axios.create({
+/**
+ * The one axios instance every call in `./` goes through.
+ *
+ * It is deliberately **not** named `http`: a variable by that name reads like
+ * Node's built-in `http` module, and static analysers then report every plain
+ * HTTP verb call on it as "不安全的传输" — even though the path is the relative,
+ * same-origin `/api/v1` and the scheme is whatever the page was served over.
+ * See `docs/security/pypiserver0920-findings.md` §3.4.  Renaming it back
+ * re-introduces those false positives.
+ */
+export const apiClient = axios.create({
   baseURL: '/api/v1',
   withCredentials: true,
   timeout: 30_000,
@@ -24,7 +38,7 @@ export interface ApiErrorBody {
   detail?: unknown
 }
 
-http.interceptors.response.use(
+apiClient.interceptors.response.use(
   (response) => response,
   (error: AxiosError<ApiErrorBody>) => {
     const status = error.response?.status
@@ -48,4 +62,73 @@ export function apiError(error: unknown): string {
     err?.message ||
     String(error)
   )
+}
+
+// ── Typed JSON helpers ───────────────────────────────────────────────
+//
+// The modules next to this one call these instead of the axios instance, so the
+// `{ data } = response` unwrapping happens in exactly one place and changing
+// the transport (an extra header, a retry, a mocked client in a test) touches
+// this file only.
+//
+// `T = any` mirrors axios' own untyped default: `agentHub.js` is plain
+// JavaScript, carries no generics and documents its shapes in JSDoc.
+
+/** `GET`, returning the decoded body. */
+export async function getJson<T = any>(
+  url: string,
+  config?: AxiosRequestConfig,
+): Promise<T> {
+  const { data } = await apiClient.get<T>(url, config)
+  return data
+}
+
+/** `POST`, returning the decoded body (use `postRaw` when headers are needed). */
+export async function postJson<T = any>(
+  url: string,
+  body?: unknown,
+  config?: AxiosRequestConfig,
+): Promise<T> {
+  const { data } = await apiClient.post<T>(url, body, config)
+  return data
+}
+
+/** `PUT`, returning the decoded body. */
+export async function putJson<T = any>(
+  url: string,
+  body?: unknown,
+  config?: AxiosRequestConfig,
+): Promise<T> {
+  const { data } = await apiClient.put<T>(url, body, config)
+  return data
+}
+
+/** `DELETE`, returning the decoded body when the route answers one. */
+export async function deleteJson<T = any>(
+  url: string,
+  config?: AxiosRequestConfig,
+): Promise<T> {
+  const { data } = await apiClient.delete<T>(url, config)
+  return data
+}
+
+/**
+ * The **whole** axios response.  Only the Debian relay needs it: those two
+ * calls read `Content-Disposition` / `X-OpenFish-SHA256` off the headers and
+ * stream a Blob body.
+ */
+export function getRaw<T = any>(
+  url: string,
+  config?: AxiosRequestConfig,
+): Promise<AxiosResponse<T>> {
+  return apiClient.get<T>(url, config)
+}
+
+/** `postRaw` — see `getRaw`. */
+export function postRaw<T = any>(
+  url: string,
+  body?: unknown,
+  config?: AxiosRequestConfig,
+): Promise<AxiosResponse<T>> {
+  return apiClient.post<T>(url, body, config)
 }

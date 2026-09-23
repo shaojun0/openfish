@@ -41,7 +41,7 @@
    SQLite 与 PostgreSQL 同路径，返回「本次实际改了什么」。
 9. **不可信代码降权。** worker 以 root（effective `CAP_SETUID` + `CAP_SETGID` +
    `CAP_DAC_OVERRIDE`，属于共享组 gid 10000）运行；
-   仓库自带的 `check_*.py` 与 headless review 命令降到沙箱 uid 10002（共享组 gid
+   仓库自带的校验套件命令与 headless review 命令降到沙箱 uid 10002（共享组 gid
    10000）；任务工作树组可写 + setgid 且 **owner 不变**。请求了降权却做不到时
    **fail-closed**，绝不按 worker uid 跑不可信代码（见 §6.5，含诚实的残余限制）。
 
@@ -58,7 +58,7 @@
 | G3 | 凭据按仓库解析，且只以密文落库 | `credential()` 优先返回 repo 密文解密结果，否则共享 token；解密失败抛错不回退 |
 | G4 | 工作区不越界 | `safe_workspace_subdir()` 拒绝绝对路径 / `..` / 反斜杠 / 控制字符 / 非法字符集 |
 | G5 | 出网策略有唯一存放处且语义诚实 | `egress_policy ∈ {inherit, internal, allowlist}`，文档明确「平台只持久化」 |
-| G6 | 新 schema 幂等补全，老库平滑升级 | `ensure_schema()` 二次调用零改动；`check_database.py` 在 SQLite/PG 都过 |
+| G6 | 新 schema 幂等补全，老库平滑升级 | `ensure_schema()` 二次调用零改动，SQLite 与 PostgreSQL 都通过 |
 
 ### 1.2 非目标
 
@@ -92,7 +92,7 @@
 
 1. **不挂 docker socket 是硬约束。** 「按仓库/按任务起容器」要么挂 socket，要么把
    Docker API 暴露成服务，二者都扩大攻击面；而 runner 会执行仓库自带的
-   `check_*.py`，是**最不该**拿到控制面能力的进程。
+   校验套件命令，是**最不该**拿到控制面能力的进程。
 2. **隔离需求目前落在「执行边界」而不是「内核边界」。** 一个任务只在一个仓库内
    （`AGENTS.md` §0.2）；需要按仓库区分的是**用谁的凭据、写哪里、占多少并发、
    被声明成什么出网档位**，这些用一行配置表达就够，不需要第二套编排。
@@ -304,7 +304,8 @@ runner_id=runner.id)`：
 
 **要修的问题。** 此前 runner 容器里**所有**进程都以 `USER runner`（uid 10001）运行：
 worker 持有 `FORGEJO_RUNNER_TOKEN` / `RUNNER_CREDENTIAL_KEY`，而它执行的不可信代码
-——仓库自带的 `backend/scripts/check_*.py`（`services/gates.py`）与 headless
+——仓库自带的校验套件命令（`services/check_suite.py` 解析、`services/gates.py`
+执行）与 headless
 `AGENT_REVIEW_COMMAND`（`services/agent_worker.build_review_fn`）——是**同一个 uid**，
 于是可以读 `/proc/<worker_pid>/environ` 把凭据偷走。`services/sandbox_env.py` 只
 过滤子进程的**环境变量**，挡不住这种「读别人的 `/proc`」的路径。
@@ -433,7 +434,7 @@ allowlist」误读成「平台已经拦住了出口」：
 
 > 诚实性条款：在本条目的执行侧落地之前，`egress_policy` 的验收只覆盖
 > 「值合法、可持久化、可读取、可展示」，**不覆盖**「网络真的被分段」。
-> 后者由 `DESIGN-git-thin-layer.md` 的边界门禁与部署清单各自负责。
+> 后者由 `DESIGN-git-thin-layer.md` §10.2 的边界检查项与部署清单各自负责。
 
 ---
 
@@ -456,24 +457,23 @@ allowlist」误读成「平台已经拦住了出口」：
   "updated_constraints": [...]}`——空报告即「数据库已是最新」，二次调用零改动；
 - 只碰 Agent Hub 自己的十五张表，不误建/误改其他模块的表。
 
-`check_database.py` 是这条路径的门禁：SQLite 与 PostgreSQL 都必须可用。
+这条路径的验收标准：迁移幂等助手必须在 SQLite 与 PostgreSQL 上都成立。
 
 ---
 
-## 10. 门禁 `scripts/check_repo_runners.py`
+## 10. 验收契约（原离线门禁 `check_repo_runners.py`）
 
-本设计的离线验收门禁，与其余 `check_*.py` 同一发现机制（`backend/scripts/` 下自动
-发现，`services/gates.py` 与根 `Makefile` 的 `make gates` 跑同一批）：
+本设计的验收清单原本落在离线门禁脚本 `check_repo_runners.py` 里（`backend/scripts/`
+下自动发现，由 `services/gates.py` 执行，人 / CI 通过 `make gates` 跑同一批）。
+`backend/scripts/` 门禁目录与 `make gates` 已整体删除，人 / CI 的同一入口只剩
+`make gates-frontend`（前端 smoke），因此**下表就是验收规格本身**，没有仓库自带门禁
+再跑它：
 
-```bash
-cd backend
-.venv/bin/python scripts/check_repo_runners.py
-```
+验收必须离线可做（注入内存 SQLite / 夹具 session，不需要活服务），并 pin 住以下契约：
 
-门禁必须离线可跑（注入内存 SQLite / 夹具 session，不需要活服务），并 pin 住以下契约：
-
-> 交付状态：门禁与 `services/repo_runner.py` 同属本设计的实现切片；下表即它的验收
-> 规格。落盘后它会被 `backend/scripts/check_*.py` 的发现机制自动纳入 `make gates`。
+> 交付状态：契约与 `services/repo_runner.py` 同属本设计的实现切片；下表即它的验收
+> 规格。原门禁脚本已随 `backend/scripts/` 目录整体删除，回归时请按本表自行构造
+> 离线检查。
 
 | # | 断言 | 对应章节 |
 |---|---|---|
@@ -489,8 +489,8 @@ cd backend
 | 10 | 禁用 runner 的任务不被 `claim`；无 runner 行、`runner_id IS NULL` 的任务仍可领 | §4.3 |
 | 11 | 迁移清单包含 `repo_runners` 建表、`agent_tasks.runner_id` 加列、两条 CHECK；`ensure_schema` 二次调用空报告 | §9 |
 
-门禁纪律：**不为了变绿弱化断言**；新增一项能力就在本表加一行并在门禁里加断言，
-版本化在 `scripts/check_repo_runners.py` 一处。
+验收纪律：**不为了变绿弱化断言**；新增一项能力就在本表加一行，并补一条对应的离线
+检查。
 
 ---
 
@@ -513,14 +513,14 @@ cd backend
    `RepoRunnerError`，且**没有**落库任何半成品改动。
 7. **迁移幂等（真库）。** 对既有部署跑两次 `ensure_schema`：第一次报告
    `repo_runners` 建表与 `agent_tasks.runner_id` 加列（若缺失），第二次空报告；
-   `check_database.py` 在 SQLite 与 PostgreSQL 都过。
+   迁移幂等助手在 SQLite 与 PostgreSQL 都成立。
 8. **端到端（依赖 §12.7 已闭合）。** 配一个仓库专属凭据 + `runners/1` 工作区，跑一次
    fix 任务：clone / push 用该凭据（worker 用 `RUNNER_CREDENTIAL_KEY` 在容器内解封），
    工作树落在 `AGENT_WORK_ROOT/runners/<runner_id>/<task_id>`，PR 打开后
    `last_task_at` 更新。
 9. **降权（切片 A，需真容器 / `CAP_SETUID`+`CAP_SETGID`+`CAP_DAC_OVERRIDE`）。** 设好
    `AGENT_SANDBOX_UID=10002` / `AGENT_SANDBOX_GID=10000` 后跑一个带
-   `check_*.py` 的任务：子进程的 `os.geteuid()==10002`，且它读不到
+   校验套件命令的任务：子进程的 `os.geteuid()==10002`，且它读不到
    `/proc/<worker_pid>/environ` 里的 `FORGEJO_RUNNER_TOKEN` /
    `RUNNER_CREDENTIAL_KEY`；工作树属主是 worker（root），worker 的 `git` 不报
    dubious ownership；worker 的 `id -G` 含 `10000`，且能写 `/work` / `/app/data`

@@ -11,13 +11,12 @@ applied *after* the view has already been registered and is silently dropped.
 
 An earlier revision had ``@require_auth()`` above ``@route``, which registered
 the *unguarded* function and left every ``/python-builds/*`` route readable
-without credentials.  ``scripts/check_auth_guards.py`` fails the build if that
-pattern comes back.
+without credentials.  That pattern must never come back: the guard has to be in
+effect before the route registers.
 """
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 from flask import (
@@ -31,8 +30,8 @@ from auth.permissions import BUILD_DOWNLOAD, BUILD_READ, BUILD_SHA256
 from openapi import api_operation, binary, errors, ok
 from services import build_mirror
 from services.format import human_size
+from services.headers import attachment_disposition
 
-logger = logging.getLogger("cpypiserver.python_build")
 python_build_bp = Blueprint("python_build", __name__)
 
 
@@ -134,7 +133,7 @@ def download(release_tag: str, filename: str):
     builds_dir = Path(settings.storage.python_builds_dir) / release_tag
     resp = send_from_directory(str(builds_dir), filename)
     resp.headers.pop("Content-Encoding", None)
-    resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    resp.headers["Content-Disposition"] = attachment_disposition(filename)
     return resp
 
 

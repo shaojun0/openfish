@@ -14,7 +14,7 @@ Layout
 
     tools/
       catalog.json            optional display overlay (names, descriptions)
-      dev/                    a category (directory name = category key)
+      dev/                    a category (directory name = category slug)
         fmt.sh
         lint.py
       ops/
@@ -36,7 +36,6 @@ rather than on disk; :mod:`services.model_routes` owns it.
 
 from __future__ import annotations
 
-import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -46,7 +45,6 @@ from services.digest import sha256_or_none
 from services.fileio import read_json
 from services.format import human_size, iso_from_timestamp
 
-logger = logging.getLogger("cpypiserver.hub")
 
 #: Files that are catalog metadata rather than catalog entries.
 _OVERLAY_FILENAME = "catalog.json"
@@ -135,7 +133,7 @@ def scan_tools(root: str, *, url_prefix: str = "/tools") -> dict[str, Any]:
     root_files = sorted(p for p in base.iterdir() if p.is_file() and _visible(p))
     if root_files:
         categories.append({
-            "key": "root",
+            "slug": "root",
             "name": None,
             "description": None,
             "icon": (cat_meta.get("root") or {}).get("icon"),
@@ -155,7 +153,7 @@ def scan_tools(root: str, *, url_prefix: str = "/tools") -> dict[str, Any]:
             key=lambda p: p.relative_to(directory).as_posix(),
         )
         categories.append({
-            "key": directory.name,
+            "slug": directory.name,
             "name": meta.get("name") or directory.name,
             "description": meta.get("description"),
             "icon": meta.get("icon"),

@@ -1,4 +1,4 @@
-import { http } from './client'
+import { deleteJson, getJson, getRaw, postJson, postRaw, putJson } from './client'
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -165,8 +165,8 @@ export interface ToolEntry {
 
 export interface ToolCategory {
   /** Directory name, or `root` for files sitting at the tools root. */
-  key: string
-  /** Overlay display name; null means "use the category key". */
+  slug: string
+  /** Overlay display name; null means "use the category slug". */
   name: string | null
   description: string | null
   icon: string | null
@@ -232,12 +232,15 @@ export interface ModelRouteHealth {
 
 export interface ModelRoute {
   name: string
-  /** Wire format: `openai` | `mineru` | `anthropic`. */
+  /**
+   * Wire format: `openai` | `anthropic`. A MinerU-style document parser speaks
+   * the OpenAI format, so it is `openai` with `kind: 'ocr'`.
+   */
   provider: string
   /**
    * Model function, orthogonal to the wire format: `chat` | `completion` |
    * `embedding` | `rerank` | `ocr` | `asr` | `tts`. The server fills in the
-   * protocol default (`chat`, or `ocr` for `mineru`) when a route omits it.
+   * protocol default (`chat`) when a route omits it.
    */
   kind: string
   base_url: string
@@ -442,56 +445,48 @@ export interface BuildCatalog {
 // ── Endpoints ────────────────────────────────────────────────────────
 
 export async function fetchSession(): Promise<SessionInfo> {
-  const { data } = await http.get<SessionInfo>('/session')
-  return data
+  return getJson<SessionInfo>('/session')
 }
 
 export async function fetchKeys(): Promise<ApiKey[]> {
-  const { data } = await http.get<ApiKey[]>('/keys')
-  return data
+  return getJson<ApiKey[]>('/keys')
 }
 
 export async function createKey(payload: {
   name: string
   expires_in_days: number | null
 }): Promise<CreatedApiKey> {
-  const { data } = await http.post<CreatedApiKey>('/keys', payload)
-  return data
+  return postJson<CreatedApiKey>('/keys', payload)
 }
 
 export async function deleteKey(id: string): Promise<void> {
-  await http.delete(`/keys/${encodeURIComponent(id)}`)
+  await deleteJson(`/keys/${encodeURIComponent(id)}`)
 }
 
 export async function fetchKeyStats(id: string): Promise<KeyStats> {
-  const { data } = await http.get<KeyStats>(`/keys/${encodeURIComponent(id)}/stats`)
-  return data
+  return getJson<KeyStats>(`/keys/${encodeURIComponent(id)}/stats`)
 }
 
 export async function fetchPackages(): Promise<PackageSummary[]> {
-  const { data } = await http.get<PackageSummary[]>('/packages')
-  return data
+  return getJson<PackageSummary[]>('/packages')
 }
 
 export async function fetchAdminStats(): Promise<AdminStats> {
-  const { data } = await http.get<AdminStats>('/admin/stats')
-  return data
+  return getJson<AdminStats>('/admin/stats')
 }
 
 export async function refreshAdminStats(): Promise<void> {
-  await http.post('/admin/refresh-stats')
+  await postJson('/admin/refresh-stats')
 }
 
 export async function fetchHealth(): Promise<HealthInfo> {
-  const { data } = await http.get<HealthInfo>('/health')
-  return data
+  return getJson<HealthInfo>('/health')
 }
 
 // ── Artifact hub ─────────────────────────────────────────────────────
 
 export async function fetchToolCatalog(): Promise<ToolCatalog> {
-  const { data } = await http.get<ToolCatalog>('/tools')
-  return data
+  return getJson<ToolCatalog>('/tools')
 }
 
 /**
@@ -508,7 +503,7 @@ export async function uploadTool(
   if (category) form.append('category', category)
   form.append('file', file)
   // Let the browser set the multipart boundary — do not set Content-Type.
-  const { data } = await http.post<ToolEntry>('/tools', form, {
+  const data = await postJson<ToolEntry>('/tools', form, {
     onUploadProgress: (event) => {
       if (onProgress && event.total) {
         onProgress(Math.round((event.loaded / event.total) * 100))
@@ -519,23 +514,21 @@ export async function uploadTool(
 }
 
 export async function fetchNpmCatalog(): Promise<NpmCatalog> {
-  const { data } = await http.get<NpmCatalog>('/npm')
-  return data
+  return getJson<NpmCatalog>('/npm')
 }
 
 export async function fetchModelRoutes(): Promise<ModelRoutes> {
-  const { data } = await http.get<ModelRoutes>('/models')
-  return data
+  return getJson<ModelRoutes>('/models')
 }
 
 /**
- * Add a route.  Admin-only (`model:write`); the server validates it, writes it
- * to `MODELS_FILE` and probes the URL, returning both.
+ * Add a route.  Admin-only (`model:write`); the server validates it, writes the
+ * `model_routes` row and probes the URL, returning both.
  */
 export async function createModelRoute(
   payload: ModelRoutePayload,
 ): Promise<{ route: ModelRoute; health: ModelRouteHealth }> {
-  const { data } = await http.post<{ route: ModelRoute; health: ModelRouteHealth }>(
+  const data = await postJson<{ route: ModelRoute; health: ModelRouteHealth }>(
     '/models',
     payload,
   )
@@ -547,7 +540,7 @@ export async function updateModelRoute(
   name: string,
   payload: ModelRoutePayload,
 ): Promise<{ route: ModelRoute; health: ModelRouteHealth }> {
-  const { data } = await http.put<{ route: ModelRoute; health: ModelRouteHealth }>(
+  const data = await putJson<{ route: ModelRoute; health: ModelRouteHealth }>(
     `/models/${encodeURIComponent(name)}`,
     payload,
   )
@@ -556,8 +549,7 @@ export async function updateModelRoute(
 
 /** Remove a route.  Admin-only (`model:write`). */
 export async function deleteModelRoute(name: string): Promise<ModelRoute> {
-  const { data } = await http.delete<ModelRoute>(`/models/${encodeURIComponent(name)}`)
-  return data
+  return deleteJson<ModelRoute>(`/models/${encodeURIComponent(name)}`)
 }
 
 /** Probe a draft route that has not been saved yet.  Admin-only. */
@@ -567,21 +559,19 @@ export async function probeModelRoute(payload: {
   api_key?: string | null
   path?: string
 }): Promise<ModelRouteHealth> {
-  const { data } = await http.post<ModelRouteHealth>('/models/probe', payload)
-  return data
+  return postJson<ModelRouteHealth>('/models/probe', payload)
 }
 
 /** Re-probe a saved route and remember the result.  Admin-only. */
 export async function checkModelRoute(name: string): Promise<ModelRouteHealth> {
-  const { data } = await http.post<ModelRouteHealth>(
+  const data = await postJson<ModelRouteHealth>(
     `/models/${encodeURIComponent(name)}/check`,
   )
   return data
 }
 
 export async function fetchDockerCatalog(): Promise<DockerCatalog> {
-  const { data } = await http.get<DockerCatalog>('/docker')
-  return data
+  return getJson<DockerCatalog>('/docker')
 }
 
 /**
@@ -596,7 +586,7 @@ export async function uploadDockerArtifact(
   const form = new FormData()
   form.append('file', file)
   // Let the browser set the multipart boundary — do not set Content-Type.
-  const { data } = await http.post<FlatArtifact>('/docker', form, {
+  const data = await postJson<FlatArtifact>('/docker', form, {
     onUploadProgress: (event) => {
       if (onProgress && event.total) {
         onProgress(Math.round((event.loaded / event.total) * 100))
@@ -607,8 +597,7 @@ export async function uploadDockerArtifact(
 }
 
 export async function fetchDebianCatalog(): Promise<DebianCatalog> {
-  const { data } = await http.get<DebianCatalog>('/debian')
-  return data
+  return getJson<DebianCatalog>('/debian')
 }
 
 // ── Debian offline relay ─────────────────────────────────────────────
@@ -694,8 +683,7 @@ function headerText(header: unknown): string {
 }
 
 export async function fetchDebianOfflineStatus(): Promise<DebianOfflineStatus> {
-  const { data } = await http.get<DebianOfflineStatus>('/debian/offline', { baseURL: '' })
-  return data
+  return getJson<DebianOfflineStatus>('/debian/offline', { baseURL: '' })
 }
 
 export async function exportDebianSnapshot(params: {
@@ -704,7 +692,7 @@ export async function exportDebianSnapshot(params: {
   arches?: string
   fresh?: boolean
 } = {}): Promise<DebianTextArtifact> {
-  const response = await http.get('/debian/offline/snapshot', {
+  const response = await getRaw<Blob>('/debian/offline/snapshot', {
     baseURL: '',
     responseType: 'blob',
     timeout: 0,
@@ -716,7 +704,7 @@ export async function exportDebianSnapshot(params: {
     },
   })
   return {
-    blob: response.data as Blob,
+    blob: response.data,
     filename: contentDispositionName(
       response.headers['content-disposition'],
       'openfish-debian-snapshot.txt',
@@ -737,13 +725,13 @@ export async function computeDebianPlan(
   if (options.recommends !== null && options.recommends !== undefined) {
     form.append('recommends', options.recommends ? '1' : '0')
   }
-  const response = await http.post('/debian/offline/plan', form, {
+  const response = await postRaw<Blob>('/debian/offline/plan', form, {
     baseURL: '',
     responseType: 'blob',
     timeout: 0,
   })
   return {
-    blob: response.data as Blob,
+    blob: response.data,
     filename: contentDispositionName(
       response.headers['content-disposition'],
       'openfish-debian-plan.txt',
@@ -755,7 +743,7 @@ export async function computeDebianPlan(
 export async function buildDebianBundle(plan: File): Promise<DebianOfflineBundle> {
   const form = new FormData()
   form.append('plan', plan)
-  const { data } = await http.post<DebianOfflineBundle>('/debian/offline/bundle', form, {
+  const data = await postJson<DebianOfflineBundle>('/debian/offline/bundle', form, {
     baseURL: '',
     timeout: 0,
   })
@@ -765,7 +753,7 @@ export async function buildDebianBundle(plan: File): Promise<DebianOfflineBundle
 export async function importDebianBundle(bundle: File): Promise<DebianOfflineImport> {
   const form = new FormData()
   form.append('bundle', bundle)
-  const { data } = await http.post<DebianOfflineImport>('/debian/offline/import', form, {
+  const data = await postJson<DebianOfflineImport>('/debian/offline/import', form, {
     baseURL: '',
     timeout: 0,
   })
@@ -787,17 +775,15 @@ export function saveBlob(blob: Blob, filename: string): void {
 // ── Per-ecosystem documentation ──────────────────────────────────────
 
 export async function fetchDocsOverview(): Promise<DocsOverview> {
-  const { data } = await http.get<DocsOverview>('/docs')
-  return data
+  return getJson<DocsOverview>('/docs')
 }
 
 export async function fetchDocCatalog(ecosystem: string): Promise<DocCatalog> {
-  const { data } = await http.get<DocCatalog>(`/docs/${encodeURIComponent(ecosystem)}`)
-  return data
+  return getJson<DocCatalog>(`/docs/${encodeURIComponent(ecosystem)}`)
 }
 
 export async function fetchDoc(ecosystem: string, docId: string): Promise<DocDetail> {
-  const { data } = await http.get<DocDetail>(
+  const data = await getJson<DocDetail>(
     `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(docId)}`,
   )
   return data
@@ -819,7 +805,7 @@ export async function createDoc(
   form.append('title', title)
   if (file) form.append('file', file)
   // Let the browser set the multipart boundary — do not set Content-Type.
-  const { data } = await http.post<{ document: DocEntry; replaced: boolean }>(
+  const data = await postJson<{ document: DocEntry; replaced: boolean }>(
     `/docs/${encodeURIComponent(ecosystem)}`,
     form,
   )
@@ -832,7 +818,7 @@ export async function saveDoc(
   docId: string,
   content: string,
 ): Promise<DocDetail> {
-  const { data } = await http.put<DocDetail>(
+  const data = await putJson<DocDetail>(
     `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(docId)}`,
     { content },
   )
@@ -845,7 +831,7 @@ export async function renderDocPreview(
   docId: string,
   content: string,
 ): Promise<string> {
-  const { data } = await http.post<{ html: string }>(
+  const data = await postJson<{ html: string }>(
     `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(docId)}/preview`,
     { content },
   )
@@ -853,7 +839,7 @@ export async function renderDocPreview(
 }
 
 export async function deleteDoc(ecosystem: string, docId: string): Promise<DocEntry> {
-  const { data } = await http.delete<DocEntry>(
+  const data = await deleteJson<DocEntry>(
     `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(docId)}`,
   )
   return data
@@ -864,7 +850,7 @@ export async function fetchDocAssets(
   ecosystem: string,
   docId: string,
 ): Promise<DocAsset[]> {
-  const { data } = await http.get<{ assets: DocAsset[] }>(
+  const data = await getJson<{ assets: DocAsset[] }>(
     `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(docId)}/assets`,
   )
   return data.assets
@@ -878,7 +864,7 @@ export async function uploadDocAsset(
 ): Promise<DocAsset> {
   const form = new FormData()
   form.append('file', file)
-  const { data } = await http.post<DocAsset>(
+  const data = await postJson<DocAsset>(
     `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(docId)}/assets`,
     form,
   )
@@ -890,7 +876,7 @@ export async function deleteDocAsset(
   docId: string,
   name: string,
 ): Promise<DocAsset> {
-  const { data } = await http.delete<DocAsset>(
+  const data = await deleteJson<DocAsset>(
     `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(docId)}/assets/${encodeURIComponent(name)}`,
   )
   return data
@@ -898,20 +884,17 @@ export async function deleteDocAsset(
 
 /** Prebuilt-interpreter mirror: `python` is CPython/uv, `node` is Node/nvm. */
 export async function fetchBuildCatalog(kind: 'python' | 'node'): Promise<BuildCatalog> {
-  const { data } = await http.get<BuildCatalog>(`/${kind}-builds`)
-  return data
+  return getJson<BuildCatalog>(`/${kind}-builds`)
 }
 
 // ── Access control ───────────────────────────────────────────────────
 
 export async function fetchPermissions(): Promise<PermissionInfo[]> {
-  const { data } = await http.get<PermissionInfo[]>('/admin/permissions')
-  return data
+  return getJson<PermissionInfo[]>('/admin/permissions')
 }
 
 export async function fetchRoles(): Promise<RoleInfo[]> {
-  const { data } = await http.get<RoleInfo[]>('/admin/roles')
-  return data
+  return getJson<RoleInfo[]>('/admin/roles')
 }
 
 export async function createRole(payload: {
@@ -919,12 +902,11 @@ export async function createRole(payload: {
   name: string
   description: string | null
 }): Promise<RoleInfo> {
-  const { data } = await http.post<RoleInfo>('/admin/roles', payload)
-  return data
+  return postJson<RoleInfo>('/admin/roles', payload)
 }
 
 export async function deleteRole(roleId: number): Promise<void> {
-  await http.delete(`/admin/roles/${roleId}`)
+  await deleteJson(`/admin/roles/${roleId}`)
 }
 
 /** Replaces the role's grants wholesale — anything omitted is revoked. */
@@ -932,14 +914,14 @@ export async function setRolePermissions(
   roleId: number,
   permissions: string[],
 ): Promise<RoleInfo> {
-  const { data } = await http.put<RoleInfo>(`/admin/roles/${roleId}/permissions`, {
+  const data = await putJson<RoleInfo>(`/admin/roles/${roleId}/permissions`, {
     permissions,
   })
   return data
 }
 
 export async function fetchUsers(limit = 200, offset = 0): Promise<UserInfo[]> {
-  const { data } = await http.get<UserInfo[]>('/admin/users', {
+  const data = await getJson<UserInfo[]>('/admin/users', {
     params: { limit, offset },
   })
   return data
@@ -949,15 +931,14 @@ export async function grantUserRole(
   userId: number,
   role: string,
 ): Promise<{ user_id: number; role: string; granted: boolean }> {
-  const { data } = await http.post(`/admin/users/${userId}/roles`, { role })
-  return data
+  return postJson(`/admin/users/${userId}/roles`, { role })
 }
 
 export async function revokeUserRole(
   userId: number,
   roleCode: string,
 ): Promise<{ user_id: number; role: string; revoked: boolean }> {
-  const { data } = await http.delete(
+  const data = await deleteJson(
     `/admin/users/${userId}/roles/${encodeURIComponent(roleCode)}`,
   )
   return data
@@ -967,6 +948,5 @@ export async function setUserSuperuser(
   userId: number,
   superuser: boolean,
 ): Promise<{ user_id: number; is_superuser: boolean }> {
-  const { data } = await http.put(`/admin/users/${userId}/superuser`, { superuser })
-  return data
+  return putJson(`/admin/users/${userId}/superuser`, { superuser })
 }

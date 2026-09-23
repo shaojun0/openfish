@@ -43,7 +43,6 @@ x-backend-env: &backend-env
   DOCKER_DIR: /app/docker-images
   DEBIAN_DIR: /app/debian
   DOCS_DIR: /app/docs
-  MODELS_FILE: /app/config/model_routes.json
   NPM_UPSTREAM: ${NPM_UPSTREAM:-https://registry.npmmirror.com}
   DOCKER_REGISTRY: ${DOCKER_REGISTRY:-}
   DEBIAN_MIRROR: ${DEBIAN_MIRROR:-}
@@ -98,7 +97,7 @@ x-backend-env: &backend-env
   # 给客户端展示的公开 git 前缀（只用于生成 URL，不参与认证）。
   FORGEJO_PUBLIC_BASE_URL: ${FORGEJO_PUBLIC_BASE_URL:-/git}
   # 平台专用 Forgejo admin token 与 webhook 共享密钥。
-  # **密钥只走环境变量，永不进仓库、不进日志**（与 model_routes.json 的不落密原则一致）。
+  # **密钥只走环境变量，永不进仓库、不进日志**（与 model_routes 表的不落密原则一致）。
   # admin token 至少需要 `write:admin`（建用户 / 替用户铸票 / 删用户都在 /admin/*）。
   FORGEJO_ADMIN_TOKEN: ${FORGEJO_ADMIN_TOKEN:-}
   FORGEJO_WEBHOOK_SECRET: ${FORGEJO_WEBHOOK_SECRET:-}
@@ -107,6 +106,11 @@ x-backend-env: &backend-env
   GIT_IDENTITY_KEY: ${GIT_IDENTITY_KEY:-}
   # 仓库凭据专用密钥：API 用它加密 repo_runners.credential_ciphertext（与 GIT_IDENTITY_KEY 分离）。
   RUNNER_CREDENTIAL_KEY: ${RUNNER_CREDENTIAL_KEY:-}
+  # 模型路由专用密钥：每条路由的上游 api_key 用它密封后落库（model_routes.api_key）。
+  # 只给 backend —— 下游 DSH 通过 /api/v1/models/resolved 拿到的是解密后的明文，
+  # 不需要也不应该持有这枚主密钥。缺失时保存路由密钥直接 500（**不回退明文**），
+  # 已密封的行报 api_key_source=unreadable。
+  MODEL_ROUTE_KEY: ${MODEL_ROUTE_KEY:-}
   # 大仓保护（§8.2）：到上限标 partial=true 并由 API 显式暴露，绝不静默截断。
   IMPORT_MAX_ISSUES: ${IMPORT_MAX_ISSUES:-20000}
   IMPORT_MAX_COMMITS: ${IMPORT_MAX_COMMITS:-5000}
@@ -144,10 +148,9 @@ x-backend-env: &backend-env
 # docs/agent-hub/DESIGN-git-thin-layer.md。
 x-runner-env: &runner-env
   # 队列数据库：默认 SQLite 文件；PostgreSQL 部署用 DATABASE_URL。
+  # 模型路由表（model_routes）也在同一个库里：runner 只读它。
   API_KEYS_FILE: /app/data/cpypiserver.db
   DATABASE_URL: ${DATABASE_URL:-}
-  # 模型路由：只读挂载。
-  MODELS_FILE: /app/config/model_routes.json
   # Forgejo：只有内网基址与组织名，都不含密钥。
   FORGEJO_BASE_URL: ${FORGEJO_BASE_URL:-http://forgejo:3000}
   FORGEJO_OWNER: ${FORGEJO_OWNER:-openfish}
@@ -184,7 +187,7 @@ x-runner-env: &runner-env
 #   docker/docker-images           -> /media/.../openfish-mirror/docker-images
 #   docker/debian                  -> /media/.../openfish-mirror/debian
 #   docker/data                    -> ../backend/data
-#   docker/config/model_routes.json -> ../backend/config/model_routes.json
+#   docker/forgejo                 -> /media/.../openfish-forgejo
 x-backend-volumes: &backend-volumes
   # /app/share：python 包与 python-build-standalone；容器内两个子路径分别由
   # PACKAGES_DIR / PYTHON_BUILDS_DIR 指向。
@@ -196,8 +199,8 @@ x-backend-volumes: &backend-volumes
   - ./docker-images:/app/docker-images
   - ./debian:/app/debian
   - ./docs:/app/docs
-  # 模型路由表：改完刷新页面即可；管理员在 /models 页可在线编辑，故需可写
-  - ./config/model_routes.json:/app/config/model_routes.json
+  # 模型路由表在数据库里（model_routes），随 ./data 卷持久化；改完刷新页面即可。
+  # 全新部署想预置一组路由，用 config/model_routes.seed.sql（见 docker/README.md）。
   # SQLite 库与回源缓存，容器重建后不丢；backend/data 仍是本地开发的同一份
   - ./data:/app/data
   # 自备 TLS 证书（可选）：把 CA 链放到 docker/certs/ca_chain.pem 后取消注释。
@@ -322,7 +325,6 @@ services:
     volumes:
       - ./agent-work:/work
       - ./data:/app/data
-      - ./config/model_routes.json:/app/config/model_routes.json:ro
     networks:
       - openfish
     depends_on:

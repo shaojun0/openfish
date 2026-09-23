@@ -211,8 +211,7 @@ networks:
 | 容器路径 | 宿主来源 | 模式 | 说明 |
 | --- | --- | --- | --- |
 | `/work` | `docker/agent-work/` | rw | 每任务一个子目录；任务结束写 `.done`，**保留 24h** 再回收 |
-| `/app/data` | `docker/data/` | rw | 与 backend 共用同一 SQLite / 缓存目录（同一数据库） |
-| `/app/config/model_routes.json` | `docker/config/model_routes.json` | ro | 只读解析模型路由；runner 不改路由表 |
+| `/app/data` | `docker/data/` | rw | 与 backend 共用同一 SQLite / 缓存目录（同一数据库，模型路由表也在其中） |
 
 24h 规则由 `services/agent_runner.py` 实现：
 
@@ -230,8 +229,9 @@ docker compose --profile runner exec -T runner \
 
 ## 6. 模型凭据：只进环境变量，任务结束即失效
 
-- runner 进程用现有入口 `services.model_routes.resolve(MODELS_FILE)` 取到含
-  `api_key` 的路由（就是 `/api/v1/models/resolved` 背后的同一份能力）。
+- runner 进程用现有入口 `services.model_routes.resolve(session)` 从**队列同一个库**里的
+  `model_routes` 表取到含 `api_key` 的路由（就是 `/api/v1/models/resolved` 背后的同一份
+  能力）。runner 只读该表，路由的增删改仍只在 backend 的 `/models` 页。
 - `services/agent_runner.build_model_env()` 把它翻译成子进程环境变量：
   `OPENFISH_MODEL_{PROVIDER,BASE_URL,PATH,MODEL,API_KEY}`，并按 provider 额外给
   `OPENAI_API_KEY` / `OPENAI_BASE_URL`（或 `ANTHROPIC_*`）。
@@ -281,7 +281,6 @@ docker compose --profile runner exec -T runner \
     volumes:
       - ./agent-work:/work
       - ./data:/app/data
-      - ./config/model_routes.json:/app/config/model_routes.json:ro
     networks:
       - openfish
 ```
@@ -313,12 +312,12 @@ link "$DOCKER_DIR/agent-work" "$PROJECT_DIR/backend/data/agent-work"
 ## 9. 安全清单（构建后自查）
 
 - [ ] `docker inspect openfish-runner` 里没有 `/var/run/docker.sock` 挂载；
-- [ ] 镜像里没有模型权重、没有 `.env`、没有 `model_routes.json` 的密钥副本
-      （路由表是运行时只读挂载）；
+- [ ] 镜像里没有模型权重、没有 `.env`、没有 `model_routes` 表的密钥副本
+      （路由表在运行时从队列同一个库里只读解析）；
 - [ ] runner 不发布宿主端口（`docker compose --profile runner port runner` 为空）；
 - [ ] **runner 的环境里没有** `SECRET_KEY` / `FORGEJO_ADMIN_TOKEN` /
       `GIT_IDENTITY_KEY` / `OAUTH2_CLIENT_SECRET` / 上游口令
-      （`docker inspect` 里逐个确认；`scripts/check_git_boundary.py` 会离线断言）。
+      （`docker inspect` 里逐个确认）。
       **注意（有意为之）**：`RUNNER_CREDENTIAL_KEY` **必须**在 runner 环境里（专用
       密钥，只解 `repo_runners` 的服务凭据）；`GIT_IDENTITY_KEY`（用户身份主密钥）
       **永不进 runner**；
@@ -329,8 +328,7 @@ link "$DOCKER_DIR/agent-work" "$PROJECT_DIR/backend/data/agent-work"
       （`cap_drop: ALL` 之后再 `cap_add`）——缺了降权两枚则 fail-closed，任务明确失败，
       **不会**退回按 worker uid 跑不可信代码；缺 `DAC_OVERRIDE` 时宿主机属主的
       `/work`、`/app/data` bind mount 写不进去；
-- [ ] **capability 真的 effective**（这条只有真容器能验，`scripts/check_sandbox_uid.py`
-      只能离线断言 `USER root`）：
+- [ ] **capability 真的 effective**（这条只有真容器能验）：
       `docker exec <runner> grep -E '^CapEff:' /proc/1/status` 必须是 `c2`
       （SETUID|SETGID|DAC_OVERRIDE），而不是 `0`。若镜像是非 root `USER`，Docker 只把
       这些 cap 放进 bounding set，CapEff=0，降权 fail-closed、每个任务都红；

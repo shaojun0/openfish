@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import ast
 import importlib
-import logging
 import re
 import shutil
 import subprocess
@@ -49,7 +48,6 @@ from typing import Any, Iterable, Mapping, Sequence
 from services.digest import compute_sha256
 from services.review_policy import POLICY_RELATIVE_PATH
 
-logger = logging.getLogger("cpypiserver.findings")
 
 # ── Enum surface (§4.3) ──────────────────────────────────────────────
 # The canonical tuples live in models/agent_hub.py.  These are the fallbacks
@@ -521,13 +519,7 @@ def _drift_reason(finding: Any, ctx: ReactivationContext) -> str | None:
     if anchor is not None and anchor.overlaps(drift.changed):
         return REASON_DRIFT
     if anchor is None and drift.changed:
-        # An unanchored symbol must be an explicit decision, not a default:
-        # ``overlaps`` on the whole file would be the forbidden degradation.
-        logger.debug(
-            "finding %s: not reactivating on drift — %s",
-            getattr(finding, "id", "?"),
-            drift.detail or "unanchored symbol",
-        )
+        pass
     return None
 
 
@@ -696,10 +688,6 @@ def decide(
         at=now,
     )
     session.flush()
-    logger.info(
-        "finding %s: %s -> %s by %s (%s)",
-        finding.id, from_status, to_status, actor, event_reason,
-    )
     return {
         "finding": serialize(finding),
         "from_status": from_status,
@@ -770,7 +758,11 @@ def coerce_due(value: Any) -> date | None:
     try:
         return date.fromisoformat(str(value).strip()[:10])
     except ValueError as exc:
-        raise ValueError(f"due must be an ISO date (YYYY-MM-DD), got {value}") from exc
+        # No ``got {value}``: this string is handed to ``BadRequestError`` and
+        # therefore travels back to the caller.  Echoing the rejected input would
+        # put whatever arrived on the wire (it is not necessarily a date) into the
+        # response body; a fixed template says everything the client needs.
+        raise ValueError("due must be an ISO date (YYYY-MM-DD)") from exc
 
 
 def _normalize_level(value: Any) -> str:
@@ -1087,10 +1079,6 @@ def _apply_escalation(
             run_id=run_id,
         )
         reopened += 1
-        logger.info(
-            "finding %s escalated: rule %s has %d deferral(s) (threshold %s)",
-            row.id, row.rule_id, counts.get(str(row.rule_id), 0), threshold,
-        )
     session.flush()
     return reopened
 

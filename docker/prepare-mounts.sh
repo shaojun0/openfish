@@ -2,17 +2,17 @@
 # ── openfish: create the bind-mount sources docker-compose.yml expects ──────
 #
 # docker-compose.yml only ever mounts paths inside this directory (./share,
-# ./npm, ./data, ./config/model_routes.json, …).  This script creates them, so a
-# fresh checkout can go straight to `docker compose up -d --build`.
+# ./npm, ./data, ./tools, …).  This script creates them, so a fresh checkout can
+# go straight to `docker compose up -d --build`.
 #
 # Usage
 # -----
 #   ./prepare-mounts.sh
 #       Local defaults.  Each artifact mirror becomes a real, empty directory
-#       seeded from docker/examples/<name>/, docker/data links to ../backend/data
-#       and docker/config/model_routes.json links to the tracked routing table.
-#       Both of those links are what keep `cd backend && python app.py` and the
-#       containers on one database and one route table.
+#       seeded from docker/examples/<name>/, and docker/data links to
+#       ../backend/data.  That link is what keeps `cd backend && python app.py`
+#       and the containers on one database — which now also holds the model
+#       route table.
 #
 #   ./prepare-mounts.sh /media/disk/openfish-mirror
 #       The deployment layout: the five artifact mirrors become symlinks into
@@ -107,12 +107,9 @@ else
     done
 fi
 
-# ── Runtime state: one database and one route table for both entry points ───
+# ── Runtime state: one database (queue + model route table) for both entry points
 mkdir -p "$PROJECT_DIR/backend/data"
 link "$DOCKER_DIR/data" "$PROJECT_DIR/backend/data"
-
-mkdir -p "$DOCKER_DIR/config"
-link "$DOCKER_DIR/config/model_routes.json" "$PROJECT_DIR/backend/config/model_routes.json"
 
 # ── Agent Hub: git plane + agent work directories ───────────────────────────
 # Forgejo's bare repositories and SQLite database.  A real directory, always

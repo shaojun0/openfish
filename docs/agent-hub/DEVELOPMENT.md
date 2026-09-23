@@ -9,7 +9,7 @@
 ## 0. 背景与定位
 
 openfish 目前是企业内网一体化平台：PyPI / npm / Docker / apt / Node 五个真实协议面、
-制品库、模型路由（`backend/config/model_routes.json` + `/api/v1/models/resolved`）、
+制品库、模型路由（`model_routes` 表 + `/api/v1/models/resolved`）、
 五表 RBAC、API-key、设备授权、私网 CA，以及下游 DSH 企业内网插件
 （`integrations/dsh-plugin-enterprise-intranet`）。
 
@@ -54,7 +54,7 @@ openfish 目前是企业内网一体化平台：PyPI / npm / Docker / apt / Node
       │  webhook → agent_task 入队
       ▼
 ③ 智能体取任务 → 起沙箱 → clone → 读 AGENTS.md + policy
-      │  跑 gates（backend/scripts/check_*.py）
+      │  跑校验套件（.agent/checks/ → policy checks: → manifest 自动发现）
       ▼
 ④ 产出 finding（结构化对象，带 fingerprint）
       │  与既有 finding 去重 → 状态机推进
@@ -127,7 +127,7 @@ openfish 负责「治理与智能」（权限、finding、策略、任务、审�
 | `services/repo_context.py` | 给 agent 组装上下文：issue 证据、提交历史、finding 历史、policy | 不调模型 |
 | `services/findings.py` | fingerprint、去重、状态机、激活条件、投影为 PR 评论 | 不做规则判定 |
 | `services/review_policy.py` | 读 `.agent/review-policy.yml`，解析 exception 与到期 | 不写文件 |
-| `services/gates.py` | 发现并执行 `backend/scripts/check_*.py`，归一化结果 | 不判定业务规则 |
+| `services/gates.py` | 执行已解析的校验套件（`run_suite()` + `SubprocessGateExecutor`），归一化结果；套件解析在 `services/check_suite.py` | 不判定业务规则 |
 | `services/agent_runner.py` | 起沙箱、注入模型配置（复用 `/api/v1/models/resolved`）、执行、回收产物 | 不存状态（状态在 DB） |
 | `services/agent_queue.py` | DB 队列：入队/领取/心跳/重试/死信 | 不做调度策略 |
 | `routes/repos.py` 等 | JSON 契约 + 权限点绑定 | 不放业务逻辑 |
@@ -159,8 +159,10 @@ openfish 负责「治理与智能」（权限、finding、策略、任务、审�
 | 模型路由解析 | `services/model_routes.py::resolve` | 已有 |
 | 后端风格（`from __future__`、`X \| None`、logger 命名） | `ARCHITECTURE.md` §代码约定 | 权威 |
 
-**门禁必须继续通过**：`backend/scripts/check_lint.py`（pyflakes）、`check_openapi.py`、
-`check_contract.py`、`check_permission_catalog.py`。新增权限点必须同步目录。
+**后端不再有仓库自带门禁**：`backend/scripts/` 已整体删除，人 / CI 只剩根 `Makefile` 的
+`make gates-frontend`（前端 smoke）。后端改动要自证，就把它放进仓库的校验套件——按
+`.agent/checks/`（版本化）→ `.agent/review-policy.yml` 的 `checks:` → manifest 自动发现
+解析，都命中不到即 `unverified`。新增权限点必须同步 `auth/permissions.py` 目录。
 
 ---
 
@@ -296,7 +298,7 @@ fingerprint = sha256(f"{rule_id}\x00{file_path}\x00{symbol}\x00{context_key}")
 - 沿用现有建表方式（`models/base.py` + 启动时 create_all / 现有 migration 习惯）。
 - **不引入 alembic**（现有工程没有）。新增列用「create_all + 幂等 ALTER 助手」，
   助手放 `models/agent_hub_migrate.py`，只处理本模块的表。
-- SQLite 与 PostgreSQL 都必须可用（`check_database.py` 是门禁）。
+- SQLite 与 PostgreSQL 都必须可用（幂等迁移助手必须在两种引擎上都成立）。
 
 ### 4.6 finding ↔ issue 关联（导入历史的直接价值）
 
@@ -348,7 +350,7 @@ Basic 由 Forgejo 校验，它不认识平台的 API key（§13.1）。
 token 用 Fernet（`GIT_IDENTITY_KEY`）加密落库、按用户隔离、到期轮换，用户被禁用即撤销
 （`cli.py disable-user`）。缺 `GIT_IDENTITY_KEY` 时该端点返回 **503**，**不降级为明文**。
 
-### 5.3 REST 契约（`/api/v1`，需同步 `openapi/` 与 `check_contract.py`）
+### 5.3 REST 契约（`/api/v1`，新增路由需同步 `openapi/`）
 
 ```
 GET    /api/v1/repos                          # 列表，?q=&kind=&page=
@@ -386,7 +388,7 @@ GET    /api/v1/repos/<slug>/context/search    # ?q= → issue/commit/finding 混
 | `issues` | 若 label 含 `agent` → 入队 `fix` 任务 |
 
 **安全**：webhook 必须校验共享密钥（`X-Forgejo-Signature` HMAC），
-密钥来自环境变量，**不进仓库**（与 `model_routes.json` 的「不落密」原则一致）。
+密钥来自环境变量，**不进仓库**（与 `model_routes` 表的「不落密」原则一致）。
 
 ---
 
@@ -431,7 +433,7 @@ GET    /api/v1/repos/<slug>/context/search    # ?q= → issue/commit/finding 混
 | 违反「一个关注点一份实现」的重复实现 | 缓存/存储策略替换 |
 | 缺文档、文档与路由表不一致 | 权限模型与角色设计 |
 | `openapi.json` 顺序等机械契约 | 协议面语义变更 |
-| gates 失败的直接修复 | 任何需要改 `model_routes.json` 的改动 |
+| gates 失败的直接修复 | 任何需要改模型路由表（`model_routes`）的改动 |
 
 规则归属写在 policy 文件里（`autofix: true|false`），**默认 false**。
 
@@ -472,7 +474,7 @@ escalation:
   rule_count_threshold: 20   # 同规则累计条数触发升级
 ```
 
-### 7.3 约束（API 层校验，写进 `check_contract`）
+### 7.3 约束（由 API 层校验强制）
 
 - `exceptions[*].due` **必填**且必须 > 今天；缺少即 400。
 - 引用不存在的 `rule_id` 的 exception 视为无效，读取时给出 warning 列表。
@@ -560,7 +562,7 @@ docker compose --profile runner up -d runner
 - 资源限制：`--cpus 2 --memory 2g --pids-limit 512`。
 - **凭据边界（已落地）**：runner 容器**不继承** backend 的
   `SECRET_KEY` / `FORGEJO_ADMIN_TOKEN` / `GIT_IDENTITY_KEY`（见
-  `docker/docker-compose.yml` 的 `x-runner-env`）；仓库自带的 `check_*.py`
+  `docker/docker-compose.yml` 的 `x-runner-env`）；仓库自带的校验套件命令
   与 headless review 命令再经 `services/sandbox_env.py` 的白名单过滤，拿不到
   任何平台密钥。runner 默认只用一枚可单独吊销的
   `FORGEJO_RUNNER_TOKEN`（git credential helper + 开 PR）——仓库可用专属凭据覆盖
@@ -573,8 +575,9 @@ docker compose --profile runner up -d runner
 - **沙箱 uid 分离（切片 A，已落地）**：worker 以 root（effective
   `CAP_SETUID` + `CAP_SETGID` + `CAP_DAC_OVERRIDE`，且属于共享组 gid 10000；
   Docker 只对 root 进程授予 effective capability，非 root `USER` 下 cap_add 只进
-  bounding set、降权无法完成）运行；仓库自带的
-  `check_*.py` 与 headless review 命令被降到**沙箱 uid 10002**（共享组 gid 10000），
+  bounding set、降权无法完成）运行；仓库自带的校验套件命令（`.agent/checks/` /
+  manifest 自动发现）与 headless review 命令被降到**沙箱 uid 10002**（共享组
+  gid 10000），
   任务工作树组可写 + setgid 且 **owner 不变**（只 `chgrp`，绝不 `chown`，worker 的
   `git` 不会报 dubious ownership）。因此不可信代码读不到 worker 的
   `/proc/<pid>/environ`，也就偷不到 `FORGEJO_RUNNER_TOKEN` / `RUNNER_CREDENTIAL_KEY`；
@@ -601,7 +604,7 @@ docker compose --profile runner up -d runner
      后续切片。
   2. *文件系统/数据面*：uid 分离已堵住「读 worker 环境偷凭据」，但 runner 仍以可写
      方式挂载 `./data:/app/data`（平台 SQLite 库所在），而它同时执行仓库自带的
-     `check_*.py`——**平台 DB 仍可被不可信代码读取（G1）**；此外所有任务共用沙箱
+     校验套件命令——**平台 DB 仍可被不可信代码读取（G1）**；此外所有任务共用沙箱
      uid 10002，`/work` 上**跨任务 / 跨仓库可读**。两条都要靠每任务命名空间 / 物理
      runner，或窄队列接口 / 独立库来闭合。
   在补齐前，「隔离覆盖文件系统」仍**不成立**。
@@ -621,10 +624,18 @@ runner 执行时固定流程：
 
 ### 9.4 gates 归一化（`services/gates.py`）
 
-- 发现 `backend/scripts/check_*.py`，逐个执行，**每个 gate 独立超时（默认 120s）**。
+- 套件解析只有一处（`services/check_suite.py`），顺序固定：`.agent/checks/`（版本化，
+  AI 策展）→ `.agent/review-policy.yml` 的 `checks:`（人工声明）→ manifest 自动发现
+  （`package.json` scripts / pytest·ruff·mypy / `go.mod` / `Cargo.toml` / `Makefile`）
+  → 都命中不到就是 **`unverified`**，不当作通过。
+- 执行与归一化只有一处：`services/gates.py` 的 `run_suite()` + `SubprocessGateExecutor`
+  （`CheckCommand` / `CheckSuite` / `GateSummary`），**每个 gate 独立超时（默认 120s）**。
 - 输出归一化为 `{gate, passed, exit_code, stdout_tail, duration_ms}`，落 `review_runs` 计数。
-- gates **必须是 agent 的自证验收**：PR 描述里要贴 gates 汇总，CI 里也要跑同一份。
-- 与 CI 的关系：CI workflow 调同一入口（见 §10），避免「本地过、CI 不过」两套真相。
+- gates **必须是 agent 的自证验收**：PR 描述里要贴 gates 汇总。
+- 人 / CI 的同一入口现在只剩根 `Makefile` 的 `make gates-frontend`（前端 smoke）——
+  后端**不再有**仓库自带门禁（`backend/scripts/` 已整体删除），
+  `.github/workflows/gates.yml` 也只有 frontend job；避免「本地过、CI 不过」两套真相
+  靠这一处入口，而不是新增离线脚本。
 
 ### 9.5 findings 产出 schema（runner ↔ platform 的唯一接口）
 
@@ -645,7 +656,7 @@ runner 执行时固定流程：
       "autofix": false
     }
   ],
-  "gates": [{"gate": "check_lint", "passed": true, "duration_ms": 812}]
+  "gates": [{"gate": "pytest", "passed": true, "duration_ms": 812}]
 }
 ```
 
@@ -657,14 +668,14 @@ runner 执行时固定流程：
 
 | 要求 | 落点 |
 |---|---|
-| 新增 `make gates` 入口 | 根 `Makefile`：串起 `backend/scripts/check_*.py` + 前端 smoke |
-| CI | `.github/workflows/gates.yml`（**仓库当前没有 CI**，这是 B 的地基） |
+| 校验入口 | 根 `Makefile`：只剩 `make gates-frontend`（前端 smoke）；后端不再有仓库自带门禁 |
+| CI | `.github/workflows/gates.yml`（现在只有 frontend job，见 §9.4） |
 | 边缘路由 | `docker/nginx/nginx.conf` 增 `/git/`、`/forgejo-api/`；SPA 增 `/repos`、`/findings` |
 | compose | `docker/docker-compose.yml` 增 `forgejo`、`runner`（profile） |
 | 挂载 | `docker/prepare-mounts.sh` 增 `forgejo/`、`agent-work/` |
 | 前端 | `frontend/src/views/` 增 Repos / RepoDetail / Findings / Import；照抄现有 `usePagination` |
-| OpenAPI | `openapi/` 注册新路由；`check_openapi.py` / `check_contract.py` 必须过 |
-| 权限目录 | `auth/permissions.py` + `check_permission_catalog.py` + `check_permission_labels.py` |
+| OpenAPI | `openapi/` 注册新路由，spec 必须与视图一致 |
+| 权限目录 | `auth/permissions.py` 声明权限点，`services/authz.py` 播种角色 |
 | 文档 | 本文件 + `README.md` 一节 + `/documentation` 生态文档条目 |
 
 ---
@@ -677,7 +688,7 @@ runner 执行时固定流程：
 
 | 切片 | 交付 | 关键文件（新建） | 依赖 |
 |---|---|---|---|
-| **S0 基座** | 表结构、权限点、队列、CLI、Makefile、CI | `models/agent_hub.py`、`models/agent_hub_migrate.py`、`auth/permissions.py`【共享】、`services/agent_queue.py`、`Makefile`、`.github/workflows/gates.yml`、`scripts/check_agent_hub.py` | 无 |
+| **S0 基座** | 表结构、权限点、队列、CLI、Makefile、CI | `models/agent_hub.py`、`models/agent_hub_migrate.py`、`auth/permissions.py`【共享】、`services/agent_queue.py`、`Makefile`、`.github/workflows/gates.yml` | 无 |
 | **S1 仓库与 git 面** | 仓库 CRUD、git 协议暴露、webhook、导入驱动 | `services/repo_import.py`、`routes/repos.py`、`routes/repo_webhook.py`、`docker/forgejo/`、nginx 片段 | S0 |
 | **S2 上下文检索** | issue 镜像、检索 API、证据关联 | `services/repo_context.py`、`models/repo_issue.py`、`routes/repo_context.py` | S0 |
 | **S3 Findings 状态机** | fingerprint、去重、状态机、policy、决策 API | `services/findings.py`、`services/review_policy.py`、`routes/findings.py` | S0 |
@@ -687,11 +698,10 @@ runner 执行时固定流程：
 **验收（集成后由主智能体执行）**
 
 ```bash
-cd backend && python scripts/check_lint.py && python scripts/check_openapi.py \
-  && python scripts/check_contract.py && python scripts/check_permission_catalog.py \
-  && python scripts/check_database.py && python scripts/check_agent_hub.py
-cd frontend && npm run smoke
-make gates
+# 后端：把校验命令放进仓库的校验套件（.agent/checks/ 或 .agent/review-policy.yml 的
+# checks:），由 services/gates.py 的 run_suite() 执行；解析不到即 unverified。
+# 前端：仓库唯一的自带门禁入口（内部就是 cd frontend && npm run smoke）。
+make gates-frontend
 ```
 
 ---

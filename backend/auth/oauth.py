@@ -8,7 +8,6 @@ directory silently orphaned their roles.
 
 from __future__ import annotations
 
-import logging
 import urllib.parse
 from urllib.parse import urlencode
 
@@ -16,8 +15,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 
 from config import settings
-
-logger = logging.getLogger("cpypiserver.oauth")
+from services.headers import checked_headers
 
 
 def _verify() -> str | bool:
@@ -59,7 +57,14 @@ def introspect_token(token: str) -> dict | None:
         return None
     try:
         params = {"productId": settings.auth.oauth2_product_id}
-        headers = {"authorization": f"Bearer {token}"}
+        # ``token`` arrives from the caller's Authorization header, so it is the
+        # textbook "untrusted value into an outbound header" shape: the allowlist
+        # is applied here, at the boundary, and a value that is not one printable
+        # line is refused before anywhere else sees it.
+        headers = checked_headers(
+            {"authorization": f"Bearer {token}"},
+            context="oauth2 introspection",
+        )
         resp = requests.get(
             f"{url}?{urllib.parse.urlencode(params)}",
             headers=headers, verify=_verify(), timeout=(5, 10),
@@ -67,7 +72,6 @@ def introspect_token(token: str) -> dict | None:
         resp.raise_for_status()
         return resp.json()
     except Exception:
-        logger.warning("Token introspection failed", exc_info=True)
         return None
 
 
@@ -96,7 +100,10 @@ def exchange_code(code: str) -> dict | None:
 
     try:
         payload = f"grant_type=authorization_code&code={code}"
-        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        headers = checked_headers(
+            {"Content-Type": "application/x-www-form-urlencoded"},
+            context="oauth2 code exchange",
+        )
         resp = requests.post(
             token_url, data=payload, headers=headers,
             auth=HTTPBasicAuth(
@@ -106,8 +113,6 @@ def exchange_code(code: str) -> dict | None:
         )
         if resp.status_code == 200:
             return resp.json()
-        logger.warning("Code exchange failed: HTTP %s", resp.status_code)
     except Exception as exc:
-        logger.warning("Code exchange failed: %s", exc)
         raise
     return None

@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+
 from flask import jsonify, redirect, request
 
 from config import settings
 from extensions import Extension
 from errors import PypiError, UnauthorizedError, BadRequestError, UploadConflictError
 from auth.oauth import get_authorize_url
+from services.logsafe import scrub
+
+_log = logging.getLogger("cpypiserver.errors")
 
 #: Blueprints that serve the SPA and machine clients.  These must always answer
 #: JSON — an HTML redirect would be followed silently by XHR, and the client
@@ -22,6 +27,17 @@ _API_BLUEPRINTS = {
     "session", "api_keys", "admin", "access",
     "npm", "docker", "debian", "hub", "docs",
 }
+
+#: What a 5xx says instead of the exception's own text.
+#:
+#: A ``PypiError(..., status_code=500)`` is raised where the *server* failed —
+#: no sealing key, a dead database, a Forgejo call that raised.  Those messages
+#: are built from ``str(exc)`` and carry a driver message, a socket error, a
+#: filesystem path or a configuration detail: exactly the "system or debug
+#: information sent to a remote machine" an audit reports as information
+#: disclosure.  The operator still gets the whole thing — in the log, where it
+#: belongs — and the caller gets a status with no internals in it.
+_SERVER_ERROR_TEXT = "Internal server error"
 
 
 class ErrorHandlersExtension(Extension):
@@ -49,7 +65,7 @@ class ErrorHandlersExtension(Extension):
         # handler, so BadRequestError / UploadConflictError below still win.
         @app.errorhandler(PypiError)
         def _pypi_error(exc: PypiError):
-            return _json_error({"error": exc.message}, exc.status_code)
+            return _json_error({"error": _client_text(exc)}, exc.status_code)
 
         @app.errorhandler(404)
         def _404(exc):
@@ -65,15 +81,41 @@ class ErrorHandlersExtension(Extension):
 
         @app.errorhandler(500)
         def _500(exc):
-            return _json_error({"error": "Internal server error"}, 500)
+            return _json_error({"error": _SERVER_ERROR_TEXT}, 500)
 
         @app.errorhandler(BadRequestError)
         def _400(exc):
-            return _json_error({"error": exc.message}, 400)
+            return _json_error({"error": _client_text(exc)}, 400)
 
         @app.errorhandler(UploadConflictError)
         def _409(exc):
-            return _json_error({"error": exc.message}, 409)
+            return _json_error({"error": _client_text(exc)}, 409)
+
+
+#: The statuses whose message may name an internal.  ``500`` and up is the
+#: server telling on itself; a ``4xx`` is about the request that just arrived,
+#: and withholding it would leave a client unable to fix its own call.
+_REDACT_FROM = 500
+
+
+def _client_text(exc: PypiError) -> str:
+    """The message a ``PypiError`` may put on the wire.
+
+    Everything a ``4xx`` carries was written for the caller (``"role not found"``,
+    ``"invalid repository slug; expected '<owner>/<name>'"``).  From ``500`` up
+    the message is *our* failure and is replaced with a constant — the original
+    goes to the log, scrubbed, so the operator keeps the diagnostic.
+    """
+    if exc.status_code < _REDACT_FROM:
+        return exc.message
+    _log.error(
+        "%s -> %s %s",
+        type(exc).__name__,
+        exc.status_code,
+        scrub(exc.message),
+        exc_info=exc,
+    )
+    return _SERVER_ERROR_TEXT
 
 
 #: Every error body is JSON, but an error body *quotes* an input (a filename, a
@@ -89,7 +131,7 @@ def _json_error(payload: dict, status: int):
 
 
 def _unauthorized_json(exc: UnauthorizedError):
-    resp = _json_error({"error": exc.message}, 401)
+    resp = _json_error({"error": _client_text(exc)}, 401)
     if exc.www_authenticate:
         resp.headers["WWW-Authenticate"] = exc.www_authenticate
     return resp
