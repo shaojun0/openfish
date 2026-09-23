@@ -11,6 +11,12 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
+# ── Ad-hoc local backups ────────────────────────────────────────────
+# A pre-refactor copy kept beside the code (``.bak_*``) is a local safety net,
+# never a commit.  8a6c759 accidentally tracked a 3 MB one that carried a live
+# SQLite WAL.
+.bak_*/
+
 # ── Frontend ────────────────────────────────────────────────────────
 # Dependencies are installed locally; the bundle is produced by `npm run build`
 # (or by the frontend image build) and is not committed.
