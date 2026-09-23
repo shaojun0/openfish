@@ -1113,7 +1113,7 @@ def cmd_worker(args: argparse.Namespace) -> int:
         worker = build_worker(queue, name=args.worker, poll_interval=args.poll_interval)
         did_work = worker.run_once()
         if not did_work:
-            pass
+            print("no task available")
         engine.dispose()
         return 0
 
@@ -1121,9 +1121,11 @@ def cmd_worker(args: argparse.Namespace) -> int:
     try:
         settled = worker.run_loop(stop_after=args.max_tasks or None)
     except KeyboardInterrupt:  # pragma: no cover - interactive only
+        print("\ninterrupted")
         settled = 0
     finally:
         engine.dispose()
+    print(f"{worker.name}: settled {settled} task(s)")
     return 0
 
 
@@ -1133,8 +1135,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     queue = AgentQueue(engine)
     queue.ensure_schema()
     stats = queue.stats()
+    print(f"database : {_safe_url(resolve_database_url(args.db))}")
     for status in TASK_STATUS:
-        pass
+        print(f"  {status:<8} {stats.by_status.get(status, 0)}")
+    print(f"  ready    {stats.ready}    expired leases {stats.expired}")
     engine.dispose()
     return 0
 
@@ -1192,6 +1196,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except ValueError as exc:
+        print(f"error: {exc}")
         return 2
     except KeyboardInterrupt:  # pragma: no cover - interactive only
         return 130
