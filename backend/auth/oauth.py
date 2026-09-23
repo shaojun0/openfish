@@ -8,6 +8,7 @@ directory silently orphaned their roles.
 
 from __future__ import annotations
 
+import logging
 import urllib.parse
 from urllib.parse import urlencode
 
@@ -16,6 +17,8 @@ from requests.auth import HTTPBasicAuth
 
 from config import settings
 from services.headers import checked_headers
+
+logger = logging.getLogger("cpypiserver.oauth")
 
 
 def _verify() -> str | bool:
@@ -72,6 +75,7 @@ def introspect_token(token: str) -> dict | None:
         resp.raise_for_status()
         return resp.json()
     except Exception:
+        logger.warning("Token introspection failed", exc_info=True)
         return None
 
 
@@ -113,6 +117,8 @@ def exchange_code(code: str) -> dict | None:
         )
         if resp.status_code == 200:
             return resp.json()
+        logger.warning("Code exchange failed: HTTP %s", resp.status_code)
     except Exception as exc:
+        logger.warning("Code exchange failed: %s", exc)
         raise
     return None

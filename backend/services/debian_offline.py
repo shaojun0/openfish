@@ -48,6 +48,7 @@ Honest limits, stated up front
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import shutil
@@ -67,6 +68,7 @@ from services.format import human_size
 from services.paths import contained_resolved
 from services.upstream import UpstreamError, stream_into
 
+logger = logging.getLogger("cpypiserver.debian.offline")
 
 # ── Document identities ──────────────────────────────────────────────
 SNAPSHOT_MAGIC = "OFDEB-SNAPSHOT 1"
@@ -517,6 +519,7 @@ def scan_local_packages(root: str | Path) -> dict[tuple[str, str], Package]:
             continue
         parsed = parse_deb_filename(path.name)
         if parsed is None:
+            logger.debug("ignoring unparseable .deb name: %s", path)
             continue
         entry = Package(
             name=parsed.name,
@@ -685,7 +688,7 @@ def _local_index(suite: str, component: str, arch: str) -> tuple[str | None, str
             try:
                 return _decode_index(path.read_bytes(), path.name), f"local:{candidate}"
             except OSError as exc:  # pragma: no cover - unreadable local file
-                pass
+                logger.warning("cannot read local apt index %s: %s", path, exc)
     return None, ""
 
 
@@ -720,6 +723,7 @@ def load_packages_index(
         try:
             frozen = client.get_bytes(candidate, max_bytes=_MAX_INDEX_BYTES)
         except UpstreamError as exc:
+            logger.info("apt offline index %s unavailable: %s", candidate, exc)
             continue
         if frozen.status_code >= 400:
             continue
@@ -779,6 +783,10 @@ def load_universe(
                     )
                     if pkg is not None:
                         packages.append(pkg)
+                logger.debug(
+                    "apt offline index %s/%s/binary-%s loaded from %s",
+                    suite, component, arch, source,
+                )
     return Universe.build(_dedupe(packages)), notes
 
 
@@ -1262,14 +1270,17 @@ def _fetch_package(filename: str, destination: Path, *, root: Path) -> tuple[boo
     try:
         resp = client.request("GET", filename, stream=True)
     except UpstreamError as exc:
+        logger.warning("offline bundle fetch %s failed: %s", filename, exc)
         return False, "unreachable"
     if resp.status_code >= 400:
         status = resp.status_code
         resp.close()
+        logger.info("offline bundle fetch %s -> %s", filename, status)
         return False, f"upstream-{status}"
     try:
         stream_into(resp, destination)
     except (UpstreamError, OSError) as exc:  # pragma: no cover - network abort
+        logger.warning("offline bundle fetch %s failed mid-body: %s", filename, exc)
         return False, "download-failed"
     return True, "upstream"
 
@@ -1628,7 +1639,7 @@ def _publish_flat(destination: Path, base: Path) -> None:
     try:
         shutil.copyfile(destination, flat)
     except OSError as exc:  # pragma: no cover - read-only repo
-        pass
+        logger.warning("cannot publish flat copy of %s: %s", destination, exc)
 
 
 def import_bundle(
@@ -1724,7 +1735,7 @@ def import_bundle(
             provenance.parent.mkdir(parents=True, exist_ok=True)
             provenance.write_text(manifest_text, encoding="utf-8")
         except OSError as exc:  # pragma: no cover - read-only repo
-            pass
+            logger.warning("cannot store bundle provenance in %s: %s", base, exc)
 
         return ImportReport(
             imported=imported,

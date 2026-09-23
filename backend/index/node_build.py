@@ -24,6 +24,7 @@ never advertise a version this server would then 404.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import asdict
@@ -33,6 +34,7 @@ from typing import Any
 from index.base import WatchdogIndex, compute_sha256, invalidate_digest_cache
 from schemas import NodeBuildFile
 
+logger = logging.getLogger("cpypiserver.node_build")
 
 #: ``node-v20.11.0-linux-x64.tar.xz`` and friends.  The version's optional
 #: prerelease suffix is restricted to the names Node actually publishes
@@ -298,9 +300,11 @@ class NodeBuildIndex(WatchdogIndex):
     # ── Full scan ───────────────────────────────────────────────────
 
     def _full_scan(self) -> None:
+        logger.info("Scanning node-builds: %s", self._dir)
         by_release: dict[str, list[NodeBuildFile]] = {}
         builds_path = Path(self._dir)
         if not builds_path.is_dir():
+            logger.warning("Node builds dir missing: %s", self._dir)
             with self._lock:
                 self._by_release = by_release
                 self._meta = {}
@@ -322,6 +326,10 @@ class NodeBuildIndex(WatchdogIndex):
         with self._lock:
             self._by_release = by_release
             self._meta = self._load_index_overlay(builds_path)
+        logger.info(
+            "Found %d Node release(s) with %d build(s)",
+            len(by_release), sum(len(v) for v in by_release.values()),
+        )
 
     @staticmethod
     def _load_index_overlay(base: Path) -> dict[str, dict[str, Any]]:
@@ -334,6 +342,7 @@ class NodeBuildIndex(WatchdogIndex):
         try:
             data = json.loads(overlay_file.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
+            logger.warning("ignoring unreadable %s: %s", overlay_file, exc)
             return {}
         if not isinstance(data, list):
             return {}
@@ -361,6 +370,7 @@ class NodeBuildIndex(WatchdogIndex):
             files[:] = [f for f in files if f.filename != bf.filename]
             files.append(bf)
             files.sort(key=lambda f: f.filename)
+        logger.debug("Node build index updated: %s", bf.filename)
 
     def _remove(self, abs_path: str) -> None:
         filename = os.path.basename(abs_path)
@@ -373,6 +383,7 @@ class NodeBuildIndex(WatchdogIndex):
             files[:] = [f for f in files if f.filename != filename]
             if not files:
                 del self._by_release[release_tag]
+        logger.debug("Node build index removed: %s", filename)
 
     # ── Serialisation helper shared with the routes ─────────────────
 

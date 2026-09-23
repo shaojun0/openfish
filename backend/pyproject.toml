@@ -58,6 +58,9 @@ dependencies = [
 
 [project.optional-dependencies]
 prod = ["gunicorn>=22"]
+# Verification gates — see scripts/check_openapi.py, check_contract.py and
+# check_lint.py (pyflakes: undefined names / dead imports).
+dev = ["openapi-spec-validator>=0.7", "pyflakes>=3.2"]
 
 [project.scripts]
 cpypiserver = "app:main"

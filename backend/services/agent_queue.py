@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import socket
 import threading
@@ -76,6 +77,7 @@ from config import settings
 from config.agent import AgentConfig
 from models.agent_hub import TASK_KIND, TASK_STATUS, AgentTask, RepoRunner
 
+logger = logging.getLogger("cpypiserver.agent_queue")
 
 #: How often a worker renews ``lease_until`` while a task runs (§9.1: 15s).
 DEFAULT_HEARTBEAT_SECONDS = 15.0
@@ -505,6 +507,10 @@ class AgentQueue:
                     ).limit(1)
                 ).first()
                 if duplicate is not None:
+                    logger.info(
+                        "Suppressed duplicate %s task for repo %d (dedup_key=%s, "
+                        "active task %s)", kind, repo_id, key, duplicate[0],
+                    )
                     return 0
             # The logical runner owns this repo's settings (0 = inherit); it is
             # resolved before the ceiling check and stamped onto the task.
@@ -525,6 +531,10 @@ class AgentQueue:
                     )
                 ).scalar() or 0
                 if int(active) >= ceiling:
+                    logger.warning(
+                        "Repo %d is at its in-flight ceiling (%d); suppressed %s "
+                        "task (dedup_key=%s)", repo_id, ceiling, kind, key,
+                    )
                     return 0
             task = AgentTask(
                 repo_id=repo_id,
@@ -542,6 +552,7 @@ class AgentQueue:
             session.add(task)
             session.commit()
             task_id = int(task.id)
+        logger.info("Enqueued %s task %d for repo %d", kind, task_id, repo_id)
         return task_id
 
     # ── consumer ─────────────────────────────────────────────────────
@@ -669,6 +680,8 @@ class AgentQueue:
                     expires_at=expires, attempts=int(task.attempts),
                 ),
             )
+        logger.info("Leased task %d (%s) to %s until %s",
+                    claimed.id, claimed.kind, worker, expires.isoformat())
         return claimed
 
     @contextmanager
@@ -698,6 +711,10 @@ class AgentQueue:
         def _beat() -> None:
             while not stop.wait(self.heartbeat_seconds):
                 if not self.heartbeat(claimed.lease):
+                    # Either the lease was lost (reclaimed) or the row is gone.
+                    logger.warning("Heartbeat lost for task %d (%s) — worker %s "
+                                   "must assume it no longer owns it",
+                                   claimed.id, claimed.kind, worker)
                     return
 
         beat = threading.Thread(target=_beat, name=f"agent-queue-hb-{claimed.id}", daemon=True)
@@ -753,6 +770,8 @@ class AgentQueue:
                 )
             ).scalar_one_or_none()
             if task is None:
+                logger.warning("Task %d outcome ignored: lease held by %s is gone",
+                               lease.task_id, lease.worker)
                 return "lost"
 
             attempts = int(task.attempts) + 1
@@ -772,9 +791,11 @@ class AgentQueue:
                 outcome = "queued"
             session.commit()
         if outcome == "dead":
-            pass
+            logger.error("Task %d is dead after %d attempt(s): %s",
+                         lease.task_id, attempts, error)
         else:
-            pass
+            logger.warning("Task %d failed (attempt %d) — retry scheduled: %s",
+                           lease.task_id, attempts, error)
         return outcome
 
     def _finish(
@@ -799,7 +820,8 @@ class AgentQueue:
             )
             session.commit()
         if not result.rowcount:
-            pass
+            logger.warning("Task %d outcome %r ignored: lease held by %s is gone",
+                           lease.task_id, status, lease.worker)
         return bool(result.rowcount)
 
     def _transition(
@@ -880,11 +902,13 @@ class AgentQueue:
 
         for outcome in outcomes:
             if outcome.status == "dead":
-                pass
+                logger.error("Reclaimed task %d as dead after %d attempt(s)",
+                             outcome.task_id, outcome.attempts)
             else:
-                pass
+                logger.warning("Reclaimed expired task %d (was %s, attempt %d) — requeued",
+                               outcome.task_id, outcome.previous_status, outcome.attempts)
         if not outcomes:
-            pass
+            logger.debug("Reclaim sweep found no expired leases")
         return ReclaimReport(reclaimed=tuple(outcomes))
 
     # ── operator actions (POST /agent/tasks/<id>/retry|cancel) ───────
@@ -985,6 +1009,9 @@ def placeholder_handler(task: ClaimedTask) -> str | None:
     up, which is exactly the A1 defect :func:`default_handler` fixes.  It logs
     loudly for that reason.
     """
+    logger.warning(
+        "Retiring %s task %d with the placeholder handler — no sandbox runner is "
+        "configured (payload=%s)", task.kind, task.id, task.payload)
     return f"placeholder:{task.id}"
 
 
@@ -1030,11 +1057,13 @@ class Worker:
         self.queue.reclaim_expired()
         with self.queue.lease(worker=self.name) as claimed:
             if claimed is None:
+                logger.debug("Worker %s found nothing to do", self.name)
                 return False
             self.queue.mark_running(claimed.lease)
             try:
                 result_ref = self.handler(claimed)
             except Exception as exc:  # noqa: BLE001 - one task must not kill the worker
+                logger.exception("Task %d handler raised", claimed.id)
                 self.queue.fail(claimed.lease, error=f"{type(exc).__name__}: {exc}")
                 return True
             self.queue.succeed(claimed.lease, result_ref=result_ref)
@@ -1049,6 +1078,9 @@ class Worker:
         cheap.
         """
         settled = 0
+        logger.info("Worker %s started (poll=%ss, lease=%ss, heartbeat=%ss)",
+                    self.name, self.poll_interval,
+                    self.queue.lease_seconds, self.queue.heartbeat_seconds)
         # Dead-letter alerting: a task that exhausts its attempts becomes `dead`
         # and stops being retried.  Nothing else in the loop would tell an
         # operator, so re-read the count on a slow cadence and log at ERROR
@@ -1067,13 +1099,20 @@ class Worker:
                     try:
                         dead = int(self.queue.stats().by_status.get("dead", 0))
                     except Exception as exc:  # noqa: BLE001 - a stats blip is not fatal
+                        logger.debug("cannot read queue stats: %s", exc)
                         dead = last_dead
                     if dead > last_dead:
-                        pass
+                        logger.error(
+                            "死信队列：%d 个任务已 dead（不会再重试）。"
+                            "查看与重试：GET /api/v1/agent/tasks?status=dead "
+                            "与 POST /api/v1/agent/tasks/<id>/retry",
+                            dead,
+                        )
                     last_dead = dead
                 time.sleep(self.poll_interval)
         except KeyboardInterrupt:  # pragma: no cover - interactive only
-            pass
+            logger.info("Worker %s interrupted after %d task(s)", self.name, settled)
+        logger.info("Worker %s stopped after %d task(s)", self.name, settled)
         return settled
 
 
@@ -1113,7 +1152,7 @@ def cmd_worker(args: argparse.Namespace) -> int:
         worker = build_worker(queue, name=args.worker, poll_interval=args.poll_interval)
         did_work = worker.run_once()
         if not did_work:
-            pass
+            print("no task available")
         engine.dispose()
         return 0
 
@@ -1121,9 +1160,11 @@ def cmd_worker(args: argparse.Namespace) -> int:
     try:
         settled = worker.run_loop(stop_after=args.max_tasks or None)
     except KeyboardInterrupt:  # pragma: no cover - interactive only
+        print("\ninterrupted")
         settled = 0
     finally:
         engine.dispose()
+    print(f"{worker.name}: settled {settled} task(s)")
     return 0
 
 
@@ -1133,8 +1174,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     queue = AgentQueue(engine)
     queue.ensure_schema()
     stats = queue.stats()
+    print(f"database : {_safe_url(resolve_database_url(args.db))}")
     for status in TASK_STATUS:
-        pass
+        print(f"  {status:<8} {stats.by_status.get(status, 0)}")
+    print(f"  ready    {stats.ready}    expired leases {stats.expired}")
     engine.dispose()
     return 0
 
@@ -1192,6 +1235,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except ValueError as exc:
+        print(f"error: {exc}")
         return 2
     except KeyboardInterrupt:  # pragma: no cover - interactive only
         return 130

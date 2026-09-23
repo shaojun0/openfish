@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from pathlib import Path
 from index.base import WatchdogIndex, compute_sha256, invalidate_digest_cache
 from schemas import PythonBuildFile
 
+logger = logging.getLogger("cpypiserver.python_build")
 
 _BUILD_PATTERN = re.compile(
     r"^(?P<flavor>cpython|pypy)"
@@ -105,9 +107,11 @@ class PythonBuildIndex(WatchdogIndex):
     # ── Full scan ───────────────────────────────────────────────────
 
     def _full_scan(self) -> None:
+        logger.info("Scanning python-builds: %s", self._dir)
         by_release: dict[str, list[PythonBuildFile]] = {}
         builds_path = Path(self._dir)
         if not builds_path.is_dir():
+            logger.warning("Builds dir missing: %s", self._dir)
             with self._lock:
                 self._by_release = by_release
             return
@@ -130,6 +134,10 @@ class PythonBuildIndex(WatchdogIndex):
                 by_release[release_tag] = entries
         with self._lock:
             self._by_release = by_release
+        logger.info(
+            "Found %d release(s) with %d build(s)",
+            len(by_release), sum(len(v) for v in by_release.values()),
+        )
 
     # ── Incremental ─────────────────────────────────────────────────
 
@@ -151,6 +159,7 @@ class PythonBuildIndex(WatchdogIndex):
             files[:] = [f for f in files if f.filename != pf.filename]
             files.append(pf)
             files.sort(key=lambda f: f.filename)
+        logger.debug("Build index updated: %s", pf.filename)
 
     def _remove(self, abs_path: str) -> None:
         filename = os.path.basename(abs_path)
@@ -163,3 +172,4 @@ class PythonBuildIndex(WatchdogIndex):
             files[:] = [f for f in files if f.filename != filename]
             if not files:
                 del self._by_release[release_tag]
+        logger.debug("Build index removed: %s", filename)

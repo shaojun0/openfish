@@ -32,6 +32,7 @@ the route registers.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from flask import (
@@ -50,6 +51,7 @@ from services import build_mirror
 from services.format import human_size
 from services.headers import attachment_disposition
 
+logger = logging.getLogger("cpypiserver.node_build")
 node_build_bp = Blueprint("node_build", __name__)
 
 #: Auxiliary files node publishes next to the archives.  The index tracks only

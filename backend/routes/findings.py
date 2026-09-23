@@ -32,6 +32,7 @@ message is what the console shows for a traversal attempt.
 
 from __future__ import annotations
 
+import logging
 import re
 
 from flask_openapi3 import APIBlueprint, validate_request
@@ -48,6 +49,7 @@ from services import review_policy
 # of flask-openapi3 is all this module uses, and the library's own document is
 # never served — `/openapi.json` is built from `@api_operation` in `openapi/`.
 findings_bp = APIBlueprint("findings", __name__, doc_ui=False)
+logger = logging.getLogger("cpypiserver.findings_routes")
 
 #: A repository slug (``<owner>/<name>``) as it may appear in a URL.  Flask has
 #: no converter for "one or more segments, but never ``..``", so the pattern is
@@ -463,6 +465,7 @@ def _enqueue_fix(finding, payload: dict) -> int | None:
         payload=payload,
         priority=0,
     )
+    logger.info("finding %s: queued fix task %s", finding.id, task_id)
     return int(task_id) if task_id is not None else None
 
 

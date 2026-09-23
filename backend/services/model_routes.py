@@ -67,6 +67,7 @@ already there.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -96,6 +97,7 @@ from services.headers import (
 from services.sealing import SealingKeyMissing, SecretSealer
 from services.urlsafety import UnsafeUrlError, check_outbound_url
 
+logger = logging.getLogger("cpypiserver.model_routes")
 
 #: What ``source`` reports in the API payload.  The field predates the move to
 #: the database, when it named the file being read; it is now a stable label the
@@ -423,6 +425,14 @@ def effective_api_key(route: Mapping[str, Any]) -> tuple[str, str]:
     try:
         return _safe_plaintext(sealer.unseal(raw), route, "stored")
     except Exception as exc:  # noqa: BLE001
+        # ``SealingKeyMissing`` (no master key) and ``InvalidToken`` (corrupt, or
+        # sealed under a different key) both mean "this deployment cannot read
+        # this row", and neither may take the table down.
+        logger.warning(
+            "model route %r has a sealed api_key that cannot be opened (%s)",
+            route.get("name") or "unnamed",
+            exc.__class__.__name__,
+        )
         return "", "unreadable"
 
 
@@ -441,6 +451,11 @@ def _safe_plaintext(
     if not text:
         return "", source
     if not is_header_safe(text):
+        logger.warning(
+            "model route %r stores an api_key that is unsafe to send as a header; "
+            "treating it as no key",
+            route.get("name") or "unnamed",
+        )
         return "", source
     return text, source
 
@@ -467,6 +482,7 @@ def migrate_plaintext_keys(session: Session) -> list[str]:
         resealed.append(row.name)
     if resealed:
         session.commit()
+        logger.warning("Re-sealed the stored API key of %d model route(s)", len(resealed))
     return resealed
 
 

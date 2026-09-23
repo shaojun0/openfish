@@ -43,6 +43,7 @@ SQLite file and no network.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import secrets
 import threading
@@ -59,6 +60,7 @@ from config import settings
 from config.keys import KeysConfig
 from models.agent_hub import GitIdentity
 from models.base import iso, utcnow
+from services.agent_runner import mask_secrets
 from services.digest import sha256_text
 from services.headers import SafeHeaderSession, checked_headers
 from services.repo_import import (
@@ -69,6 +71,8 @@ from services.repo_import import (
     RateLimiter,
 )
 from services.sealing import derive_fernet
+
+logger = logging.getLogger("cpypiserver.git_identity")
 
 
 # ── Configuration constants ──────────────────────────────────────────
@@ -311,10 +315,16 @@ class ForgejoIdentityClient:
                 )
             except requests.RequestException as exc:
                 last = exc
+                logger.warning(
+                    "forgejo %s %s failed (%d/%d): %s", method, url, attempt, attempts,
+                    mask_secrets(str(exc), [self._token]),
+                )
             else:
                 if response.status_code not in RETRY_STATUSES:
                     return response
                 last = ForgejoError(f"Forgejo {method} {url} → HTTP {response.status_code}")
+                logger.warning("forgejo %s %s → HTTP %d (%d/%d)",
+                               method, url, response.status_code, attempt, attempts)
             if attempt < attempts:
                 self._sleep(RETRY_BACKOFF_SECONDS[min(attempt - 1,
                                                       len(RETRY_BACKOFF_SECONDS) - 1)])
@@ -585,6 +595,7 @@ class GitIdentityService:
                 if row.forgejo_username != username:
                     row.forgejo_username = username
                 self.session.commit()
+            logger.info("provisioned git identity %s for user %s", username, user_id)
             return row
 
     # -- token reuse / mint -------------------------------------------
@@ -647,7 +658,12 @@ class GitIdentityService:
             try:
                 self.client.delete_token(row.forgejo_username, name=self.token_name)
             except (ForgejoError, GitIdentityError) as exc:
-                pass
+                # A stale token we could not delete is a rotation delay, not a
+                # reason to refuse the push; the new mint is still attempted.
+                logger.warning(
+                    "could not revoke the previous Forgejo token for %s: %s",
+                    row.forgejo_username, exc,
+                )
         minted = self.client.create_token(
             row.forgejo_username, name=self.token_name, scopes=scopes,
         )
@@ -659,6 +675,11 @@ class GitIdentityService:
         row.rotated_at = now
         row.revoked_at = None
         self.session.commit()
+        logger.info(
+            "minted a %s Forgejo token for %s (rotates in %d day(s))",
+            "read-only" if read_only else "read/write", row.forgejo_username,
+            self.lifetime_days,
+        )
         return token
 
     # -- revoke / rotate ----------------------------------------------
@@ -693,11 +714,18 @@ class GitIdentityService:
             try:
                 self.client.delete_user(row.forgejo_username)
             except (ForgejoError, GitIdentityError) as exc:
-                pass
+                logger.warning(
+                    "could not delete the Forgejo account %s: %s",
+                    row.forgejo_username, exc,
+                )
         row.token_ciphertext = None
         row.token_expires_at = None
         row.revoked_at = self._now()
         self.session.commit()
+        logger.info(
+            "revoked git identity for user %s (forgejo account deleted=%s)",
+            user_id, bool(delete_forgejo_user),
+        )
         return True
 
     def rotate_expired(self, *, limit: int = 100) -> list[GitCredential]:
@@ -728,7 +756,9 @@ class GitIdentityService:
                     row.user_id, row.external_id, read_only=bool(sealed.get("read_only")),
                 ))
             except (ForgejoError, GitIdentityError) as exc:
-                pass
+                logger.warning(
+                    "could not rotate the git identity for user %s: %s", row.user_id, exc,
+                )
         return rotated
 
     # -- sealed payload / clock helpers -------------------------------
@@ -750,6 +780,10 @@ class GitIdentityService:
         try:
             payload = json.loads(self.cipher.decrypt(row.token_ciphertext))
         except Exception:  # noqa: BLE001 - a corrupt/foreign ciphertext rotates
+            logger.warning(
+                "git identity token for user %s is unreadable; it will be rotated",
+                row.user_id,
+            )
             return None
         return payload if isinstance(payload, dict) else None
 

@@ -48,6 +48,7 @@ import binascii
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import tarfile
@@ -62,6 +63,7 @@ from errors import BadRequestError, PublishConflictError
 from services.fileio import atomic_write_bytes, read_json, write_json
 from services.npm_registry import PUBLISH_INDEX_FILENAME
 
+logger = logging.getLogger("cpypiserver.npm")
 
 #: Largest tarball this endpoint accepts, measured on the *decoded* bytes.
 #: npm's own default is looser, but this is a single-request JSON body and the
@@ -311,6 +313,11 @@ def publish(
         description=description,
         publisher=publisher,
     )
+    logger.info(
+        "npm publish: %s stored %s",
+        name,
+        ", ".join(f"{item.version} ({item.size} B)" for item in published),
+    )
     return published
 
 
@@ -450,7 +457,7 @@ def _record_metadata(
             packages[name] = record
             write_json(path, {"version": 1, "packages": packages})
     except OSError as exc:  # pragma: no cover - defensive
-        pass
+        logger.warning("npm publish: could not record metadata for %s: %s", name, exc)
 
 
 __all__ = ["MAX_TARBALL_BYTES", "PublishedVersion", "publish"]

@@ -36,6 +36,7 @@ as a single entry.
 from __future__ import annotations
 
 import json
+import logging
 import struct
 from pathlib import Path
 from typing import Iterator
@@ -55,6 +56,7 @@ from services.upstream import (
     passthrough,
 )
 
+logger = logging.getLogger("cpypiserver.debian")
 
 #: Envelope magic and the 4-byte big-endian length prefix of its JSON header.
 _MAGIC = b"DFAPT1\n"
@@ -119,6 +121,7 @@ def upstream() -> Upstream:
             headers={"Accept-Encoding": "identity"},
         )
         _upstreams[key] = instance
+        logger.info("apt proxy upstream configured: %s", base)
     return instance
 
 
@@ -191,6 +194,7 @@ def _local_mirror_file(kind: str, safe: str) -> Response | None:
     resolved = local_mirror_file(kind, safe)
     if resolved is None:
         return None
+    logger.debug("apt local mirror hit for %s/%s", kind, safe)
     return send_from_directory(Path(settings.hub.debian_dir) / kind, safe, conditional=True)
 
 
@@ -322,8 +326,9 @@ def dists_response(path: str) -> Response:
         try:
             status, headers, offset = _decode_envelope(cached)
         except (OSError, ValueError) as exc:
-            pass
+            logger.warning("ignoring unreadable cached apt document %s: %s", cached, exc)
         else:
+            logger.debug("apt cache hit for %s", target)
             return _cached_response(cached, status, headers, offset)
 
     return _fetch_metadata(store, key, target)
@@ -333,15 +338,18 @@ def _fetch_metadata(store: DiskCache, key: str, target: str) -> Response:
     try:
         resp = upstream().request("GET", target, stream=True)
     except UpstreamError as exc:
+        logger.warning("apt upstream GET %s failed: %s", target, exc)
         return _error(502, "apt upstream unreachable")
 
     status = resp.status_code
     if status >= 400:
         resp.close()
+        logger.info("apt upstream %s -> %s", target, status)
         mapped = status if status < 500 else 502
         return _error(mapped, "upstream apt mirror returned an unexpected response")
     if status != 200:
         resp.close()
+        logger.warning("apt upstream %s returned unexpected status %s", target, status)
         return _error(502, "unexpected upstream status")
 
     declared = resp.headers.get("Content-Length")
@@ -352,6 +360,10 @@ def _fetch_metadata(store: DiskCache, key: str, target: str) -> Response:
         or (budget > 0 and declared_bytes > budget)
     )
     if too_big:
+        logger.info(
+            "streaming oversized apt metadata %s without caching (%s bytes)",
+            target, declared,
+        )
         return _raw_passthrough(resp)
 
     envelope = _encode_envelope(forward_headers(resp.headers))
@@ -366,6 +378,7 @@ def _fetch_metadata(store: DiskCache, key: str, target: str) -> Response:
         written = store.put_stream(key, chunks())
     except (RequestException, Urllib3HTTPError, OSError) as exc:
         resp.close()
+        logger.warning("apt upstream %s failed mid-body: %s", target, exc)
         return _error(502, "apt upstream failed while reading")
     finally:
         resp.close()
@@ -373,8 +386,12 @@ def _fetch_metadata(store: DiskCache, key: str, target: str) -> Response:
     try:
         status, headers, offset = _decode_envelope(written)
     except (OSError, ValueError) as exc:
+        # The freshly written entry was evicted (tiny cache budget) between the
+        # write and this read; there is no body left to serve.
+        logger.warning("cached apt document %s disappeared after write: %s", target, exc)
         return _error(502, "apt metadata exceeded the cache budget")
 
+    logger.debug("apt cached %s (%d byte envelope)", target, written.stat().st_size)
     return _cached_response(written, status, headers, offset)
 
 
@@ -411,6 +428,7 @@ def pool_response(path: str, method: str = "GET") -> Response:
             forwarded = forward_headers(resp.headers) if status < 400 else {}
             resp.close()
             if status >= 400:
+                logger.info("apt upstream HEAD %s -> %s", target, status)
                 mapped = status if status < 500 else 502
                 return _error(mapped, "upstream apt mirror returned an unexpected response")
             # No body argument: a plain ``Response`` would rewrite
@@ -418,11 +436,13 @@ def pool_response(path: str, method: str = "GET") -> Response:
             return Response(status=status, headers=forwarded)
         resp = client.request("GET", target, headers=upstream_headers, stream=True)
     except UpstreamError as exc:
+        logger.warning("apt upstream %s %s failed: %s", method.upper(), target, exc)
         return _error(502, "apt upstream unreachable")
 
     if resp.status_code >= 400:
         status = resp.status_code
         resp.close()
+        logger.info("apt upstream %s -> %s", target, status)
         mapped = status if status < 500 else 502
         return _error(mapped, "upstream apt mirror returned an unexpected response")
 

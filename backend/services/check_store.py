@@ -17,6 +17,7 @@ production store.  There is no JSONL store left to compete with it.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Iterable
 from datetime import timedelta
 from typing import Any
@@ -39,6 +40,7 @@ from services.check_validation import (
 )
 from services.gates import CheckSuite, suite_fingerprint
 
+logger = logging.getLogger("cpypiserver.check_store")
 
 #: Session factory: a callable returning a fresh SQLAlchemy session.
 SessionFactory = Callable[[], SASession]
@@ -86,6 +88,10 @@ def record_suite_snapshot(
             status=str(status),
         )
         session.add(row)
+        logger.info(
+            "recorded %s suite snapshot for repo %s (hash=%s, checks=%d)",
+            kind, repo_id, suite_hash[:12], len(suite.checks),
+        )
     else:
         row.source = str(suite.source)
         row.checks = payload

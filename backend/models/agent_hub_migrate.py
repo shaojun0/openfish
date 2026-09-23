@@ -39,6 +39,7 @@ Add a column to a model *and* to these lists in the same change.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -59,6 +60,7 @@ from .agent_hub import ReviewRun, WebhookDelivery
 from .base import Base, in_check
 from .table_rebuild import rebuild_table
 
+logger = logging.getLogger("cpypiserver.models.agent_hub_migrate")
 
 #: Every table this module owns, in dependency order (a table appears after the
 #: tables it references).  ``create_missing_tables`` also resolves foreign keys
@@ -199,6 +201,7 @@ def ensure_schema(engine: Engine, *, create: bool = True) -> dict[str, list[str]
             ddl = _column_ddl(engine, sql_type)
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
             report["added_columns"].append(f"{table}.{column}")
+            logger.warning("Migrated agent-hub database: added %s.%s", table, column)
 
         for name, table, columns, unique in _INDEXES:
             if table not in present:
@@ -214,6 +217,7 @@ def ensure_schema(engine: Engine, *, create: bool = True) -> dict[str, list[str]
                 f"CREATE {unique_sql}INDEX IF NOT EXISTS {name} ON {table}({columns})"
             ))
             report["added_indexes"].append(name)
+            logger.warning("Migrated agent-hub database: created index %s", name)
 
     # CHECK constraints are rewritten last: the tables they live on must exist
     # (created above) and their indexes must be present if a SQLite rebuild has
@@ -221,7 +225,7 @@ def ensure_schema(engine: Engine, *, create: bool = True) -> dict[str, list[str]
     report["updated_constraints"] = evolve_check_constraints(engine)
 
     if any(report.values()):
-        pass
+        logger.info("Agent-hub schema updated: %s", report)
     return report
 
 
@@ -242,6 +246,7 @@ def _live_checks(inspector: Any, table: str) -> list[dict[str, Any]]:
     try:
         return [dict(item) for item in inspector.get_check_constraints(table)]
     except Exception as exc:  # a backend that cannot introspect must fail loudly
+        logger.warning("cannot introspect CHECK constraints on %s: %s", table, exc)
         return []
 
 
@@ -282,6 +287,10 @@ def evolve_check_constraints(engine: Engine) -> list[str]:
         else:
             rebuild_table(engine, table)
         updated.append(f"{table}.{name}")
+        logger.warning(
+            "Migrated agent-hub database: widened CHECK %s on %s to admit %s",
+            name, table, ", ".join(values),
+        )
         inspector = inspect(engine)  # the shape changed; re-read before the next
     return updated
 
@@ -326,6 +335,7 @@ def create_missing_tables(engine: Engine) -> list[str]:
     # returned report exact.  It resolves inter-table foreign keys by name, so
     # ordering within the list does not matter.
     Base.metadata.create_all(engine, tables=[model.__table__ for model in missing])
+    logger.info("Agent-hub schema created: %s", [model.__tablename__ for model in missing])
     return [model.__tablename__ for model in missing]
 
 

@@ -1146,13 +1146,15 @@ registry, so adding a route means adding its metadata in the same commit.
 
 ### What verifies a change
 
-This repository no longer ships a directory of its own gate scripts
-(`backend/scripts/check_*.py` was deleted outright). A change is verified by the
-suite resolved **from the repository under review**, in this order:
+This repository ships its own gate scripts under `backend/scripts/check_*.py`,
+and `make gates` is the single entry point a human, an agent and CI all run.
+A change is verified by the suite resolved **from the repository under review**,
+in this order:
 
 1. `.agent/checks/` — the versioned suite (`checks.yml`, or `check_*.py` files);
 2. `checks:` in `.agent/review-policy.yml` — commands a human declared;
-3. manifest auto-discovery — `package.json` (`test` / `lint` / `build` /
+3. `backend/scripts/check_*.py` — this repository's own long-standing gates;
+4. manifest auto-discovery — `package.json` (`test` / `lint` / `build` /
    `typecheck`), Python (`pytest` / `ruff` / `mypy`), `go.mod`, `Cargo.toml`,
    and the `test` / `check` / `lint` targets of a `Makefile`.
 
@@ -1163,9 +1165,8 @@ An agent-authored `.agent/checks/` entry is `unvalidated` until a validator show
 it can fail on a known-bad revision, and an `unvalidated` check reports without
 ever unlocking a PR.
 
-On the CI side, `.github/workflows/gates.yml` and the root `Makefile` now cover
-the frontend only (`make gates-frontend` → `npm run smoke`). The backend is
-**not** verified by CI.
+On the CI side, `.github/workflows/gates.yml` runs both `make gates-backend` and
+`make gates-frontend`, so "green locally" and "green in CI" cannot diverge.
 
 ### Keeping the database honest
 

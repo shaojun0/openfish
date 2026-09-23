@@ -32,6 +32,7 @@ the ecosystem directory: :func:`normalize_doc_id` and
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -42,6 +43,7 @@ from services.fileio import atomic_write_bytes, read_json, write_json
 from services.format import human_size, iso_from_timestamp, utc_now_iso
 from services.paths import contained
 
+logger = logging.getLogger("cpypiserver.docs")
 
 #: The ecosystems that own a documentation leaf, in sidebar order.
 ECOSYSTEMS: tuple[str, ...] = ("python", "npm", "docker", "debian", "tools", "models")
@@ -205,6 +207,7 @@ def first_heading(path: Path) -> str:
     try:
         return heading_in_text(path.read_text(encoding="utf-8", errors="replace"))
     except OSError as exc:  # pragma: no cover - races with a deletion
+        logger.debug("cannot read heading of %s: %s", path, exc)
         return ""
 
 
@@ -266,6 +269,7 @@ def _assets_in(
         try:
             normalize_asset_name(path.name)
         except ValueError:
+            logger.debug("skipping unservable asset %r", path.name)
             continue
         out.append(
             _asset_entry(path, ecosystem=ecosystem, doc_id=doc_id, url_prefix=url_prefix)
@@ -300,6 +304,7 @@ def save_asset(
     assets_dir = doc_dir / ASSETS_DIRNAME
     target = contained(assets_dir, filename)
     atomic_write_bytes(target, bytes(data))
+    logger.info("asset %s/%s/%s saved (%d bytes)", ecosystem, doc_id, filename, len(data))
     return _asset_entry(
         target, ecosystem=ecosystem, doc_id=doc_id, url_prefix="/docs"
     )
@@ -312,6 +317,7 @@ def delete_asset(root: str, ecosystem: str, doc_id: str, name: str) -> dict[str,
         path, ecosystem=ecosystem, doc_id=doc_id, url_prefix="/docs"
     )
     path.unlink()
+    logger.info("asset %s/%s/%s deleted", ecosystem, doc_id, path.name)
     return entry
 
 
@@ -372,6 +378,7 @@ def scan(
             try:
                 doc_id = normalize_doc_id(path.name)
             except ValueError:
+                logger.debug("skipping unservable document folder %r", path.name)
                 continue
             documents.append(
                 _doc_entry(
@@ -470,6 +477,10 @@ def save_document(
     atomic_write_bytes(doc_dir / DOC_FILENAME, encoded)
     _write_meta(doc_dir, title=clean_title, created=meta.get("created"))
 
+    logger.info(
+        "document %s/%s %s (%d bytes)",
+        ecosystem, chosen_id, "replaced" if existed else "created", len(encoded),
+    )
     entry = _doc_entry(
         doc_dir,
         chosen_id,
@@ -503,6 +514,7 @@ def save_content(root: str, ecosystem: str, doc_id: str, content: str) -> dict[s
     title = heading or str(meta.get("title") or "").strip() or normalize_doc_id(doc_id)
     _write_meta(doc_dir, title=title, created=meta.get("created"))
 
+    logger.info("document %s/%s saved (%d bytes)", ecosystem, doc_id, len(encoded))
     return _doc_entry(
         doc_dir,
         normalize_doc_id(doc_id),
@@ -525,6 +537,7 @@ def delete(root: str, ecosystem: str, doc_id: str) -> dict[str, Any]:
         api_prefix="/api/v1",
     )
     shutil.rmtree(doc_dir)
+    logger.info("document %s/%s deleted", ecosystem, doc_id)
     return entry
 
 

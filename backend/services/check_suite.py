@@ -26,6 +26,7 @@ writes a file either, so the whole invariant is unit-testable offline.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +46,7 @@ from services.gates import (
     suite_fingerprint,
 )
 
+logger = logging.getLogger("cpypiserver.check_suite")
 
 #: The directory, relative to a repository root, that holds the versioned suite.
 CHECK_DIR_RELPATH = ".agent/checks"
@@ -243,6 +245,7 @@ def _load_manifest(path: Path) -> CheckSuite:
     try:
         raw = _yaml_mapping(path.read_text(encoding="utf-8"))
     except Exception as exc:  # a broken manifest is a warning, not a crash
+        logger.warning("%s 解析失败：%s", path, exc)
         return CheckSuite(
             checks=[],
             source=SOURCE_AGENT_CHECKS,
@@ -251,6 +254,7 @@ def _load_manifest(path: Path) -> CheckSuite:
     try:
         manifest = CheckManifest.model_validate(dict(raw))
     except Exception as exc:
+        logger.warning("%s schema 不合法：%s", path, exc)
         return CheckSuite(
             checks=[],
             source=SOURCE_AGENT_CHECKS,

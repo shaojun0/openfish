@@ -5,37 +5,43 @@ one at a time and each prints its own flavour of pass/fail, which is fine for a
 human running one command but useless to an agent that has to *prove* it did no
 harm before opening a pull request (§9.4).  This module gives them one shape::
 
-    run_suite()  ->  GateSummary(gates=[GateResult, ...], total, passed, failed)
+    run_gates()  ->  GateSummary(gates=[GateResult, ...], total, passed, failed)
+    run_suite()  ->  GateSummary(...)  # any ordered check descriptor
 
 Design rules:
 
-* **A suite is data, not a directory scan.**  A :class:`CheckSuite` is a list of
-  shell-free commands resolved from ``.agent/checks/``, from a repository's
-  manifests or from the caller.  Nothing here looks for scripts beside this
-  module: a command is always named explicitly.
+* **Discovery, not a hand-kept list.**  A gate is any ``check_*.py`` beside this
+  repository's other gates (the same convention ``scripts/check_lint.py`` uses
+  for its lint targets).  Adding a gate is adding a file — there is no registry
+  to forget to update.  ``check_*.py`` is now *one provider* of a
+  :class:`CheckSuite`; a suite can equally be a list of shell-free commands
+  resolved from ``.agent/checks/`` or from a repository's manifests.
 * **Three outcomes, never two.**  A verification suite is ``passed``,
   ``failed`` or — when nothing could be resolved — ``unverified``.  The third
-  state is what stops a checkout with nothing to run from looking green (see
-  :func:`run_suite`); ``unverified`` never authorises a push and, in particular,
-  is never the same value as "passed".
+  state is what stops "we ran the image's own gates against a foreign repo" from
+  looking green (see :func:`run_suite`); ``unverified`` never authorises a push
+  and, in particular, is never the same value as "passed".
 * **Every gate gets its own budget.**  A hung gate must fail, not wedge the run;
   the default is :data:`DEFAULT_GATE_TIMEOUT` seconds per gate.
 * **Output is tailed, never trusted to be small.**  A gate that dumps a
   megabyte of traceback is truncated to :data:`STDOUT_TAIL_LIMIT` bytes so the
   result document (and the log) cannot explode.
-* **One entry point.**  ``render_summary`` is what the PR description pastes and
-  :func:`run_suite` is what produces it, so the report and the verdict come from
-  one implementation rather than two.
-* **Everything is injectable.**  :func:`run_suite` takes the command list and
-  the executor, so a test (or a caller with a fake adapter) runs the whole thing
-  without spawning a process.
+* **One entry point for the agent and for CI.**  ``render_summary`` is what the
+  PR description pastes and ``main`` is what CI runs, so "green locally, red in
+  CI" cannot come from two different gate implementations (§10).
+* **Everything is injectable.**  :func:`run_gates` / :func:`run_suite` take the
+  command list and the executor, so the offline gate
+  (:mod:`scripts.check_agent_runtime`) runs the whole thing with a fake executor
+  and never spawns a process.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,14 +57,36 @@ from services.sandbox_identity import (
     untrusted_popen_kwargs,
 )
 
+logger = logging.getLogger("cpypiserver.gates")
 
-#: ``<project>/backend`` — resolved from this file, so a relative ``cwd`` in a
-#: check descriptor resolves the same way from any working directory.
+#: ``<project>/backend`` — resolved from this file, exactly like
+#: ``scripts/check_lint.py`` does, so discovery works from any cwd.
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+#: The directory the gate scripts live in, relative to :data:`REPO_ROOT`.
+SCRIPTS_DIRNAME = "scripts"
+
+#: What counts as a gate script.  The same glob the project already uses for
+#: ``check_lint.py`` / ``check_openapi.py`` / …; a new gate is a new file.
+GATE_GLOB = "check_*.py"
+
+#: Gates that need something the offline suite does not have.  ``check_contract``
+#: validates live HTTP responses against the published OpenAPI document, so it
+#: takes ``--base-url`` / ``--api-key`` and is run by its own Makefile target
+#: against a throwaway server.  Discovery skips it by default; pass
+#: ``include_live=True`` to include it.
+LIVE_GATES: tuple[str, ...] = ("check_contract.py",)
 
 #: Per-gate wall-clock budget.  A gate that hangs is worse than a gate that
 #: fails, because it consumes a runner slot forever.
 DEFAULT_GATE_TIMEOUT = 120.0
+
+#: Interpreter a *suite descriptor* names for Python checks.  Deliberately the
+#: bare name rather than ``sys.executable``: the descriptor's fingerprint must
+#: not change with the machine that resolved it, and the sandbox image always
+#: has ``python`` on ``PATH``.  (``SubprocessGateExecutor`` still defaults to
+#: ``sys.executable`` for the legacy direct-script path.)
+SUITE_PYTHON = "python"
 
 #: How much of a gate's combined stdout+stderr is kept (bytes of UTF-8 text).
 STDOUT_TAIL_LIMIT = 4096
@@ -87,12 +115,14 @@ GATE_STATUSES: tuple[str, ...] = (STATUS_PASSED, STATUS_FAILED, STATUS_UNVERIFIE
 SOURCE_AGENT_CHECKS = "agent-checks"   # .agent/checks/ — versioned, approved
 SOURCE_POLICY = "policy"               # .agent/review-policy.yml ``checks:``
 SOURCE_DISCOVERY = "discovery"         # manifest auto-discovery (zero config)
+SOURCE_SCRIPTS = "scripts"             # <repo>/backend/scripts/check_*.py
 SOURCE_EXPLICIT = "explicit"           # the caller handed us the commands
 SOURCE_UNVERIFIED = "unverified"       # nothing resolvable — cannot gate
 SUITE_SOURCES: tuple[str, ...] = (
     SOURCE_AGENT_CHECKS,
     SOURCE_POLICY,
     SOURCE_DISCOVERY,
+    SOURCE_SCRIPTS,
     SOURCE_EXPLICIT,
     SOURCE_UNVERIFIED,
 )
@@ -314,6 +344,13 @@ class ExecOutcome:
     duration_ms: int
 
 
+class GateExecutor(Protocol):
+    """Run one gate script under a timeout.  The only external dependency."""
+
+    def run(self, script: Path, *, timeout: float) -> ExecOutcome:
+        ...
+
+
 class CommandExecutor(Protocol):
     """Run one suite command under a timeout (the generalised executor)."""
 
@@ -344,8 +381,8 @@ def _text(value: Any) -> str:
 
 #: Environment policies for :class:`SubprocessGateExecutor`.  ``sandbox`` is the
 #: default because the executor's normal caller is the agent runtime, which runs
-#: a *cloned repository's own* checks; ``inherit`` is the explicit opt-in for a
-#: caller that runs its own trusted commands.
+#: a *cloned repository's own* checks; ``inherit`` is the explicit opt-in for the
+#: project's own trusted gates (``run_gates`` / ``make gates``).
 ENV_SANDBOX = "sandbox"
 ENV_INHERIT = "inherit"
 
@@ -366,22 +403,25 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
 
 
 class SubprocessGateExecutor:
-    """Default executor: run one check command as a subprocess.
+    """Default executor: run a gate with the current interpreter.
 
-    ``env`` and ``cwd`` describe the base a check runs from — the sandbox
-    adapter points them at the cloned checkout.  :meth:`run_command` ignores
-    ``cwd`` and resolves every command's own ``cwd`` against the suite root
-    instead, which is what keeps a suite portable between checkouts.
+    ``python`` is injectable so a test (or a deployment with a specific
+    interpreter) can name it; ``env`` and ``cwd`` describe *where* the legacy
+    script executor runs — the sandbox adapter points them at the cloned
+    checkout.  :meth:`run_command` ignores ``cwd`` and resolves every command's
+    own ``cwd`` against the suite root instead, which is what keeps a suite
+    portable between checkouts.
 
     ``env_mode`` decides what the child inherits: ``sandbox`` (the default) hands
     it the allowlist from :mod:`services.sandbox_env`, so repository-supplied
-    checks never see the worker's platform credentials; ``inherit`` is for a
-    caller whose checks legitimately need the ambient environment.
+    checks never see the worker's platform credentials; ``inherit`` is for the
+    project's own ``check_*.py``, which legitimately need the CI environment.
     """
 
     def __init__(
         self,
         *,
+        python: str | None = None,
         cwd: str | Path | None = None,
         env: Mapping[str, str] | None = None,
         env_mode: str = ENV_SANDBOX,
@@ -390,6 +430,7 @@ class SubprocessGateExecutor:
             raise ValueError(
                 f"env_mode must be {ENV_SANDBOX} or {ENV_INHERIT}, got {env_mode}"
             )
+        self._python = python or sys.executable
         self._cwd = Path(cwd) if cwd is not None else REPO_ROOT
         self._env = dict(env) if env is not None else None
         self._env_mode = env_mode
@@ -456,6 +497,29 @@ class SubprocessGateExecutor:
             return TIMEOUT_EXIT_CODE, _text(out) + _text(err), True
         return int(proc.returncode), _text(out) + _text(err), False
 
+    def run(self, script: Path, *, timeout: float) -> ExecOutcome:
+        started = time.monotonic()
+        try:
+            code, output, timed_out = self._capture(
+                [self._python, str(script)], cwd=str(self._cwd), timeout=timeout,
+            )
+        except OSError as exc:
+            return ExecOutcome(
+                127, f"[error] cannot execute {script}: {exc}\n", False,
+                _elapsed_ms(started),
+            )
+        except SandboxIdentityError as exc:
+            # A configured-but-unusable sandbox identity is a failed gate, not a
+            # reason to fall back to the trusted uid: repository code must never
+            # run beside the worker's credential just because the drop failed.
+            return ExecOutcome(
+                127, f"[error] sandbox identity unusable: {exc}\n", False,
+                _elapsed_ms(started),
+            )
+        if timed_out:
+            output += f"\n[timeout] gate exceeded {timeout:g}s and was killed\n"
+        return ExecOutcome(code, output, timed_out, _elapsed_ms(started))
+
     def run_command(
         self,
         command: CheckCommand,
@@ -477,8 +541,8 @@ class SubprocessGateExecutor:
                 _elapsed_ms(started),
             )
         except SandboxIdentityError as exc:
-            # The check is repository code, so a broken drop is a red gate and
-            # never a spawn as the worker.
+            # Same fail-closed rule as :meth:`run`: the check is repository code,
+            # so a broken drop is a red gate and never a spawn as the worker.
             return ExecOutcome(
                 127,
                 f"[error] sandbox identity unusable for check {command.id}: {exc}\n",
@@ -490,7 +554,74 @@ class SubprocessGateExecutor:
         return ExecOutcome(code, output, timed_out, _elapsed_ms(started))
 
 
-# ── Execution ────────────────────────────────────────────────────────
+# ── Discovery and execution ──────────────────────────────────────────
+
+def scripts_root(scripts_dir: str | Path | None = None) -> Path:
+    """The directory gates are discovered in; defaults to ``backend/scripts``."""
+    return Path(scripts_dir) if scripts_dir is not None else REPO_ROOT / SCRIPTS_DIRNAME
+
+
+def discover_gates(
+    scripts_dir: str | Path | None = None,
+    *,
+    exclude: Sequence[str] = (),
+    include_live: bool = False,
+) -> list[Path]:
+    """Every offline ``check_*.py`` gate, sorted by name for a stable run order.
+
+    *exclude* names files by basename so a caller can drop one gate (for
+    instance the runtime's own offline gate) without moving it.  Gates in
+    :data:`LIVE_GATES` are skipped unless *include_live* is set.
+    """
+    root = scripts_root(scripts_dir)
+    if not root.is_dir():
+        return []
+    skip = {str(name) for name in exclude}
+    if not include_live:
+        skip.update(LIVE_GATES)
+    found = [
+        path for path in root.glob(GATE_GLOB)
+        if path.is_file() and path.name not in skip
+    ]
+    return sorted(found, key=lambda path: path.name)
+
+
+def suite_from_scripts(
+    scripts_dir: str | Path,
+    *,
+    root: str | Path | None = None,
+    excludes: Sequence[str] = (),
+) -> CheckSuite:
+    """The ``backend/scripts/check_*.py`` provider: one check per gate file.
+
+    The command is ``<python> <relative script>`` with ``cwd`` at the repository
+    root, so the descriptor is independent of where the repo was checked out.
+    These are the repository's own long-standing gates (not a suite an agent
+    wrote in this run), which is why they are ``validated`` and may gate.
+    """
+    base = scripts_root(scripts_dir)
+    repo = Path(root) if root is not None else base.parent.parent
+    commands: list[CheckCommand] = []
+    for path in discover_gates(scripts_dir, exclude=excludes):
+        commands.append(
+            CheckCommand(
+                id=path.stem,
+                argv=[SUITE_PYTHON, _relative(path, repo)],
+                cwd=".",
+                validation=VALIDATION_VALIDATED,
+                source=SOURCE_SCRIPTS,
+            )
+        )
+    return CheckSuite(checks=commands, source=SOURCE_SCRIPTS)
+
+
+def _relative(path: Path, root: Path) -> str:
+    """*path* relative to *root* when possible, else the absolute path."""
+    try:
+        return path.resolve().relative_to(Path(root).resolve()).as_posix()
+    except (OSError, ValueError):
+        return str(path)
+
 
 def unverified_summary(reason: str, *, source: str = SOURCE_UNVERIFIED) -> GateSummary:
     """The explicit "nothing judged this" summary — never green.
@@ -579,6 +710,7 @@ def run_suite(
         try:
             outcome = runner.run_command(command, root=base, timeout=budget)
         except Exception as exc:  # one check must not abort the whole suite
+            logger.exception("check %s crashed its executor", command.id)
             outcome = ExecOutcome(1, f"[error] executor crashed: {exc}\n", False, 0)
         if not command.gating:
             # Report-only: even a red result is informational, not a failure.
@@ -598,6 +730,13 @@ def run_suite(
                 timed_out=bool(outcome.timed_out),
             )
         )
+        logger.info(
+            "check %s %s (exit %s, %dms)",
+            command.id,
+            results[-1].status,
+            outcome.exit_code,
+            outcome.duration_ms,
+        )
     summary = summarize(results)
     summary.suite_source = suite.source
     summary.suite_hash = suite_fingerprint(suite)
@@ -608,6 +747,61 @@ def run_suite(
             or "套件里的检查都还是 unvalidated（未经证伪验证），只能报告、不能门控"
         )
     return summary
+
+
+def run_gates(
+    paths: Sequence[Path] | None = None,
+    *,
+    scripts_dir: str | Path | None = None,
+    executor: GateExecutor | None = None,
+    timeout: float = DEFAULT_GATE_TIMEOUT,
+    include_live: bool = False,
+) -> GateSummary:
+    """Discovery-driven wrapper around the legacy ``check_*.py`` provider.
+
+    Kept because ``services.gates.main`` (CI) and the offline gate both call it;
+    a caller that has a resolved :class:`CheckSuite` should call
+    :func:`run_suite` directly.  A discovery that finds nothing is
+    ``unverified``, not an empty green table.
+    """
+    targets = (
+        [Path(path) for path in paths]
+        if paths is not None
+        else discover_gates(scripts_dir, include_live=include_live)
+    )
+    if not targets:
+        return unverified_summary(
+            f"在 {scripts_root(scripts_dir)} 里没有发现任何 check_*.py"
+        )
+    # These are the *project's own* gates, not a foreign checkout's: they are
+    # trusted code and need the caller's full environment (CI variables, DB URL,
+    # mirrors).  Only this discovery path opts out of the sandbox allowlist.
+    runner = executor or SubprocessGateExecutor(env_mode=ENV_INHERIT)
+    results: list[GateResult] = []
+    for script in targets:
+        try:
+            outcome = runner.run(script, timeout=timeout)
+        except Exception as exc:  # one gate must not abort the whole suite
+            logger.exception("gate %s crashed its executor", script.stem)
+            outcome = ExecOutcome(1, f"[error] executor crashed: {exc}\n", False, 0)
+        results.append(
+            GateResult(
+                gate=script.stem,
+                passed=outcome.exit_code == 0 and not outcome.timed_out,
+                exit_code=int(outcome.exit_code),
+                stdout_tail=tail(outcome.output),
+                duration_ms=int(outcome.duration_ms),
+                timed_out=bool(outcome.timed_out),
+            )
+        )
+        logger.info(
+            "gate %s %s (exit %s, %dms)",
+            script.stem,
+            results[-1].status,
+            outcome.exit_code,
+            outcome.duration_ms,
+        )
+    return summarize(results)
 
 
 # ── Rendering ────────────────────────────────────────────────────────
@@ -698,16 +892,35 @@ def render_summary(
     return "\n".join(lines)
 
 
+# ── CLI ──────────────────────────────────────────────────────────────
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run every gate and print the summary; 0 only when all green.
+
+    CI calls this — never a second, hand-rolled loop over the gate scripts — so
+    the agent's self-check and the pipeline check the same thing (§10).
+    """
+    del argv  # no options today; the signature keeps room for them
+    summary = run_gates()
+    print(render_summary(summary))
+    return 0 if summary.ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
 __all__ = [
     "DEFAULT_GATE_TIMEOUT",
-    "ENV_INHERIT",
-    "ENV_SANDBOX",
+    "GATE_GLOB",
     "GATE_STATUSES",
+    "LIVE_GATES",
     "REPO_ROOT",
     "SOURCE_AGENT_CHECKS",
     "SOURCE_DISCOVERY",
     "SOURCE_EXPLICIT",
     "SOURCE_POLICY",
+    "SOURCE_SCRIPTS",
     "SOURCE_UNVERIFIED",
     "STATUS_FAILED",
     "STATUS_PASSED",
@@ -723,12 +936,18 @@ __all__ = [
     "CheckSuite",
     "CommandExecutor",
     "ExecOutcome",
+    "GateExecutor",
     "GateResult",
     "GateSummary",
     "SubprocessGateExecutor",
+    "discover_gates",
+    "main",
     "render_summary",
+    "run_gates",
     "run_suite",
+    "scripts_root",
     "suite_fingerprint",
+    "suite_from_scripts",
     "summarize",
     "tail",
     "unverified_summary",

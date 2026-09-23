@@ -46,6 +46,7 @@ distinction is part of the wire contract, so it must not change.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from flask import (
@@ -68,6 +69,7 @@ from schemas import ModelRouteProbeRequest, ModelRouteRequest, ToolUploadForm
 from services import hub, hub_upload, model_routes
 from services.sealing import SealingKeyMissing
 
+logger = logging.getLogger("cpypiserver.hub")
 
 hub_bp = APIBlueprint("hub", __name__)
 
@@ -536,6 +538,7 @@ def _write_failed(exc: Exception) -> PypiError:
     attacker would otherwise have to guess.  The operator still gets the detail
     — from the log, where it belongs.
     """
+    logger.error("cannot write the model-route table: %s", exc)
     return PypiError(
         "无法写入模型路由表（数据库不可写或连接中断）；详见服务日志",
         status_code=500,
@@ -553,6 +556,7 @@ def _no_sealing_key(exc: Exception) -> PypiError:
     fine, and the honest answer is "this box cannot store a key right now"
     rather than a 400 that blames the caller — or, worse, a plaintext row.
     """
+    logger.error("refusing to store a model-route API key: %s", exc)
     return PypiError(str(exc), status_code=500)
 
 

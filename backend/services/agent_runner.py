@@ -88,6 +88,7 @@ from services.gates import (
     GateSummary,
     render_summary,
     run_suite as run_check_suite,
+    suite_fingerprint,
     unverified_summary,
 )
 from services.git_auth import credential_args, git_env
@@ -96,9 +97,11 @@ from services.sandbox_env import sandbox_env
 from services.sandbox_identity import (
     SANDBOX_HOME_DIRNAME,
     SandboxIdentityError,
+    describe_identity,
     prepare_untrusted_workdir,
 )
 
+logger = logging.getLogger("cpypiserver.agent_runner")
 
 # ── Protocol constants ───────────────────────────────────────────────
 
@@ -384,8 +387,10 @@ def _no_follow_lstat(path: Path) -> os.stat_result | None:
     try:
         st = os.lstat(path)
     except OSError as exc:
+        logger.debug("cannot lstat %s: %s", path, exc)
         return None
     if stat.S_ISLNK(st.st_mode):
+        logger.debug("skipping symlink %s: refusing to chmod through it", path)
         return None
     return st
 
@@ -457,7 +462,7 @@ def remove_workdirs(paths: Iterable[Path]) -> int:
             shutil.rmtree(path)
             removed += 1
         except OSError as exc:  # a locked directory is retried next sweep
-            pass
+            logger.warning("cannot remove work directory %s: %s", path, exc)
     return removed
 
 
@@ -491,6 +496,10 @@ def normalize_pr_policy(value: Any) -> str | None:
     if not name:
         return None
     if name not in PR_POLICIES:
+        logger.warning(
+            "pr_policy %r 不是 %s 之一，忽略并使用默认值 %s",
+            value, "/".join(PR_POLICIES), DEFAULT_PR_POLICY,
+        )
         return None
     return name
 
@@ -730,6 +739,7 @@ def load_policy(
         try:
             return parser(text)
         except Exception as exc:  # a broken policy must not crash the run
+            logger.warning("policy parser failed; keeping hash-only view: %s", exc)
             return PolicyView(
                 source=f"{source}-unparsed",
                 hash=_sha256_text(text or ""),
@@ -851,6 +861,11 @@ class FindingsSink(TaskSink):
 
     def record_findings(self, task_id: str, result: Result) -> None:
         if self._ingest is None:
+            logger.info(
+                "agent task %s produced %d finding(s); ingest not wired",
+                task_id,
+                len(result.findings),
+            )
             return
         self._ingest(task_id, result)
 
@@ -913,6 +928,7 @@ class DbTaskSink(TaskSink):
     def mark_failed(self, task_id: str, reason: str) -> None:
         from models.base import utcnow
 
+        logger.warning("agent task %s failed: %s", task_id, reason)
         if not self._manage_status:
             return
         session = self._db()
@@ -927,6 +943,11 @@ class DbTaskSink(TaskSink):
         if self._ingest is not None:
             self._ingest(task_id, result)
             return
+        logger.info(
+            "agent task %s produced %d finding(s); platform ingest not wired",
+            task_id,
+            len(result.findings),
+        )
 
     def mark_done(
         self,
@@ -1272,6 +1293,10 @@ class SubprocessRunnerAdapter:
         root = checkout_root(workdir)
         if suite is None:
             suite = self._resolved_default_suite(root)
+        logger.info(
+            "运行校验套件：source=%s checks=%d sha=%s",
+            suite.source, len(suite.checks), suite_fingerprint(suite)[:12],
+        )
         return run_check_suite(
             suite,
             root=root,
@@ -1386,11 +1411,11 @@ class SubprocessRunnerAdapter:
                 try:
                     os.chmod(path, target_mode)
                 except OSError as exc:
-                    pass
+                    logger.debug("cannot chmod %s: %s", path, exc)
         try:
             os.chmod(directory, mode)
         except OSError as exc:
-            pass
+            logger.debug("cannot chmod %s: %s", directory, exc)
 
     def protect_paths(
         self,
@@ -1419,12 +1444,14 @@ class SubprocessRunnerAdapter:
         file_mode = 0o444 if readonly else 0o644
         for relative in paths:
             if not relative or Path(relative).is_absolute():
+                logger.debug("skipping non-relative protected path %r", relative)
                 continue
             path = root_real / relative
             # Resolve the *parent* only: the final component must stay
             # un-followed for ``_no_follow_lstat``.
             parent_real = Path(os.path.realpath(path.parent))
             if parent_real != root_real and root_real not in parent_real.parents:
+                logger.debug("skipping %s: parent resolves outside %s", path, root_real)
                 continue
             path = parent_real / path.name
             entry = _no_follow_lstat(path)
@@ -1433,7 +1460,7 @@ class SubprocessRunnerAdapter:
             try:
                 os.chmod(path, file_mode)
             except OSError as exc:
-                pass
+                logger.debug("cannot chmod %s: %s", path, exc)
 
     def review(
         self,
@@ -1604,6 +1631,11 @@ class SubprocessRunnerAdapter:
         head = self._run([self._git_binary, "-C", str(root), "rev-parse", "HEAD"]).strip()
         remote = self._remote_head(root, target, branch)
         if remote and head and remote == head:
+            # The branch is already exactly what this run produced: a retry (or a
+            # second replica) reached the publish step twice.  Pushing again would
+            # be a no-op and a different SHA would be rejected as non-fast-forward,
+            # so reuse it instead of turning a repeat into a hard failure.
+            logger.info("分支 %s 已存在且指向本次提交 %s，跳过重复 push", branch, head[:12])
             return
         if remote:
             raise AgentRunnerError(
@@ -1724,6 +1756,9 @@ class AgentRunner:
         try:
             return resolve_model_env(model_session, route=model_route)
         except Exception as exc:
+            # A broken route table must not fail the task before it starts; the
+            # review step will fail loudly if it actually needed a model.
+            logger.warning("模型路由解析失败：%s", exc)
             return {}
 
     # -- accessors used by tests and the worker -------------------------
@@ -1746,6 +1781,7 @@ class AgentRunner:
         # attempt's checkout from under it.
         workdir = workdir_for(self._work_root, task.task_id, task.attempt)
         redaction = SecretRedactingFilter(self._secrets)
+        logger.addFilter(redaction)
         adapter = self._adapter
         adapter.set_model_env(self._model_env)
         self._log_model_env()
@@ -1780,6 +1816,9 @@ class AgentRunner:
                 raise AgentRunnerError(
                     f"无法为任务 {task.task_id} 准备工作目录的沙箱身份：{exc}"
                 ) from exc
+            logger.info(
+                "agent 任务 %s：%s", task.task_id, describe_identity()
+            )
 
             steps.append("read")
             context = adapter.read_context(workdir)
@@ -1797,6 +1836,12 @@ class AgentRunner:
             frozen_user = freeze_suite(pairs.user, base_sha=task.commit_sha)
             frozen_ai = freeze_suite(pairs.ai, base_sha=task.commit_sha)
             frozen = frozen_user
+            logger.info(
+                "agent 任务 %s 校验套件：user=%s/%d checks hash=%s；ai=%s/%d checks hash=%s",
+                task.task_id, frozen_user.source, len(frozen_user.suite.checks),
+                frozen_user.fingerprint[:12], frozen_ai.source,
+                len(frozen_ai.suite.checks), frozen_ai.fingerprint[:12],
+            )
             if task.kind == "fix":
                 # `readonly chmod` is defence in depth; the authoritative guard
                 # is the changed-path check before commit.  Besides the AI suite
@@ -1833,7 +1878,11 @@ class AgentRunner:
             # manifest's ``validated`` flags from the falsifiability evidence.
             curator_report = _curate(adapter, workdir, self._gate_timeout) if task.kind == "checks" else None
             if curator_report is not None:
-                pass
+                logger.info(
+                    "agent 任务 %s curator 提案：%s checks，%s validated，gating=%s",
+                    task.task_id, curator_report.get("total"),
+                    curator_report.get("validated"), curator_report.get("gating"),
+                )
 
             steps.append("search")
             enriched = [
@@ -1876,6 +1925,11 @@ class AgentRunner:
             try:
                 result = validate_result(payload)
             except ResultValidationError as exc:
+                logger.error(
+                    "result 校验失败，任务 %s 标记 failed 且不写 finding：%s",
+                    task.task_id,
+                    exc,
+                )
                 self._sink.mark_failed(task.task_id, str(exc))
                 return RunOutcome(
                     task_id=task.task_id,
@@ -1925,7 +1979,10 @@ class AgentRunner:
                     adapter, task, workdir, escalate=escalate, suite=frozen_user.suite,
                 )
                 if pr_policy == PR_POLICY_NEVER:
-                    pass
+                    logger.info(
+                        "agent 任务 %s：pr_policy=never，只产出 finding，不 commit/push/开 PR",
+                        task.task_id,
+                    )
                 else:
                     # §9.3 step 6: the review's edits become a commit; an empty
                     # one is a failed task, never an empty pull request.
@@ -1936,7 +1993,17 @@ class AgentRunner:
                         message=_commit_message(result),
                     )
                     if task.kind == "checks":
-                        pass
+                        # A curator proposal is *not* a fix: it is the check suite
+                        # itself, and its checks are unvalidated by definition
+                        # until the validator runs on them.  Gating it on the
+                        # frozen base suite's on_green would make every first
+                        # proposal impossible — so it opens a labelled PR for
+                        # human review and can never merge.
+                        logger.info(
+                            "agent 任务 %s：curator 提案 PR 不按 on_green 门控"
+                            "（新 check 在 validated 之前本来就不能门控）；仍需人工 review",
+                            task.task_id,
+                        )
                     if pr_policy == PR_POLICY_ON_GREEN and task.kind != "checks":
                         # Re-run the **frozen** suites after the fix: step 3's
                         # summary describes the base commit, and re-resolving
@@ -1981,6 +2048,7 @@ class AgentRunner:
                                 )
                                 + "；已 commit 但按策略不 push、不开 PR"
                             )
+                            logger.error("agent 任务 %s：%s", task.task_id, reason)
                             self._sink.mark_failed(task.task_id, reason)
                             return RunOutcome(
                                 task_id=task.task_id,
@@ -2054,6 +2122,7 @@ class AgentRunner:
                 pr_url=pr_url,
             )
         except AgentRunnerError as exc:
+            logger.error("agent 任务 %s 失败：%s", task.task_id, exc)
             self._sink.mark_failed(task.task_id, str(exc))
             return RunOutcome(
                 task_id=task.task_id,
@@ -2063,6 +2132,7 @@ class AgentRunner:
             )
         except Exception as exc:  # fail closed: an unexpected error is a failed task
             safe = mask_secrets(f"{exc.__class__.__name__}: {exc}", self._secrets)
+            logger.exception("agent 任务 %s 异常终止", task.task_id)
             self._sink.mark_failed(task.task_id, safe)
             return RunOutcome(
                 task_id=task.task_id,
@@ -2082,7 +2152,8 @@ class AgentRunner:
             try:
                 mark_finished(workdir)
             except OSError as exc:
-                pass
+                logger.warning("cannot mark work directory %s finished: %s", workdir, exc)
+            logger.removeFilter(redaction)
 
     def _publish(self, *, branch: str) -> None:
         """Refuse to publish when the injected guard says this run lost its lease.
@@ -2133,7 +2204,9 @@ class AgentRunner:
 
     def _log_model_env(self) -> None:
         if not self._model_env:
+            logger.info("agent 运行时未配置模型路由")
             return
+        logger.info("agent 运行时模型配置（已掩码）：%s", mask_env(self._model_env))
 
     def _pr_body(
         self,
@@ -2229,6 +2302,7 @@ def _curate(
     """
     method = getattr(adapter, "curate", None)
     if method is None:
+        logger.info("adapter 未实现 curate：提案不会被证伪验证，全部保持 unvalidated")
         return None
     report = method(workdir, timeout=timeout)
     return dict(report) if report is not None else None
@@ -2266,7 +2340,7 @@ def _protect_suite(adapter: RunnerAdapter, workdir: Path, *, readonly: bool) -> 
     try:
         protect(workdir, readonly=readonly)
     except OSError as exc:
-        pass
+        logger.debug("cannot change suite permissions under %s: %s", workdir, exc)
 
 
 def _protect_paths(
@@ -2292,7 +2366,7 @@ def _protect_paths(
     try:
         protect(workdir, locked, readonly=readonly)
     except OSError as exc:
-        pass
+        logger.debug("cannot change file permissions under %s: %s", workdir, exc)
 
 
 def _adapter_changed_paths(adapter: RunnerAdapter, workdir: Path) -> list[str]:

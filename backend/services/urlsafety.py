@@ -35,12 +35,14 @@ caller is an authenticated administrator, and the residual is documented in
 from __future__ import annotations
 
 import ipaddress
+import logging
 import socket
 from collections.abc import Iterable
 from typing import NoReturn
 
 from pydantic import AnyHttpUrl, TypeAdapter, ValidationError
 
+logger = logging.getLogger("cpypiserver.urlsafety")
 
 _HTTP_URL = TypeAdapter(AnyHttpUrl)
 
@@ -102,6 +104,7 @@ def _blocked_reason(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> s
 
 def _refuse(url: str, reason: str) -> NoReturn:
     """Log the refusal (so a probe of the metadata address is visible) and raise."""
+    logger.warning("outbound URL refused: %s (%s)", url, reason)
     raise UnsafeUrlError(reason)
 
 

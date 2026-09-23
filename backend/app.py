@@ -169,6 +169,12 @@ if settings.auth.basic_username:
     _bootstrap_ids.append(settings.auth.basic_username)
 
 _authz_summary = bootstrap_authz(app.extensions["authz"], _bootstrap_ids)
+logging.getLogger("cpypiserver").info(
+    "Authorization ready: %d permission point(s), %d role(s), %d superuser(s) total",
+    _authz_summary["permissions"]["total"],
+    len(app.extensions["authz"].list_roles()),
+    app.extensions["authz"].count_superusers(),
+)
 
 # ── Run ─────────────────────────────────────────────────────────────
 
