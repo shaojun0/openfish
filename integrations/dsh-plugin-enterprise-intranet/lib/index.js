@@ -397,7 +397,21 @@ export function apply(ctx, config) {
   function readResolvedDefault() {
     try {
       const value = settings().get?.(DEFAULT_MODEL_NS)
-      return value && typeof value === 'object' ? value : null
+      if (value && typeof value === 'object') return value
+    } catch {
+      // get() 不可用 —— 下面的 describe() 兜底。
+    }
+    // DSH 0.1.7 起 settings 服务不再提供 get(ns)（只有 describe / mutate /
+    // replace / update），describe() 里同一命名空间的 value 就是那份解析值。
+    // 没有它，停用时的「默认模型还指着本插件才还原」判断恒为假，默认模型会
+    // 悬空指向一个已注销的 provider。
+    try {
+      const descriptors = typeof settings().describe === 'function' ? settings().describe() : null
+      const descriptor = Array.isArray(descriptors)
+        ? descriptors.find((d) => d && d.ns === DEFAULT_MODEL_NS)
+        : null
+      const resolved = descriptor && descriptor.value
+      return resolved && typeof resolved === 'object' ? resolved : null
     } catch {
       return null
     }
