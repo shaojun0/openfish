@@ -566,8 +566,6 @@ def plan_actions(
         ))
         return actions
 
-    if event.kind == "pull_request" and event.merged:
-        pass
     return actions
 
 
@@ -958,11 +956,12 @@ def forgejo_webhook():
 
     curator_mode, curator_interval = _repo_curator_policy(repo)
     if event.kind == "push" and event.is_default_branch:
-        curator_allowed, curator_reason = curator_enqueue_allowed(
+        # Only the verdict is used below; the reason it carries has no consumer.
+        curator_allowed, _reason = curator_enqueue_allowed(
             session, repo.id, mode=curator_mode, min_interval_seconds=curator_interval,
         )
     else:
-        curator_allowed, curator_reason = True, ""
+        curator_allowed = True
 
     actions = plan_actions(
         event,
@@ -971,8 +970,6 @@ def forgejo_webhook():
         curator_mode=curator_mode,
         curator_allowed=curator_allowed,
     )
-    if not curator_allowed and curator_reason:
-        pass
     queued: list[QueuedAction] = []
     for action in actions:
         queued.append(enqueue_task(

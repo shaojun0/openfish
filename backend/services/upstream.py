@@ -535,8 +535,6 @@ class DiskCache:
                 self._evictions += 1
             except OSError:
                 continue
-        if reclaimed:
-            pass
         return reclaimed
 
     def clear(self) -> None:

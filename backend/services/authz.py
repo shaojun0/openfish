@@ -952,12 +952,7 @@ def bootstrap(authz: AuthzService, admin_users: Iterable[str] = ()) -> dict:
     promoted = authz.bootstrap_superusers(admin_users)
 
     orphans = authz.orphan_permissions()
-    if orphans:
-        pass
-
     stale = authz.stale_permissions()
-    if stale:
-        pass
 
     return {
         "permissions": perms,

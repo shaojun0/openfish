@@ -212,8 +212,6 @@ def retire_mineru_provider(engine: Engine) -> dict[str, object]:
             rebuild_table(engine, TABLE)
             changed = "rebuilt"
 
-    if names:
-        pass
     return {"rewritten": names, "constraint": changed}
 
 
@@ -244,15 +242,13 @@ def ensure_schema(engine: Engine) -> dict[str, object]:
     }
     retired = retire_mineru_provider(engine)
     report["rewritten_routes"] = retired["rewritten"]
-    dropped_by_its_own_step = retire_api_key_env(engine)
+    # This step's own report belongs to it, not to ours — but the call still has
+    # to run, so the result is deliberately discarded rather than bound.
+    retire_api_key_env(engine)
     report["dropped_columns"] = [
         f"{TABLE}.{name}" for name in sorted(columns_before - columns_present(engine, TABLE))
     ]
-    if report["dropped_columns"] and not dropped_by_its_own_step:
-        pass
     report["plaintext_keys"] = plaintext_key_count(engine)
-    if report["plaintext_keys"]:
-        pass
     return report
 
 

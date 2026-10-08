@@ -245,8 +245,6 @@ def grant_role(user_id: int, body: GrantRoleRequest):
         granted = _authz().grant_role(user_id, code)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
-    if granted:
-        pass
     return jsonify({"user_id": user_id, "role": code, "granted": granted})
 
 
@@ -259,8 +257,6 @@ def grant_role(user_id: int, body: GrantRoleRequest):
 )
 def revoke_role(user_id: int, role_code: str):
     revoked = _authz().revoke_role(user_id, role_code)
-    if revoked:
-        pass
     return jsonify({"user_id": user_id, "role": role_code, "revoked": revoked})
 
 

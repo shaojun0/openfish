@@ -1847,8 +1847,6 @@ class AgentRunner:
             # the model's claim: this runs before the commit and rewrites the
             # manifest's ``validated`` flags from the falsifiability evidence.
             curator_report = _curate(adapter, workdir, self._gate_timeout) if task.kind == "checks" else None
-            if curator_report is not None:
-                pass
 
             steps.append("search")
             enriched = [
@@ -1950,8 +1948,6 @@ class AgentRunner:
                         commit_sha=task.commit_sha,
                         message=_commit_message(result),
                     )
-                    if task.kind == "checks":
-                        pass
                     if pr_policy == PR_POLICY_ON_GREEN and task.kind != "checks":
                         # Re-run the **frozen** suites after the fix: step 3's
                         # summary describes the base commit, and re-resolving
