@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from pathlib import Path
 from index.base import WatchdogIndex, compute_sha256, invalidate_digest_cache
 from schemas import PackageFile
 
+logger = logging.getLogger("cpypiserver.packages")
 
 # ── Filename patterns ────────────────────────────────────────────────
 
@@ -101,9 +103,11 @@ class PackageIndex(WatchdogIndex):
     # ── Full scan ───────────────────────────────────────────────────
 
     def _full_scan(self) -> None:
+        logger.info("Scanning packages: %s", self._dir)
         pkgs: dict[str, list[PackageFile]] = {}
         pkg_path = Path(self._dir)
         if not pkg_path.is_dir():
+            logger.warning("Packages dir missing: %s", self._dir)
             with self._lock:
                 self._packages = pkgs
             return
@@ -118,6 +122,7 @@ class PackageIndex(WatchdogIndex):
             files.sort(key=lambda f: f.filename, reverse=True)
         with self._lock:
             self._packages = pkgs
+        logger.info("Found %d packages (%d files)", len(pkgs), sum(len(v) for v in pkgs.values()))
 
     # ── Incremental ─────────────────────────────────────────────────
 
@@ -136,6 +141,7 @@ class PackageIndex(WatchdogIndex):
             files[:] = [f for f in files if f.filename != pf.filename]
             files.append(pf)
             files.sort(key=lambda f: f.filename, reverse=True)
+        logger.debug("Index updated: %s", pf.filename)
 
     def _remove(self, abs_path: str) -> None:
         filename = os.path.basename(abs_path)
@@ -150,3 +156,4 @@ class PackageIndex(WatchdogIndex):
             files[:] = [f for f in files if f.filename != filename]
             if not files:
                 del self._packages[pkg_name]
+        logger.debug("Index removed: %s", filename)

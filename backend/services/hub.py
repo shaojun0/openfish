@@ -36,6 +36,7 @@ rather than on disk; :mod:`services.model_routes` owns it.
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ from services.digest import sha256_or_none
 from services.fileio import read_json
 from services.format import human_size, iso_from_timestamp
 
+logger = logging.getLogger("cpypiserver.hub")
 
 #: Files that are catalog metadata rather than catalog entries.
 _OVERLAY_FILENAME = "catalog.json"

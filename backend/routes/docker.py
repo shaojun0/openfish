@@ -71,6 +71,7 @@ from services import docker_registry as registry
 from services import hub, hub_upload
 from services.logsafe import scrub
 
+logger = logging.getLogger("cpypiserver.docker")
 
 docker_bp = APIBlueprint("docker", __name__)
 

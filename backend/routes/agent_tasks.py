@@ -35,6 +35,7 @@ retry, cancel and log views read no input beyond their path, so they stay plain
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from flask import current_app, jsonify
@@ -53,6 +54,7 @@ from services.agent_queue import AgentQueue
 # of flask-openapi3 is all this module uses, and the library's own document is
 # never served — `/openapi.json` is built from `@api_operation` in `openapi/`.
 agent_tasks_bp = APIBlueprint("agent_tasks", __name__, doc_ui=False)
+logger = logging.getLogger("cpypiserver.agent_tasks")
 
 #: Statuses every route here can return on top of the endpoint-specific ones.
 _PROTECTED = ("401", "403", "404", "500", "503")
@@ -298,6 +300,7 @@ def create_agent_task(body: AgentTaskCreateRequest):
             "本次未入队；等当前任务结束后重试",
             status_code=409,
         )
+    logger.info("agent task %s enqueued: repo=%s kind=%s actor=%s", task_id, repo_slug, kind, _actor())
     return jsonify(_task_view(queue, task_id, slug=repo_slug)), 201
 
 
@@ -317,6 +320,7 @@ def retry_agent_task(task_id: int):
     queue = _queue()
     if not queue.retry(task_id, reason=f"manual retry by {_actor()}"):
         raise PypiError("任务不存在或当前状态不可重试", status_code=409)
+    logger.info("agent task %s retried by %s", task_id, _actor())
     return jsonify(_task_view(queue, task_id))
 
 
@@ -336,6 +340,7 @@ def cancel_agent_task(task_id: int):
     queue = _queue()
     if not queue.cancel(task_id, reason=f"cancelled by {_actor()}"):
         raise PypiError("任务不存在或已结束", status_code=409)
+    logger.info("agent task %s cancelled by %s", task_id, _actor())
     return jsonify(_task_view(queue, task_id))
 
 

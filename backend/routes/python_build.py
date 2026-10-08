@@ -17,6 +17,7 @@ effect before the route registers.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from flask import (
@@ -32,6 +33,7 @@ from services import build_mirror
 from services.format import human_size
 from services.headers import attachment_disposition
 
+logger = logging.getLogger("cpypiserver.python_build")
 python_build_bp = Blueprint("python_build", __name__)
 
 

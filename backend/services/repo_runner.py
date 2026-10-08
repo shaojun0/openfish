@@ -35,6 +35,7 @@ never contains the plaintext.  The module imports no Flask.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import stat
@@ -51,8 +52,10 @@ from config.forgejo import ForgejoConfig
 from config.keys import KeysConfig
 from models.agent_hub import Repo, RepoRunner
 from models.base import utcnow
+from services.agent_runner import mask_secrets
 from services.git_identity import GitIdentityConfigError, TokenCipher
 
+logger = logging.getLogger("cpypiserver.repo_runner")
 
 # ── Public vocabulary ────────────────────────────────────────────────
 # Frozen names the rest of the platform imports; the CHECK constraints on
@@ -456,6 +459,11 @@ class RepoRunnerService:
             try:
                 sealed = cipher.encrypt(plaintext)
             except Exception as exc:
+                # Never log either side of the plaintext/ciphertext pair.
+                logger.warning(
+                    "runner credential encryption failed for repo %s: %s",
+                    repo_id, mask_secrets(str(exc), [plaintext]),
+                )
                 raise RepoRunnerError("runner 凭据加密失败，未写入任何内容") from exc
             row.credential_kind = RUNNER_CREDENTIAL_REPO
             row.credential_username = (username or "").strip() or None
@@ -463,6 +471,7 @@ class RepoRunnerService:
             row.credential_expires_at = expires_at
             row.credential_rotated_at = utcnow()
             result = self._persist(session, row)
+            logger.info("stored a repo-scoped runner credential for repo %s", repo_id)
             return result
         except Exception:
             session.rollback()
@@ -712,6 +721,10 @@ class RepoRunnerService:
         try:
             token = cipher.decrypt(ciphertext).strip()
         except Exception as exc:
+            logger.warning(
+                "runner credential for repo %s is unreadable; refusing the shared fallback: %s",
+                row.repo_id, mask_secrets(str(exc), [ciphertext]),
+            )
             raise RepoRunnerError(
                 f"仓库 {row.repo_id} 的 runner 凭据无法解密，拒绝回退到共享 token"
             ) from exc

@@ -31,6 +31,7 @@ Design rules, so the three proxies behave the same way:
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import shutil
 import tempfile
@@ -50,6 +51,7 @@ from services.headers import (
     is_header_value_safe,
 )
 
+logger = logging.getLogger("cpypiserver.upstream")
 
 #: Headers that describe *this* hop and must never be forwarded in either
 #: direction (RFC 9110 §7.6.1, plus the de-facto ``X-Accel-*`` pair).
@@ -536,7 +538,10 @@ class DiskCache:
             except OSError:
                 continue
         if reclaimed:
-            pass
+            logger.info(
+                "cache %s evicted %d byte(s) to stay under the %d byte budget",
+                self.root, reclaimed, self.max_bytes,
+            )
         return reclaimed
 
     def clear(self) -> None:

@@ -43,6 +43,7 @@ the visibility can live here while the rewrite does not.
 
 from __future__ import annotations
 
+import logging
 
 from sqlalchemy import CheckConstraint, inspect, text
 from sqlalchemy.engine import Engine
@@ -53,6 +54,7 @@ from .base import in_check
 from .model_route import API_KEY_PREFIX, PROVIDERS, ModelRoute
 from .table_rebuild import columns_present, rebuild_table
 
+logger = logging.getLogger("cpypiserver.models.model_route_migrate")
 
 #: The column this module retires.  Kept as a constant so the docstring, the
 #: DDL and the log line cannot drift apart.
@@ -131,6 +133,12 @@ def retire_api_key_env(engine: Engine) -> bool:
             conn.execute(text(f"ALTER TABLE {TABLE} DROP COLUMN IF EXISTS {RETIRED_COLUMN}"))
     else:
         rebuild_table(engine, TABLE)
+    logger.warning(
+        "Migrated the model-route table: dropped %s.%s (a route's key is now "
+        "sealed into api_key; set it with `cli.py model-route set-key`)",
+        TABLE,
+        RETIRED_COLUMN,
+    )
     return True
 
 
@@ -213,7 +221,13 @@ def retire_mineru_provider(engine: Engine) -> dict[str, object]:
             changed = "rebuilt"
 
     if names:
-        pass
+        logger.warning(
+            "Migrated %d model route(s) off the retired %r provider to %r: %s",
+            len(names),
+            RETIRED_PROVIDER,
+            PROVIDER_REPLACEMENT,
+            ", ".join(names),
+        )
     return {"rewritten": names, "constraint": changed}
 
 
@@ -249,10 +263,22 @@ def ensure_schema(engine: Engine) -> dict[str, object]:
         f"{TABLE}.{name}" for name in sorted(columns_before - columns_present(engine, TABLE))
     ]
     if report["dropped_columns"] and not dropped_by_its_own_step:
-        pass
+        # The provider rebuild recreated the table from the current model, so it
+        # dropped the column too — and the step that owns that column never ran.
+        # The operator still needs to read what changed.
+        logger.warning(
+            "Migrated the model-route table: dropped %s while rebuilding it for "
+            "the retired provider vocabulary",
+            ", ".join(str(name) for name in report["dropped_columns"]),
+        )
     report["plaintext_keys"] = plaintext_key_count(engine)
     if report["plaintext_keys"]:
-        pass
+        logger.warning(
+            "%s model route(s) still store their upstream key in plaintext; "
+            "set %s and run `cli.py model-route seal` to re-seal them",
+            report["plaintext_keys"],
+            MODEL_ROUTE_KEY_ENV,
+        )
     return report
 
 

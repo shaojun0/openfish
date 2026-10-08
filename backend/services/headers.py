@@ -32,11 +32,14 @@ serve a route whose row the operator can simply re-enter (see
 
 from __future__ import annotations
 
+import logging
 from enum import Enum
 from typing import Any, Mapping
 
 import requests
 from werkzeug.http import dump_options_header
+
+logger = logging.getLogger("cpypiserver.headers")
 
 
 class ValuePolicy(Enum):

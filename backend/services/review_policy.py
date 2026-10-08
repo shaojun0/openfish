@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -40,6 +41,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from config.paths import PROJECT_ROOT
 from services.digest import compute_sha256
 
+logger = logging.getLogger("cpypiserver.review_policy")
 
 #: Where the policy file lives inside a repository (§7.1).
 POLICY_RELATIVE_PATH = ".agent/review-policy.yml"

@@ -23,10 +23,12 @@ bug harmless.
 from __future__ import annotations
 
 import ast
+import logging
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger("cpypiserver.agent_surface")
 
 #: The complete write surface the agent path may use.  ``create_pull_request``
 #: opens an ``agent/*`` PR; a comment method is listed for the day the client

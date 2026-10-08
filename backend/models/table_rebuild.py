@@ -24,6 +24,7 @@ migration cannot drift from the schema the application writes.
 
 from __future__ import annotations
 
+import logging
 import re
 
 from sqlalchemy import inspect
@@ -32,6 +33,7 @@ from sqlalchemy.schema import CreateTable
 
 from .base import Base
 
+logger = logging.getLogger("cpypiserver.models.table_rebuild")
 
 #: Suffix for the table that exists only mid-rebuild.
 NEW_TABLE_SUFFIX = "__openfish_new"

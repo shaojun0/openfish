@@ -243,12 +243,13 @@ npm run build                       # → frontend/dist
 npm run smoke                       # jsdom 全路由冒烟
 
 # ── 校验套件 ───────────────────────────────────────────────────
-# 本仓库不再自带 backend/scripts/check_*.py。一次改动的校验套件按
-#   .agent/checks/ → .agent/review-policy.yml 的 checks: → manifest 自动发现
-#   （package.json scripts / pytest·ruff·mypy / go.mod / Cargo.toml / Makefile）
+# 本仓库自带 backend/scripts/check_*.py；一次改动的校验套件按
+#   .agent/checks/ → .agent/review-policy.yml 的 checks: → backend/scripts/check_*.py
+#   → manifest 自动发现（package.json scripts / pytest·ruff·mypy / go.mod /
+#   Cargo.toml / Makefile）
 # 的顺序解析，解析不到就是 unverified（不是绿）。执行与归一化在
 # services/gates.py（resolve_suite → run_suite → GateSummary）。
-# 根目录 Makefile 现在只有 make gates-frontend（前端 smoke）。
+# 根目录 make gates（后端离线全集 + 前端 smoke）/ make contract-gate（活服务契约）。
 
 # ── 容器（需要 Docker Compose v2；仓库自带的 docker-compose 1.25 解析不了）──
 cd docker

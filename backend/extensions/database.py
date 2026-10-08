@@ -22,6 +22,7 @@ stats-refresh background thread.
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
@@ -40,6 +41,7 @@ from services.authz import AuthzService
 import models  # noqa: F401
 from models.base import Base
 
+logger = logging.getLogger("cpypiserver.database")
 
 #: ``expire_on_commit=False`` matters: guards detach ORM objects (expunge) and
 #: then read their attributes outside the session.  With the default
@@ -155,6 +157,10 @@ def _wait_for_database(engine: Engine) -> None:
         except OperationalError:
             if attempt >= _CONNECT_ATTEMPTS:
                 raise
+            logger.warning(
+                "Database not reachable yet (attempt %d/%d) — retrying in %.1fs",
+                attempt, _CONNECT_ATTEMPTS, _CONNECT_RETRY_DELAY_SECONDS,
+            )
             time.sleep(_CONNECT_RETRY_DELAY_SECONDS)
 
 
@@ -202,6 +208,7 @@ def init_engine(
     from models.agent_hub_migrate import ensure_schema
 
     ensure_schema(engine)
+    logger.info("Database ready: %s", _safe_url(url))
     return engine
 
 
@@ -236,6 +243,7 @@ def _apply_light_migrations(engine: Engine) -> None:
                 continue  # table does not exist yet — create_all handled it
             if column not in {c["name"] for c in inspector.get_columns(table)}:
                 conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+                logger.warning("Migrated existing database: added %s.%s", table, column)
 
         for name, table, column in _INDEXES:
             if table not in tables:

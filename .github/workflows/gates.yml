@@ -1,14 +1,19 @@
-# CI: the frontend smoke test a human runs locally too, so "green locally" and
-# "green in CI" cannot diverge (DEVELOPMENT.md §9.4 / §10).
+# CI: the same gates a human runs, so "green locally" and "green in CI" cannot
+# diverge (DEVELOPMENT.md §9.4 / §10).
 #
-# The backend job used to live here: it installed `backend` with its dev extras
-# and ran `make gates-backend`, which discovered and ran every
-# `backend/scripts/check_*.py`.  That directory no longer exists, so the job is
-# gone rather than left as a green no-op — the backend is simply **not** verified
-# by this workflow.
+# The repository had no CI at all before this workflow; it exists to make the
+# Agent Hub's self-verification story real — an agent's PR must be checkable by
+# the same `make gates` the agent itself ran.
 #
-# The remaining job calls into the root Makefile rather than repeating the
-# command list.
+# Two jobs, one per half of the repository, because they have different
+# toolchains and neither should wait on the other:
+#
+#   backend   python 3.12 + `pip install -e '.[dev]'` (pyflakes, openapi
+#             validator) + `make gates-backend`
+#   frontend  node 20 + `npm ci` + `make gates-frontend`
+#
+# Both call into the root Makefile rather than repeating the command list, so
+# adding a gate is a one-line change in `Makefile` and it is enforced here too.
 
 name: gates
 
@@ -23,6 +28,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  backend:
+    name: backend gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install the backend and its dev extras
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      # `make` is preinstalled on the GitHub runner image.  PYTHON=python is the
+      # interpreter `setup-python` put on PATH — there is no `.venv` in CI, which
+      # is exactly why the Makefile takes PYTHON as a variable.
+      - name: make gates-backend
+        run: make gates-backend PYTHON=python
+
   frontend:
     name: frontend gates
     runs-on: ubuntu-latest
