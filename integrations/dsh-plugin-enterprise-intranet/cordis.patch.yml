@@ -1,0 +1,31 @@
+# ============================================================================
+# dsh-plugin-enterprise-intranet —— DSH bundle patch（挂载声明）
+# ============================================================================
+# DSH 启动时按 bundle 层栈叠加各插件 patch，本文件把「企业内网模式」插件插入
+# Web profile 的配置树。
+#
+# 安装方式（DSH 0.2.0 起两条路等价，都落到同一份 profile 声明）：
+#   CLI：dsh plugin --profile web add link:<本目录绝对路径>
+#   或侧栏「插件」页里完成安装与开关（该页会写回 dsh.profile.bundles）
+# 发布后：
+#   dsh plugin --profile web add dsh-plugin-enterprise-intranet
+#
+# 卸载：先在插件页的本插件详情页点「完全还原（卸载前）」（或面板的同一个按钮），
+# 再从该页卸载。原因见 README「停用与卸载」——DSH 至今没有插件卸载钩子。
+#
+# 可选：在这里下发初始配置（面板里也能改，且面板改动会写回运行状态文件）。
+#   - insert:
+#       - id: enterprise-intranet
+#         name: dsh-plugin-enterprise-intranet
+#         config:
+#           platformUrl: https://registry.example.com:9443
+#           apiKey: ''            # 留空 = 让用户在 DSH 面板里点「登录获取」
+#           autoMirrors: true
+#           # 自签证书部署：优先用 caFile 钉住 CA；只有明确接受风险时才 verifyTls: false
+#           # caFile: /etc/openfish/ca_chain.pem
+#           # verifyTls: false
+# ============================================================================
+
+- insert:
+    - id: enterprise-intranet
+      name: dsh-plugin-enterprise-intranet
