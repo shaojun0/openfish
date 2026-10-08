@@ -64,10 +64,6 @@ function jsonUrl(name: string): string {
   return `/simple/${encodeURIComponent(name)}/?format=json`
 }
 
-function openTab(url: string): void {
-  window.open(url, '_blank', 'noopener')
-}
-
 onMounted(() => {
   if (infoType.value === 'package') load()
 })
@@ -99,10 +95,10 @@ onMounted(() => {
             <span class="btn-label">{{ t('common.refresh') }}</span>
           </el-button>
         </template>
-        <el-button v-else @click="openTab('/python-builds/')">
+        <el-link v-else href="/python-builds/" target="_blank" rel="noopener">
           <el-icon><Link /></el-icon>
           <span class="btn-label">{{ t('build.staticIndex') }}</span>
-        </el-button>
+        </el-link>
       </div>
     </div>
 
@@ -162,14 +158,14 @@ onMounted(() => {
 
         <el-table-column :label="t('common.actions')" width="190" align="right">
           <template #default="{ row }">
-            <el-button size="small" text type="primary" @click="openTab(indexUrl(row.name))">
+            <el-link type="primary" :href="indexUrl(row.name)" target="_blank" rel="noopener">
               <el-icon><Link /></el-icon>
               <span class="btn-label">{{ t('packages.openIndex') }}</span>
-            </el-button>
+            </el-link>
             <el-tooltip :content="t('packages.openJson')">
-              <el-button size="small" text @click="openTab(jsonUrl(row.name))">
+              <el-link :href="jsonUrl(row.name)" target="_blank" rel="noopener">
                 <el-icon><Document /></el-icon>
-              </el-button>
+              </el-link>
             </el-tooltip>
           </template>
         </el-table-column>

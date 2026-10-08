@@ -61,11 +61,6 @@ async function load(): Promise<void> {
   }
 }
 
-/** The server-rendered index — same data, no JavaScript, script-friendly. */
-function openStaticIndex(): void {
-  window.open('/tools/', '_blank', 'noopener')
-}
-
 // ── Upload (tool:upload) ─────────────────────────────────────────────
 
 function openUpload(): void {
@@ -119,10 +114,10 @@ onMounted(load)
           <el-icon><Upload /></el-icon>
           <span class="btn-label">{{ t('tools.upload') }}</span>
         </el-button>
-        <el-button @click="openStaticIndex">
+        <el-link href="/tools/" target="_blank" rel="noopener">
           <el-icon><Link /></el-icon>
           <span class="btn-label">{{ t('tools.staticIndex') }}</span>
-        </el-button>
+        </el-link>
         <el-input
           v-model="query"
           class="toolbar__search"

@@ -287,10 +287,6 @@ async function sync(): Promise<void> {
   }
 }
 
-function openSource(url: string | null | undefined): void {
-  if (url) window.open(url, '_blank', 'noopener')
-}
-
 function labelsOf(issue: Issue | null): string[] {
   if (!issue) return []
   const raw = issue.labels
@@ -695,9 +691,9 @@ onMounted(() => {
           >
             {{ t('repoDetail.contextOpenIssue', { number: hit.number }) }}
           </el-button>
-          <el-button v-else-if="hit.url" size="small" @click="openSource(hit.url)">
+          <el-link v-else-if="hit.url" :href="hit.url" target="_blank" rel="noopener">
             {{ t('repoDetail.openSource') }}
-          </el-button>
+          </el-link>
         </li>
       </ul>
       <el-empty

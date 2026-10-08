@@ -95,15 +95,6 @@ async function select(entry: DocEntry): Promise<void> {
   }
 }
 
-/** Raw `.md` download — the browser sends the session cookie itself. */
-function download(entry: DocEntry): void {
-  window.open(entry.download_url, '_blank', 'noopener')
-}
-
-function openMachineIndex(): void {
-  window.open(machineIndexUrl.value, '_blank', 'noopener')
-}
-
 // ── Create ───────────────────────────────────────────────────────────
 
 function startAdd(): void {
@@ -208,10 +199,10 @@ watch(ecosystem, () => load(), { immediate: true })
           <el-icon><EditPen /></el-icon>
           <span class="btn-label">{{ t('docs.edit') }}</span>
         </el-button>
-        <el-button @click="openMachineIndex">
+        <el-link :href="machineIndexUrl" target="_blank" rel="noopener">
           <el-icon><Link /></el-icon>
           <span class="btn-label">{{ t('docs.staticIndex') }}</span>
-        </el-button>
+        </el-link>
         <el-button :loading="loading" @click="load(true)">
           <el-icon><Refresh /></el-icon>
           <span class="btn-label">{{ t('common.refresh') }}</span>
@@ -316,9 +307,9 @@ watch(ecosystem, () => load(), { immediate: true })
             </button>
             <span class="docs-view__item-actions">
               <el-tooltip :content="t('docs.download')" placement="top">
-                <el-button link @click="download(entry)">
+                <el-link :href="entry.download_url" download>
                   <el-icon><Download /></el-icon>
-                </el-button>
+                </el-link>
               </el-tooltip>
               <el-tooltip v-if="canUpload" :content="t('common.delete')" placement="top">
                 <el-button link type="danger" @click="remove(entry)">
@@ -347,10 +338,10 @@ watch(ecosystem, () => load(), { immediate: true })
               <el-icon><EditPen /></el-icon>
               <span class="btn-label">{{ t('docs.edit') }}</span>
             </el-button>
-            <el-button class="docs-view__content-download" link @click="download(detail)">
+            <el-link class="docs-view__content-download" :href="detail.download_url" download>
               <el-icon><Download /></el-icon>
               <span class="btn-label">{{ t('docs.download') }}</span>
-            </el-button>
+            </el-link>
           </div>
         </template>
         <div v-if="detail" class="markdown" v-html="detail.html" />
