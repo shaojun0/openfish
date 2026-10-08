@@ -52,6 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping, Protocol, Sequence
 
+from boltons.fileutils import atomic_save
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from config import settings
@@ -92,6 +93,7 @@ from services.gates import (
 )
 from services.git_auth import credential_args, git_env
 from services.model_routes import mask_api_key, resolve
+from services.paths import single_segment
 from services.sandbox_env import sandbox_env
 from services.sandbox_identity import (
     SANDBOX_HOME_DIRNAME,
@@ -337,19 +339,20 @@ def gate_entry(result: GateResult) -> GateEntry:
 def workdir_for(root: str | Path, task_id: str, attempt: int = 0) -> Path:
     """``<root>/<task_id>``, refusing anything that could escape the root.
 
+    The component check is :func:`services.paths.single_segment` — the
+    repository's single implementation of "an external name that must be exactly
+    one path segment".  This function used to carry its own copy of those rules;
+    two implementations of one concern is what AGENTS.md's hard constraints
+    forbid, and the copy here was the looser of the two.
+
     *attempt* > 0 appends ``-attempt<n>`` so a reclaimed-and-retried task cannot
     delete the checkout a still-running first attempt is using (the lease is
     advisory once it expires; see ``AgentRunner.run``'s publish guard).
     """
-    component = str(task_id).strip()
-    if (
-        not component
-        or component in (".", "..")
-        or "/" in component
-        or "\\" in component
-        or any(ord(ch) < 0x20 for ch in component)
-    ):
-        raise AgentRunnerError(f"非法任务 id：{task_id}")
+    try:
+        component = single_segment(str(task_id).strip(), what="任务 id")
+    except ValueError as exc:
+        raise AgentRunnerError(f"非法任务 id：{task_id}") from exc
     if int(attempt) > 0:
         component = f"{component}-attempt{int(attempt)}"
     return Path(root) / component
@@ -393,17 +396,29 @@ def _no_follow_lstat(path: Path) -> os.stat_result | None:
 def mark_finished(workdir: str | Path) -> Path:
     """Drop the ``.done`` marker that makes a work directory sweepable.
 
-    Opened with ``O_NOFOLLOW``: the work directory is group-writable by the
-    sandbox uid, so a check could plant ``.done`` as a symlink and turn this
-    worker-owned write into a clobber of the link's target.  A planted symlink
-    fails with ``ELOOP``/``ENOTDIR``, which the caller already logs and swallows.
+    The write is delegated to :func:`boltons.fileutils.atomic_save`, which keeps
+    the guarantee this used to hand-roll: it opens ``<marker>.part`` with
+    ``O_CREAT | O_EXCL | O_NOFOLLOW`` and then renames it onto the marker.  The
+    work directory is group-writable by the sandbox uid, so a check could plant
+    ``.done`` as a symlink and turn this worker-owned write into a clobber of the
+    link's target — ``O_NOFOLLOW`` refuses to follow the part path, and the
+    rename *replaces* a planted ``.done`` link rather than writing through it.
+
+    ``overwrite_part=True`` is load-bearing, not cosmetic: the part name is
+    predictable, ``O_EXCL`` is in play, and a run that died before its rename
+    would otherwise leave ``.done.part`` behind so that every later call raised
+    ``FileExistsError`` — an ``OSError`` the caller swallows, which would leave
+    the directory permanently unswept.
     """
     marker = Path(workdir) / FINISHED_MARKER
     marker.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(
-        marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644,
-    )
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    with atomic_save(
+        marker,
+        text_mode=True,
+        overwrite=True,
+        overwrite_part=True,
+        file_perms=0o644,
+    ) as handle:
         handle.write(utc_now_iso())
     return marker
 
