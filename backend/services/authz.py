@@ -73,7 +73,6 @@ _AUTHENTICATED_SEED = (
     P.MODEL_READ,
     P.MODEL_RESOLVE,
     P.DOCKER_READ, P.DOCKER_DOWNLOAD, P.DEBIAN_READ, P.DEBIAN_DOWNLOAD,
-    P.DEBIAN_OFFLINE,
     P.DOC_READ,
     P.APP_READ,
     # Agent Hub: a signed-in developer browses repositories and findings, clones
@@ -136,16 +135,6 @@ _SEED_TOPUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "2026-09-npm-publish",
         P.AUTHENTICATED_ROLE,
         (P.NPM_PUBLISH,),
-    ),
-    # The Debian offline relay's producing half (snapshot / plan / bundle).  A
-    # signed-in user of an intranet hub is exactly who runs it, so an upgraded
-    # deployment receives it instead of the feature being admin-only by accident.
-    # Importing a bundle (`debian:upload`) stays admin-only and is deliberately
-    # not in this list.
-    (
-        "2026-09-debian-offline",
-        P.AUTHENTICATED_ROLE,
-        (P.DEBIAN_OFFLINE,),
     ),
     # The ecosystem handbook (0cf6ac0) added `doc:read` to the authenticated
     # seed and (cd9017a) narrowed `anonymous` to `doc:read` alone — both without

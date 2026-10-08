@@ -308,52 +308,6 @@ class DockerUploadForm(BaseModel):
     )
 
 
-class DebianSnapshotQuery(BaseModel):
-    """``?suites=&components=&arches=&fresh=`` on ``GET /debian/offline/snapshot``.
-
-    The first three narrow the walk and are parsed by
-    ``services.debian_offline.split_list``, which takes the raw value — so they
-    stay strings here.  ``fresh`` is a string for a stronger reason: the view has
-    always read it through ``_truthy``, which means *anything* that is not
-    ``1``/``true``/``yes``/``on`` (including ``0``, ``off``, an empty value and a
-    misspelled one) selects the cached apt index rather than failing.  A ``bool``
-    field would answer ``?fresh=abc`` with the binding envelope's ``400`` — a
-    request this route has always served.
-    """
-
-    suites: str | None = Field(
-        default=None, description="Space/comma separated suites to walk, e.g. `bookworm`"
-    )
-    components: str | None = Field(
-        default=None, description="Space/comma separated components to walk, e.g. `main`"
-    )
-    arches: str | None = Field(
-        default=None, description="Space/comma separated architectures to walk, e.g. `amd64`"
-    )
-    fresh: str | None = Field(
-        default=None,
-        description="`1`/`true`/`yes`/`on` bypasses the apt metadata TTL; anything else keeps it",
-    )
-
-
-class DebianBundleUploadForm(BaseModel):
-    """``multipart/form-data`` body of ``POST /debian/offline/import``.
-
-    One ``bundle`` part — the ``.tar.gz`` the internet-side deployment built with
-    ``POST /debian/offline/bundle``.  It is a ``flask_openapi3.FileStorage`` and
-    is not optional, for the reason spelled out in ``PyPIUploadForm``: only that
-    schema sends the binder to ``request.files``, and ``FileStorage | None``
-    sends it to the form's text fields and rejects every upload.
-
-    Only the *import* step can bind its artifact this way.  ``plan`` and
-    ``bundle`` accept the same value as a file part, a text form field **or** the
-    raw request body (see ``routes/debian.py::_artifact_text``), which no single
-    model describes, so those two keep reading the request by hand.
-    """
-
-    bundle: FileStorage = Field(description="The `.tar.gz` bundle to verify and unpack")
-
-
 class DocsContentRequest(BaseModel):
     """JSON body of the documentation editor's write and preview routes.
 

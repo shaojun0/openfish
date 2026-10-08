@@ -60,8 +60,6 @@ _BOUND_MODEL_LOCATION: dict[str, str] = {
     "ModelRouteProbeRequest": "body_params",
     "DockerTagsQuery": "query_params",
     "DockerUploadForm": "form_params",
-    "DebianSnapshotQuery": "query_params",
-    "DebianBundleUploadForm": "form_params",
     "DocsContentRequest": "body_params",
     "DocsAssetUploadForm": "form_params",
     "DocsDownloadQuery": "query_params",
