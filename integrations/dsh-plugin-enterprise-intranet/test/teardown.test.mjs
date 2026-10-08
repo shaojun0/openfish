@@ -78,24 +78,63 @@ function seed({ modified = false, unmanaged = false } = {}) {
   return written
 }
 
-function makeCtx() {
-  const settingsStore = { 'agent-default-model': { provider: 'intranet-deepseek-flash', model: 'deepseek-flash' } }
+function makeCtx(options = {}) {
+  // 组合 base 层：0.2.0 的 replace() 是 mergeLayers(base, section)，所以桩里必须有一层
+  // base，否则「还原」测不出真实落盘结果。
+  const baseStore = { 'agent-default-model': { provider: 'deepseek', model: 'deepseek-chat' } }
+  const settingsStore = {
+    // 默认状态：默认模型已经指着本插件的 provider（= 停用时要还原的那种情形）。
+    // 场景 5/7 用 initialDefault 换成别人的 provider，好让 apply 真的走到「采集基线」
+    // 那条分支（否则 `readResolvedDefault()` 判定「已经是我们的」→ 基线为 null）。
+    'agent-default-model': options.initialDefault
+      ? { ...options.initialDefault }
+      : { provider: 'intranet-deepseek-flash', model: 'deepseek-flash' },
+  }
   const creds = new Map([
     ['ENTERPRISE_INTRANET_PLATFORM_KEY', 'cpypi_secret'],
     ['ENTERPRISE_INTRANET_KEY_DEEPSEEK_FLASH', 'sk-route'],
     ['ENTERPRISE_INTRANET_KEY_BGE_M3_EMBEDDING', 'sk-embed'],
   ])
-  const state = { registrations: [], tap: null, disposer: null, replaced: [], unsetProviders: [], mutated: [] }
+  const state = {
+    registrations: [], indexRows: [], disposer: null,
+    replaced: [], unsetProviders: [], mutated: [], saved: [],
+    failProviders: options.failProviders || [],
+    // describe().user 的形状就是 DSH 0.2.0 给的那份；null = 用户没设过（走 base）。
+    descriptorUser: options.descriptorUser === undefined ? null : options.descriptorUser,
+  }
   const ctx = {
     webServer: {
       register(route) { state.registrations.push(route); return () => {} },
-      tapIndex(fn) { state.tap = fn; return () => {} },
+    },
+    // 0.2.0 的结构化注入：插件用 ctx.on('webserver/index-inject', table => table.push(row))，
+    // 不再是 tapIndex 的字符串改写。
+    on(event, handler) {
+      if (event === 'webserver/index-inject') state.indexRows.push(handler)
     },
     settings: {
       get(ns) { return settingsStore[ns] },
-      async mutate(ns, ops) { state.mutated.push([ns, ops]); for (const op of ops) state.unsetProviders.push(op.path[1]) },
-      async replace(ns, value) { state.replaced.push([ns, value]); settingsStore[ns] = value },
-      describe() { return [] },
+      async mutate(ns, ops) {
+        // 0.2.0 起 dsh-llm-pi-ai 在写入时校验（config.d.ts 的 assertServiceable）：
+        // 一条不可服务的路由会让**整批** mutate 抛错。桩要能复现，否则逐条兜底测不到。
+        const bad = ops.filter((op) => state.failProviders.includes(op.path[1]))
+        if (bad.length) throw new Error('assertServiceable: ' + bad.map((op) => op.path[1]).join(','))
+        state.mutated.push([ns, ops])
+        for (const op of ops) state.unsetProviders.push(op.path[1])
+      },
+      // 真实语义是 write(ns, (_current, base) => mergeLayers(base, section))：把组合 base
+      // 物化进用户层，而不是清空用户层。
+      async replace(ns, section) {
+        const merged = { ...(baseStore[ns] || {}), ...(section || {}) }
+        state.replaced.push([ns, section, merged])
+        settingsStore[ns] = merged
+      },
+      describe() {
+        return [{
+          ns: 'agent-default-model',
+          value: settingsStore['agent-default-model'],
+          user: state.descriptorUser,
+        }]
+      },
     },
     credentials: {
       async set(ref, value) { creds.set(ref, value) },
@@ -105,13 +144,30 @@ function makeCtx() {
     effect(fn) { state.disposer = fn() },
     logger: { info() {}, warn() {} },
   }
-  return { ctx, state, creds }
+  if (options.withDefaultModelService) {
+    // DSH 0.2.0 的正式写入路径（dsh-agent-default-model）；提供了它就该被优先使用。
+    ctx.agentDefaultModel = {
+      currentSelection() { return { ...settingsStore['agent-default-model'] } },
+      async saveSelection(next) {
+        state.saved.push(next)
+        settingsStore['agent-default-model'] = { ...next }
+      },
+    }
+  }
+  return { ctx, state, creds, settings: settingsStore, base: baseStore }
+}
+
+/** 跑一遍注入链，取出 boot 行里的 csrf（结构化注入，不再是字符串改写）。 */
+function bootRowsOf(state) {
+  const table = []
+  for (const handler of state.indexRows) handler(table)
+  return table
 }
 
 function csrfOf(state) {
-  const html = state.tap('<body></body>')
-  const m = /__DSH_INTRANET_BOOT__=(\{.*?\});/.exec(html)
-  return JSON.parse(m[1]).csrf
+  const row = bootRowsOf(state).find((r) => r && r.kind === 'global' && r.name === '__DSH_INTRANET_BOOT__')
+  if (!row) throw new Error('未注入 __DSH_INTRANET_BOOT__ 行')
+  return row.value.csrf
 }
 
 function callEndpoint(state, pathname, csrf) {
@@ -132,7 +188,18 @@ const res = await callEndpoint(a.state, '/dsh-intranet/teardown', csrfOf(a.state
 const payload = JSON.parse(res.body)
 check('200 + ok:true', res.status === 200 && payload.ok === true, JSON.stringify(payload))
 check('provider 已注销', a.state.unsetProviders.includes('intranet-deepseek-flash') && a.state.unsetProviders.includes('intranet-deepseek-v4-pro'), JSON.stringify(a.state.unsetProviders))
-check('默认模型已还原', a.state.replaced.some(([ns, v]) => ns === 'agent-default-model' && v && Object.keys(v).length === 0))
+// 基线为空 → 走 settings().replace(ns, {})。0.2.0 的 replace 是 mergeLayers(base, section)，
+// 所以断言必须落在**落盘结果**（= 组合 base），而不是调用参数。
+check('默认模型已还原到组合 base',
+  JSON.stringify(a.settings['agent-default-model']) === JSON.stringify(a.base['agent-default-model']),
+  JSON.stringify(a.settings['agent-default-model']))
+check('还原用的是空分节写法（基线为空）',
+  a.state.replaced.some(([ns, section]) => ns === 'agent-default-model' && section && Object.keys(section).length === 0))
+{
+  const rows = bootRowsOf(a.state)
+  check('注入了 global boot 行', rows.some((r) => r.kind === 'global' && r.name === '__DSH_INTRANET_BOOT__'), JSON.stringify(rows))
+  check('注入了 panel 脚本行', rows.some((r) => r.kind === 'script-src' && r.src === '/dsh-intranet/panel.js'), JSON.stringify(rows))
+}
 check('凭据已删除（平台 key + 路由 key）', !a.creds.has('ENTERPRISE_INTRANET_PLATFORM_KEY') && !a.creds.has('ENTERPRISE_INTRANET_KEY_DEEPSEEK_FLASH'), [...a.creds.keys()].join(','))
 check('凭据报告 removed 含平台 key', payload.credentials_removed.includes('ENTERPRISE_INTRANET_PLATFORM_KEY'))
 check('生成的包源文件已删除', !fs.existsSync(P.npmrc) && !fs.existsSync(P.profile))
@@ -181,10 +248,16 @@ const server = http.createServer((req, res) => {
     return
   }
   if (req.url.startsWith('/api/v1/models/resolved')) {
-    res.end(JSON.stringify({ routes: [{
-      name: 'deepseek-flash', provider: 'openai', kind: 'chat', base_url: 'http://example.invalid',
-      model: 'deepseek-flash', aliases: ['default'], path: '/v1/chat/completions', enabled: true, api_key: 'sk-upstream',
-    }] }))
+    res.end(JSON.stringify({ routes: [
+      {
+        name: 'deepseek-flash', provider: 'openai', kind: 'chat', base_url: 'http://example.invalid',
+        model: 'deepseek-flash', aliases: ['default'], path: '/v1/chat/completions', enabled: true, api_key: 'sk-upstream',
+      },
+      {
+        name: 'deepseek-v4-pro', provider: 'openai', kind: 'chat', base_url: 'http://example.invalid',
+        model: 'deepseek-v4-pro', aliases: [], path: '/v1/chat/completions', enabled: true, api_key: 'sk-upstream-2',
+      },
+    ] }))
     return
   }
   res.statusCode = 404
@@ -206,6 +279,66 @@ check('git helper / gitconfig 照写', fs.existsSync(P.helper) && fs.existsSync(
 const manifest = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')).mirrorsWritten || {}
 check('清单里只有 git 两个文件', !(P.pip in manifest) && !(P.npmrc in manifest) && (P.helper in manifest) && (P.gitconfig in manifest), JSON.stringify(Object.keys(manifest)))
 check('镜像文件被 docker 等未涉及', !fs.existsSync(path.join(sys, 'etc/docker/daemon.json')))
+// ── 场景 6：0.2.0 的写入校验拒绝一条路由时，逐条重试不让整批落空 ──────────
+console.log('\n场景 6 — assertServiceable 拒绝一条路由时不拖垮整批')
+for (const file of Object.values(P)) fs.rmSync(file, { force: true })
+fs.rmSync(STATE_FILE, { force: true })
+const g = makeCtx({ failProviders: ['intranet-deepseek-v4-pro'], withDefaultModelService: true })
+mod.apply(g.ctx, { platformUrl: platform, autoMirrors: true, enterpriseMode: false })
+g.creds.set('ENTERPRISE_INTRANET_PLATFORM_KEY', 'cpypi_secret')
+const retried = JSON.parse((await callEndpoint(g.state, '/dsh-intranet/apply', csrfOf(g.state))).body)
+check('/apply 仍然成功（坏路由不该让整次启用落空）', retried.ok === true, JSON.stringify(retried))
+check('好路由已注册', g.state.unsetProviders.includes('intranet-deepseek-flash'), JSON.stringify(g.state.unsetProviders))
+check('坏路由被报出来、且带上路由名', (retried.providers_skipped || []).some((x) => x.provider === 'intranet-deepseek-v4-pro' && x.route === 'deepseek-v4-pro'), JSON.stringify(retried.providers_skipped))
+check('坏路由的凭据被撤掉（不留孤儿）', !g.creds.has('ENTERPRISE_INTRANET_KEY_DEEPSEEK_V4_PRO'), [...g.creds.keys()].join(','))
+check('确实走了逐条重试（批调用抛错后仍有单条 mutate）', g.state.mutated.some(([, ops]) => ops.length === 1), JSON.stringify(g.state.mutated.map(([, ops]) => ops.length)))
+check('默认模型经 agentDefaultModel.saveSelection() 写入', g.state.saved.some((v) => v.provider === 'intranet-deepseek-flash'), JSON.stringify(g.state.saved))
+
+// ── 场景 5：基线来自 describe() 的 user 层（0.2.0 的 describe 形状） ──────
+// 基线是在 **apply** 时采集的，所以必须先 /apply 再 /teardown；而初始默认模型得是
+// 「别人的」provider，apply 才会走采集分支。
+console.log('\n场景 5 — describe().user 非空时按 user 层采集并还原')
+for (const file of Object.values(P)) fs.rmSync(file, { force: true })
+fs.rmSync(STATE_FILE, { force: true })
+const e = makeCtx({
+  descriptorUser: { provider: 'deepseek', model: 'deepseek-reasoner' },
+  initialDefault: { provider: 'deepseek', model: 'deepseek-chat' },
+})
+mod.apply(e.ctx, { platformUrl: platform, autoMirrors: true, enterpriseMode: false })
+e.creds.set('ENTERPRISE_INTRANET_PLATFORM_KEY', 'cpypi_secret')
+await callEndpoint(e.state, '/dsh-intranet/apply', csrfOf(e.state))
+const eCaptured = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')).baselineDefaultModel
+check('基线取自 describe().user（而不是解析值/空）',
+  JSON.stringify(eCaptured && eCaptured.section) === JSON.stringify({ provider: 'deepseek', model: 'deepseek-reasoner' }),
+  JSON.stringify(eCaptured))
+const eBody = JSON.parse((await callEndpoint(e.state, '/dsh-intranet/teardown', csrfOf(e.state))).body)
+check('200 + ok:true', eBody.ok === true, JSON.stringify(eBody))
+check('还原写入的是 user 层那份选择',
+  JSON.stringify(e.settings['agent-default-model']) === JSON.stringify({ provider: 'deepseek', model: 'deepseek-reasoner' }),
+  JSON.stringify(e.settings['agent-default-model']))
+
+// ── 场景 7：有 agentDefaultModel 服务时优先走 saveSelection() ─────────────
+console.log('\n场景 7 — 有 agentDefaultModel 服务时优先 saveSelection()')
+for (const file of Object.values(P)) fs.rmSync(file, { force: true })
+fs.rmSync(STATE_FILE, { force: true })
+const f = makeCtx({
+  withDefaultModelService: true,
+  descriptorUser: { provider: 'deepseek', model: 'deepseek-reasoner' },
+  initialDefault: { provider: 'deepseek', model: 'deepseek-chat' },
+})
+mod.apply(f.ctx, { platformUrl: platform, autoMirrors: true, enterpriseMode: false })
+f.creds.set('ENTERPRISE_INTRANET_PLATFORM_KEY', 'cpypi_secret')
+await callEndpoint(f.state, '/dsh-intranet/apply', csrfOf(f.state))
+check('apply 经 saveSelection() 写入',
+  f.state.saved.some((v) => v.model === 'deepseek-flash'), JSON.stringify(f.state.saved))
+await callEndpoint(f.state, '/dsh-intranet/teardown', csrfOf(f.state))
+check('全程未回退到 settings().replace()', f.state.replaced.length === 0, JSON.stringify(f.state.replaced))
+check('还原经 saveSelection() 写入基线',
+  f.state.saved.some((v) => v.model === 'deepseek-reasoner'), JSON.stringify(f.state.saved))
+check('落盘的就是基线那份选择',
+  JSON.stringify(f.settings['agent-default-model']) === JSON.stringify({ provider: 'deepseek', model: 'deepseek-reasoner' }),
+  JSON.stringify(f.settings['agent-default-model']))
+
 server.close()
 
 console.log('\n' + (failures ? `❌ ${failures} 项失败` : '✅ 全部通过') + `  (临时目录 ${root})`)
