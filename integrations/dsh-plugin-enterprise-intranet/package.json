@@ -13,6 +13,11 @@
   ],
   "type": "module",
   "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
   "private": true,
   "scripts": {
     "test": "node test/teardown.test.mjs"
@@ -23,9 +28,19 @@
     "cordis.patch.yml",
     "README.md"
   ],
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.0-0"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
     }
   },
   "license": "UNLICENSED"

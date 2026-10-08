@@ -420,10 +420,14 @@ export function apply(ctx, config) {
   /**
    * 采集「用户层」的 `agent-default-model`，作为停用时还原的基线。
    *
-   * 优先用 `describe()` 的 user 层而不是 `get()` 的解析值：user 层为空恰好表示
-   * 「用户没设过、默认模型来自组合 base」，还原时清空用户层就能继承回 base，
-   * 而不是把解析后的值固化成一条本不存在的用户覆盖。`describe()` 在旧版 DSH 上
-   * 没有时退回解析值。
+   * 用 `describe()` 的 user 层而不是解析值：user 层为空表示「用户没设过、默认模型
+   * 来自组合 base」，这决定了停用时的还原写法。`describe()` 在旧版 DSH 上退回解析值。
+   *
+   * 关于「基线为空」的还原（0.2.0 起已核实）：`settings().replace(ns, section)` 的实现
+   * 是 `write(ns, (_current, base) => mergeLayers(base, section))`，它**不是**「清空用户
+   * 层」，而是把组合 base 物化进用户层。所以 `replace(ns, {})` 得到的就是 base 的当前
+   * 值，解析结果正确；代价是那些值从此钉在用户层，base 之后再变不会自动继承过去。
+   * DSH 目前没有「删除用户层覆盖」的 API，这是能达到的最接近语义。见 writeDefaultModel()。
    */
   function captureDefaultModelLayer() {
     try {
@@ -448,6 +452,29 @@ export function apply(ctx, config) {
     if (!stored || typeof stored !== 'object') return null
     const section = Object.prototype.hasOwnProperty.call(stored, 'section') ? stored.section : stored
     return isSection(section) ? { ...section } : null
+  }
+
+  /**
+   * 写「默认模型」这条选择。
+   *
+   * 优先用 `ctx.agentDefaultModel.saveSelection()` —— DSH 0.2.0 起该服务是这条选择的
+   * 正式写入路径（带校验，且「没有配置编辑器的部署保留其组合条目」）。服务缺席时退回
+   * `settings().replace()`，与本插件在旧版 DSH 上的行为一致。
+   *
+   * `selection` 不完整时（基线为空，或状态文件来自从没采集过的旧版本）只能走 settings
+   * 的空分节写法：`saveSelection()` 要求一份完整的 provider + model。
+   */
+  async function writeDefaultModel(selection) {
+    const svc = ctx.agentDefaultModel
+    const complete = isSection(selection) && selection.provider && selection.model
+    if (complete && svc && typeof svc.saveSelection === 'function') {
+      const next = { provider: selection.provider, model: selection.model }
+      if (selection.reasoningEffort !== undefined) next.reasoningEffort = selection.reasoningEffort
+      await svc.saveSelection(next)
+      return 'service'
+    }
+    await settings().replace(DEFAULT_MODEL_NS, selection || {})
+    return 'settings'
   }
 
   function configNow() {
@@ -643,9 +670,10 @@ export function apply(ctx, config) {
   // ── 模型路由 → llm-pi-ai providers ──────────────────────────────────
 
   async function registerProviders(routes) {
-    const cfg = configNow()
     const providers = {}
     const stored = []
+    const refByKey = {}       // provider id → 凭据 ref
+    const routeNameByKey = {} // provider id → 平台路由名（逐条报错时说人话）
     for (const route of routes) {
       if (!route || route.enabled === false) continue
       // 先看功能，再看协议：向量化 / OCR / 语音等路由不是对话模型。
@@ -664,8 +692,10 @@ export function apply(ctx, config) {
         const ref = refForRoute(route.name)
         await credentials().set(ref, route.api_key)
         profile.apiKeyEnv = ref
+        refByKey[routeKey] = ref
         stored.push({ route: route.name, ref })
       }
+      routeNameByKey[routeKey] = route.name
       providers[routeKey] = profile
     }
 
@@ -675,12 +705,52 @@ export function apply(ctx, config) {
       path: ['providers', key],
       value,
     }))
-    if (ops.length && typeof settings().mutate === 'function') {
-      await settings().mutate(LLM_NS, ops)
-    } else if (ops.length) {
+    if (!ops.length) return { providers: [], keysStored: stored, skipped: [] }
+
+    if (typeof settings().mutate !== 'function') {
       await settings().update(LLM_NS, { providers })
+      return { providers: Object.keys(providers), keysStored: stored, skipped: [] }
     }
-    return { providers: Object.keys(providers), keysStored: stored }
+
+    try {
+      await settings().mutate(LLM_NS, ops)
+    } catch (err) {
+      // DSH 0.2.0 起 `dsh-llm-pi-ai` 在写入时校验 provider 能否被服务（config.d.ts 的
+      // `assertServiceable`），一条不可服务的路由会让**整批** mutate 失败。逐条重试：
+      // 能服务的照常生效，只把坏的那几条报出来 —— 否则一个坏路由会让整次「启用企业
+      // 内网模式」全部落空（在该校验出现前，这种路由会被静默写入）。
+      const applied = []
+      const skipped = []
+      for (const [key, value] of Object.entries(providers)) {
+        try {
+          await settings().mutate(LLM_NS, [{ op: 'set', path: ['providers', key], value }])
+          applied.push(key)
+        } catch (routeErr) {
+          skipped.push({
+            provider: key,
+            route: routeNameByKey[key] || null,
+            error: String((routeErr && routeErr.message) || routeErr),
+          })
+          // 没注册成功的 provider 不会被用到，别把它的 key 留在凭据里。
+          const deadRef = refByKey[key]
+          if (deadRef) {
+            try {
+              await credentials().unset(deadRef)
+            } catch {
+              // 撤不掉就留着：多一条凭据不影响功能，报出来由运维处置。
+            }
+          }
+        }
+      }
+      const appliedRefs = new Set(applied.map((k) => refByKey[k]).filter(Boolean))
+      return {
+        providers: applied,
+        keysStored: stored.filter((item) => appliedRefs.has(item.ref)),
+        skipped,
+        batchError: String((err && err.message) || err),
+      }
+    }
+    return { providers: Object.keys(providers), keysStored: stored, skipped: [] }
   }
 
   async function unregisterProviders(providerIds) {
@@ -1205,7 +1275,12 @@ main().catch((err) => fail(String((err && err.message) || err)))
 
     const verified = await verifyKey(key)
     const routes = await fetchResolvedRoutes(key)
-    const { providers, keysStored } = await registerProviders(routes)
+    const {
+      providers,
+      keysStored,
+      skipped: skippedProviders,
+      batchError: providerBatchError,
+    } = await registerProviders(routes)
     const defaultRoute = pickDefaultRoute(routes)
     if (!defaultRoute) {
       const err = new Error('模型路由表里没有可用的对话模型（kind 需为 chat / completion，provider 需为 openai / anthropic，且 enabled）。')
@@ -1232,7 +1307,7 @@ main().catch((err) => fail(String((err && err.message) || err)))
         : { section: captureDefaultModelLayer(), capturedAt: nowIso() }
     }
 
-    await settings().replace(DEFAULT_MODEL_NS, { provider: providerId, model: modelId })
+    await writeDefaultModel({ provider: providerId, model: modelId })
 
     // `autoMirrors: false` 只该关掉包源文件；`autoGitCredential` 单独控制 git。
     // 旧实现把两者混成一个条件，导致 autoMirrors=false 时照样写满 /etc。
@@ -1256,6 +1331,7 @@ main().catch((err) => fail(String((err && err.message) || err)))
       lastApplyAt: nowIso(),
       lastError: null,
       providers,
+      providersSkipped: skippedProviders || [],
       keysStored: keysStored.map((k) => k.route + ' -> ' + k.ref),
       defaultProvider: providerId,
       defaultModel: modelId,
@@ -1280,6 +1356,8 @@ main().catch((err) => fail(String((err && err.message) || err)))
       enterprise_mode: true,
       platform_user: verified.user,
       providers,
+      providers_skipped: skippedProviders || [],
+      provider_write_error: providerBatchError || null,
       default_provider: providerId,
       default_model: modelId,
       default_route: defaultRoute.name,
@@ -1308,8 +1386,12 @@ main().catch((err) => fail(String((err && err.message) || err)))
     if (pointsAtUs) {
       // 基线为 null = 用户本来就没有用户层的默认模型，或者状态文件来自修复前的
       // 版本（那时从没采集过）。两种情况都不该让默认模型悬空指向一个已经注销的
-      // provider —— 写入空分节即继承回组合 base，这是 replace() 的 reset 语义。
-      await settings().replace(DEFAULT_MODEL_NS, baseline || {})
+      // provider，所以写回组合 base 的当前值。
+      // 注意 `replace(ns, {})` **不是**「清空用户层」：它的实现是
+      // `mergeLayers(base, section)`，空分节等于把 base 物化进用户层。解析值因此正确
+      // （回到 base 默认），代价是 base 之后再变不会自动继承 —— DSH 没有删除用户层
+      // 覆盖的 API，这是能达到的最接近语义。见 writeDefaultModel()。
+      await writeDefaultModel(baseline)
       restored = baseline
     }
 
@@ -1623,19 +1705,22 @@ main().catch((err) => fail(String((err && err.message) || err)))
     },
   }))
 
-  disposers.push(ctx.webServer.tapIndex((html) => {
-    if (html.includes(`${ROUTE_PREFIX}/panel.js`)) return html
-    const boot = JSON.stringify({
-      csrf,
-      endpoint: ROUTE_PREFIX,
-      platformUrl: configNow().platformUrl,
+  // DSH 0.2.0 起推荐用结构化注入行（`IndexInjection`）而不是 `tapIndex` 字符串改写：
+  // 同一张表既喂服务端渲染，也喂静态 worker 部署。`tapIndex` 仍保留为逃生通道
+  // （见 dsh-host-webserver 的 injections.d.ts），而这里的两条恰好都能表达成行 ——
+  // `global` 正是为「给 globalThis 赋一个 JSON 值」准备的。
+  //
+  // 与原写法的差别：`script-src` 行不带 `defer`（行按表序执行），而 `global` 行保证排在
+  // 后续 script 行之前，所以 panel.js 读到 boot 的时序不变。`ctx.on` 的监听随 fiber
+  // 一起释放，不再需要单独的 disposer。
+  ctx.on('webserver/index-inject', (table) => {
+    table.push({
+      kind: 'global',
+      name: '__DSH_INTRANET_BOOT__',
+      value: { csrf, endpoint: ROUTE_PREFIX, platformUrl: configNow().platformUrl },
     })
-    const tags =
-      `<script>window.__DSH_INTRANET_BOOT__=${boot};</script>` +
-      `<script defer src="${ROUTE_PREFIX}/panel.js"></script>`
-    if (html.includes('</body>')) return html.replace('</body>', tags + '</body>')
-    return html + tags
-  }))
+    table.push({ kind: 'script-src', placement: 'body', src: `${ROUTE_PREFIX}/panel.js` })
+  })
 
   // 启动时若已配置 key 且模式为开，自动重新套用一次（例如容器重启后设置被清空）。
   ctx.effect(() => {
