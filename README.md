@@ -277,12 +277,6 @@ Templates are provided at `backend/.env.example` (local development) and
 | `DEBIAN_CACHE_DIR`      | `<backend>/data/cache/debian` | Proxied apt metadata cache                  |
 | `DEBIAN_CACHE_MAX_MB`   | `256`                  | Byte budget for the apt metadata cache             |
 | `DEBIAN_METADATA_TTL`   | `300`                  | Seconds a proxied `Release`/`Packages` document is trusted |
-| `DEBIAN_SUITES`         | `bookworm bookworm-updates bookworm-security` | Suites the offline snapshot enumerates |
-| `DEBIAN_COMPONENTS`     | `main`                 | Components the offline snapshot enumerates         |
-| `DEBIAN_ARCHES`         | `amd64`                | Architectures the offline snapshot enumerates      |
-| `DEBIAN_OFFLINE_DIR`    | `<backend>/data/offline/debian` | Where built offline bundles are written    |
-| `DEBIAN_OFFLINE_MAX_MB` | `4096`                 | Ceiling on one offline bundle, in MiB; an import may not unpack past it either; `0` disables it |
-| `DEBIAN_OFFLINE_RECOMMENDS` | `false`            | Follow `Recommends` when closing a plan's dependencies |
 | `MODEL_PROBE_TIMEOUT`   | `5`                    | Seconds allowed for one route connectivity probe    |
 | `DOCS_DIR`              | `<project>/docker/docs` | Per-ecosystem Markdown documentation root — one sub-directory per ecosystem, one folder project per document |
 
@@ -386,9 +380,7 @@ The permission points shipped today, and the routes that enforce them:
 | `docker:download` | `/docker/v2/<name>/blobs/<digest>` (layer/config bytes) and `/docker/files/<file>` |
 | `docker:upload` | `POST /api/v1/docker` — upload a `docker save` image tar or a compose/Dockerfile snippet (admin only) |
 | `debian:read` | `/debian/` index, `/debian/Packages`, `/debian/dists/<path>`, `GET /api/v1/debian` |
-| `debian:download` | `/debian/pool/<path>` (package bytes), `/debian/files/<file>` and `/debian/offline/bundles/<file>` |
-| `debian:offline` | the relay's producing half: `GET /debian/offline`, `GET /debian/offline/snapshot`, `POST /debian/offline/plan`, `POST /debian/offline/bundle` — exports a package snapshot, diffs it into a pending-update plan and packs a bundle |
-| `debian:upload` | `POST /debian/offline/import` — verifies an offline bundle and writes its `.deb` files into `DEBIAN_DIR` (admin only) |
+| `debian:download` | `/debian/pool/<path>` (package bytes) and `/debian/files/<file>` |
 | `key:list` / `key:create` / `key:delete` / `key:stats` | the matching `/api/v1/keys*` endpoints |
 | `repo:read` | `GET /api/v1/repos`, `GET /api/v1/repos/<slug>`, `GET /api/v1/repos/<slug>/issues[/<number>]`, `GET /api/v1/repos/<slug>/context/search` — the repository mirror and its imported collaboration history |
 | `repo:write` | `POST /api/v1/repos`, `POST /api/v1/repos/import`, `POST /api/v1/repos/<slug>/sync` — imports a repository, triggers a sync or changes its configuration (admin only) |
@@ -644,36 +636,6 @@ Dockerfile snippet.
 normal `deb <server>/debian bookworm main` line works too — metadata is cached
 with `DEBIAN_METADATA_TTL`, packages are streamed through, and `Range` requests
 are forwarded so a resumed download still works.
-
-**Debian offline relay.** For an air-gapped intranet, two Debian deployments can
-relay updates through three files a human carries between them, with no network
-link:
-
-1. the **internet** side exports a text **snapshot** of every package its
-   configured `DEBIAN_SUITES`/`DEBIAN_COMPONENTS`/`DEBIAN_ARCHES` offer
-   (`GET /debian/offline/snapshot`);
-2. the **intranet** side imports that snapshot and gets a **plan** — every
-   package its local `DEBIAN_DIR` lacks or holds at an older version, plus the
-   dependency closure taken from the snapshot's own `Depends`/`Pre-Depends`
-   (`POST /debian/offline/plan`);
-3. the **internet** side re-resolves the plan against its own metadata,
-   verifies size and SHA-256 and packs a **bundle** `.tar.gz`
-   (`POST /debian/offline/bundle`);
-4. the **intranet** side verifies the bundle's manifest and unpacks it into
-   `DEBIAN_DIR`, where the flat `/debian/Packages` index picks it up
-   (`POST /debian/offline/import`). The importer trusts nothing about the
-   archive: members that are not regular files or directories (symlinks,
-   hardlinks, device nodes, FIFOs), names that leave the staging directory, and
-   payloads that would unpack past `DEBIAN_OFFLINE_MAX_MB` are refused before a
-   byte is written — see `docs/security/bundle-import-hardening.md`.
-
-Each artifact is self-describing, tab-separated text with a trailing digest, so
-it can be read, diffed and checked by hand; the bundle is a gzip tarball that
-carries the same manifest plus a flat `Packages` index. Producing the relay
-artifacts needs `debian:offline`; importing a bundle needs `debian:upload`
-(admin only). The whole flow runs from the console, from the
-`cpypiserver-debian-offline` client, or with plain `curl` — see
-`docker/docs/debian/offline-updates/document.md`.
 
 **Model routing.** The routing table lives in the **`model_routes` database
 table** — the same SQLite file (`API_KEYS_FILE`) or PostgreSQL database
@@ -1005,12 +967,6 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 | GET    | `/api/v1/docker`                  | Local docker catalog (docker:read)       |
 | POST   | `/api/v1/docker`                  | Upload an image tar / compose / Dockerfile snippet (docker:upload) |
 | GET    | `/api/v1/debian`                  | Local debian catalog (debian:read)       |
-| GET    | `/debian/offline`                 | Offline-relay config + built bundles (debian:offline) |
-| GET    | `/debian/offline/snapshot`        | Export the internet-side package snapshot (debian:offline) |
-| POST   | `/debian/offline/plan`            | Diff a snapshot → pending-update plan (debian:offline) |
-| POST   | `/debian/offline/bundle`          | Build the offline bundle from a plan (debian:offline) |
-| GET    | `/debian/offline/bundles/<file>`  | Download a built bundle (debian:download) |
-| POST   | `/debian/offline/import`          | Verify + unpack a bundle into `DEBIAN_DIR` (debian:upload) |
 | GET    | `/api/v1/models`                  | Model-routing table, keys masked (model:read) |
 | GET    | `/api/v1/models/resolved`         | Same table **with** upstream keys + `endpoint_url` (model:resolve) |
 | POST   | `/api/v1/models`                  | Add a route + probe it (model:write)     |

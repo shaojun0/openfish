@@ -190,7 +190,7 @@ compose 文件里。随仓库提交的样例目录移到了 `docker/examples/`�
 | `npm/` | 本地 npm tarball / `catalog.json` | `NPM_DIR` |
 | `node-builds/` | `nodejs.org/dist` 布局的 Node 镜像 | `NODE_BUILDS_DIR` |
 | `docker-images/` | `docker save` tar + compose/Dockerfile 片段 | `DOCKER_DIR` |
-| `debian/` | 本地 `.deb` + apt 片段；离线中继导入的包也落在这里 | `DEBIAN_DIR` |
+| `debian/` | 本地 `.deb` + apt 片段 | `DEBIAN_DIR` |
 | `docs/<生态>/<文档>/document.md` | 各生态 Markdown 文档 | `DOCS_DIR` |
 
 ---
