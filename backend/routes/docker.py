@@ -51,7 +51,6 @@ the proxy exists to pass through.
 
 from __future__ import annotations
 
-import logging
 from urllib.parse import quote
 
 from flask import (
@@ -69,12 +68,9 @@ from routes.hub_common import spa_url, wants_json
 from schemas import DockerTagsQuery, DockerUploadForm
 from services import docker_registry as registry
 from services import hub, hub_upload
-from services.logsafe import scrub
 
 
 docker_bp = APIBlueprint("docker", __name__)
-
-_log = logging.getLogger("cpypiserver.docker")
 
 _DOCKER_SCHEMA = {
     "type": "object",
@@ -151,18 +147,14 @@ def _registry_error(exc: registry.DockerRegistryError) -> Response:
       the caller already sent, so they disclose nothing the caller did not
       arrive with.
     * From ``5xx`` up the failure is the *upstream's*: its message can carry the
-      upstream URL, a TLS error or a response body.  That is logged for the
-      operator and replaced with the generic OCI ``UNAVAILABLE`` text, so a probe
-      of this proxy cannot turn it into a map of the network behind it.
+      upstream URL, a TLS error or a response body.  It is replaced with the
+      generic OCI ``UNAVAILABLE`` text, so a probe of this proxy cannot turn it
+      into a map of the network behind it.
 
     A new message on the 4xx tier therefore has to stay static — never
     ``f"...{response.text}"`` or a URL — or it belongs on the redacted tier.
     """
     if exc.status >= 500:
-        _log.error(
-            "docker registry %s (HTTP %s): %s",
-            exc.code, exc.status, scrub(exc.message), exc_info=exc,
-        )
         message = "upstream registry unavailable"
     else:
         message = exc.message

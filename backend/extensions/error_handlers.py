@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import logging
-
 from flask import jsonify, redirect, request
 
 from config import settings
 from extensions import Extension
 from errors import PypiError, UnauthorizedError, BadRequestError, UploadConflictError
 from auth.oauth import get_authorize_url
-from services.logsafe import scrub
-
-_log = logging.getLogger("cpypiserver.errors")
 
 #: Blueprints that serve the SPA and machine clients.  These must always answer
 #: JSON — an HTML redirect would be followed silently by XHR, and the client
@@ -103,18 +98,11 @@ def _client_text(exc: PypiError) -> str:
 
     Everything a ``4xx`` carries was written for the caller (``"role not found"``,
     ``"invalid repository slug; expected '<owner>/<name>'"``).  From ``500`` up
-    the message is *our* failure and is replaced with a constant — the original
-    goes to the log, scrubbed, so the operator keeps the diagnostic.
+    the message is *our* failure and is replaced with a constant: it describes
+    our internals, so it never reaches the caller.
     """
     if exc.status_code < _REDACT_FROM:
         return exc.message
-    _log.error(
-        "%s -> %s %s",
-        type(exc).__name__,
-        exc.status_code,
-        scrub(exc.message),
-        exc_info=exc,
-    )
     return _SERVER_ERROR_TEXT
 
 
