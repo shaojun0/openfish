@@ -77,6 +77,22 @@ def _now() -> float:
     return time.time()
 
 
+def _expires_at(item: Mapping[str, Any]) -> float:
+    """The record's expiry as a float; anything unparseable counts as expired.
+
+    The document is a plain file on disk: a crash can truncate it and a human
+    can hand-edit it, so a timestamp that is not a number must not turn every
+    poll into a ``500``.  ``0`` is the fail-safe direction — the entry is
+    purged and the client re-runs the flow, which is exactly what
+    :meth:`DeviceAuthStore._read` already does for a document that will not
+    parse at all.
+    """
+    try:
+        return float(item.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _new_user_code() -> str:
     pick = lambda: "".join(secrets.choice(_ALPHABET) for _ in range(_CODE_LEN))
     return f"{pick()}-{pick()}"
@@ -157,7 +173,7 @@ class DeviceAuthStore:
         cutoff = _now()
         dead = [
             digest for digest, item in requests.items()
-            if not isinstance(item, dict) or float(item.get("expires_at") or 0) < cutoff
+            if not isinstance(item, dict) or _expires_at(item) < cutoff
         ]
         for digest in dead:
             requests.pop(digest, None)
@@ -273,7 +289,7 @@ class DeviceAuthStore:
             item = requests.get(digest)
             if not isinstance(item, dict):
                 return "unknown", None
-            if float(item.get("expires_at") or 0) < _now():
+            if _expires_at(item) < _now():
                 requests.pop(digest, None)
                 self._write(requests)
                 return "expired", None

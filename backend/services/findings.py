@@ -518,8 +518,6 @@ def _drift_reason(finding: Any, ctx: ReactivationContext) -> str | None:
     anchor = drift.symbol
     if anchor is not None and anchor.overlaps(drift.changed):
         return REASON_DRIFT
-    if anchor is None and drift.changed:
-        pass
     return None
 
 

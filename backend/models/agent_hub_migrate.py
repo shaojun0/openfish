@@ -220,8 +220,6 @@ def ensure_schema(engine: Engine, *, create: bool = True) -> dict[str, list[str]
     # to recreate them.
     report["updated_constraints"] = evolve_check_constraints(engine)
 
-    if any(report.values()):
-        pass
     return report
 
 

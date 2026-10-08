@@ -679,8 +679,6 @@ def _result(
     source: str,
 ) -> dict[str, Any]:
     omitted = max(0, matched - len(items))
-    if omitted:
-        pass
     return {
         "repo_id": repo_id,
         "query": dict(query),

@@ -800,14 +800,9 @@ class DockerRegistryProxy:
                 os.replace(tmp_name, dest)
                 state["done"] = True
                 self._index.record_blob(name, digest)
-                written = state["written"]
                 try:
                     self._cache.enforce_limit()
                 except OSError as exc:  # pragma: no cover - budget is best effort
-                    pass
-                if dest.exists():
-                    pass
-                else:
                     pass
             except _DiscardTemp:
                 pass

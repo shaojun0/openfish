@@ -771,10 +771,6 @@ class AgentQueue:
                 )
                 outcome = "queued"
             session.commit()
-        if outcome == "dead":
-            pass
-        else:
-            pass
         return outcome
 
     def _finish(
@@ -798,8 +794,6 @@ class AgentQueue:
                 )
             )
             session.commit()
-        if not result.rowcount:
-            pass
         return bool(result.rowcount)
 
     def _transition(
@@ -878,13 +872,6 @@ class AgentQueue:
                 ))
             session.commit()
 
-        for outcome in outcomes:
-            if outcome.status == "dead":
-                pass
-            else:
-                pass
-        if not outcomes:
-            pass
         return ReclaimReport(reclaimed=tuple(outcomes))
 
     # ── operator actions (POST /agent/tasks/<id>/retry|cancel) ───────
@@ -1068,8 +1055,6 @@ class Worker:
                         dead = int(self.queue.stats().by_status.get("dead", 0))
                     except Exception as exc:  # noqa: BLE001 - a stats blip is not fatal
                         dead = last_dead
-                    if dead > last_dead:
-                        pass
                     last_dead = dead
                 time.sleep(self.poll_interval)
         except KeyboardInterrupt:  # pragma: no cover - interactive only
