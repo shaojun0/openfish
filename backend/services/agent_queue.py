@@ -1119,13 +1119,11 @@ def cmd_worker(args: argparse.Namespace) -> int:
 
     worker = build_worker(queue, name=args.worker, poll_interval=args.poll_interval)
     try:
-        settled = worker.run_loop(stop_after=args.max_tasks or None)
+        worker.run_loop(stop_after=args.max_tasks or None)
     except KeyboardInterrupt:  # pragma: no cover - interactive only
         print("\ninterrupted")
-        settled = 0
     finally:
         engine.dispose()
-    print(f"{worker.name}: settled {settled} task(s)")
     return 0
 
 
