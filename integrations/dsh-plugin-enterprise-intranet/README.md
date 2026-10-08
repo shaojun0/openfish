@@ -15,12 +15,23 @@ DSH（DeepSeek Harness）的**企业内网模式**插件。把 DSH 接到企业�
 
 ## 安装
 
-本目录是插件的**权威副本**（随 openfish 仓库一起版本化）。就地安装：
+本目录是插件的**权威副本**（随 openfish 仓库一起版本化）。要求 **DSH ≥ 0.2.0**：
+`package.json` 的 `peerDependencies` 声明了这条，DSH 的兼容性检查据此在跑错版本时
+明确报错，而不是等到运行时才炸。
+
+两种方式等价，都落到同一份 `dsh.profile.bundles`：
+
+1. CLI（唯一支持的来源是本仓库的就地安装）：
 
 ```bash
-# 从本仓库就地安装（唯一支持的安装方式）
 dsh plugin --profile web add link:<openfish 仓库路径>/integrations/dsh-plugin-enterprise-intranet
 ```
+
+2. 侧栏 **「插件」页**（0.2.0 新增）里安装：该页能安装、开关、卸载组合包，并展示每个
+   组合包的 patch 声明与存活状态。
+
+> `dsh plugin add` 会把声明了 `dsh.bundle.patch` 的包自动选入 profile
+> （`dsh-plugin-manager` 的 `reconcile`），所以上面两条路都不必再手工编辑 profile 文件。
 
 > 插件的 `package.json` 标了 `private: true` + `license: UNLICENSED`：本仓库尚未
 > 声明开源许可（见根 README 的 License 一节），所以**不要**把它发布到公共 npm。
@@ -29,7 +40,8 @@ dsh plugin --profile web add link:<openfish 仓库路径>/integrations/dsh-plugi
 > ——那是本目录的**工作副本**，因为 Docker 不能 `COPY` 构建上下文之外的文件。
 > 两份用 `integrations/sync-to-deployment.sh` 同步，改动请落在本目录。
 
-装完重启 `dsh web`，F5 刷新，左下角出现「内网」按钮。
+装完重启 `dsh web`，F5 刷新：左下角出现「内网」按钮；插件页里本插件的详情页头部出现
+**「完全还原（卸载前）」**按钮（客户端半边，见「依赖与客户端半边」一节）。
 
 ## 配置
 
@@ -83,17 +95,25 @@ dsh plugin --profile web add link:<openfish 仓库路径>/integrations/dsh-plugi
 
 ## 停用与卸载（不残留）
 
-**先说结论：`dsh plugin remove` 本身清不干净。** 它只是 `pnpm remove` 加重算
-profile 的 bundle 层列表（`@deepseek-ai/dsh/lib/plugin-*.js`），DSH 没有插件卸载
-钩子，也不会回收插件写过的设置、凭据或文件。所以卸载的正确顺序是：
+**先说结论：卸载本身清不干净 —— DSH 至今没有插件卸载钩子。** 0.2.0 的
+`dsh-plugin-manager` 卸载顺序是「从 `dsh.profile.bundles` 取消选入 → 卸载运行时贡献
+（即 dispose 本插件）→ `pnpm remove`」，而唯一的 `plugin-manager/changed` 事件是在
+这些步骤**全部完成之后**才发出的 —— 那时插件已经听不到了。`dsh-host-plugin-inventory`
+是只读的，`plugins.detail.actions` 是个 UI 槽位而不是钩子。所以插件侧那段「dispose 时
+检查自己是否还在 profile 的声明里」的兜底仍然必要（见 `lib/index.js` 的
+`pluginStillDeclared()`）。
+
+正确顺序（0.2.0 起两条等价入口）：
+
+1. **先完全还原**：插件页的本插件详情页头部点「完全还原（卸载前）」（0.2.0 新增的
+   客户端半边），或在下方面板点同名按钮。要调端点也可以
+   （`POST /dsh-intranet/teardown`，或 `POST /mode` 带 `{enabled:false, purge:true}`）
+   —— 它和面板其它端点一样要求 `X-DSH-Intranet-Token`（只下发在 index HTML 里的
+   per-process CSRF token）；详情页那个按钮从同一份 boot 负载里自己取，走 UI 时
+   不必手工抄 token。
+2. **再卸载**：插件页里卸载，或：
 
 ```bash
-# 1. 在 DSH 面板点「完全还原（卸载前）」。
-#    要调端点也可以（POST /dsh-intranet/teardown，或 POST /mode 带
-#    {enabled:false, purge:true}），但它和面板其它端点一样要求
-#    X-DSH-Intranet-Token —— 那是只下发在 index HTML 里的 per-process CSRF
-#    token，脚本里得先从页面 HTML 里取出来。
-# 2. 确认面板回到「未配置 api-key」后，再移除插件：
 dsh plugin --profile web remove dsh-plugin-enterprise-intranet
 ```
 
@@ -134,8 +154,11 @@ cd integrations/dsh-plugin-enterprise-intranet && npm test   # = node test/teard
 ## 安全
 
 * 从不把 api-key 的值返回给浏览器；面板只显示前缀与来源。
-* key 存在 DSH 凭据服务（`$DSH_HOME/.credentials.yaml`）：
+* key 存在 DSH 凭据服务，落盘在 `$DSH_HOME/.credentials.yaml`：
   `ENTERPRISE_INTRANET_PLATFORM_KEY` 与每条路由的 `ENTERPRISE_INTRANET_KEY_<SLUG>`。
+  该文件在 0.2.0 里是 `version: 1` 的带节文档（`refs:` / `records:`）。插件只经
+  `ctx.credentials` 读写、从不自己解析它，而旧版扁平格式由 `dsh-credentials-local`
+  在启动时原地迁移，所以这个格式变化不影响插件。
 * **git credential helper 里带着平台 key**，所以插件把脚本写成 `700`
   （`/usr/local/bin/openfish-git-credential`，普通用户不可读），
   `/etc/gitconfig` 只写 `helper` 指针与 `useHttpPath = true`。停用企业内网模式、
@@ -149,11 +172,25 @@ cd integrations/dsh-plugin-enterprise-intranet && npm test   # = node test/teard
   钉住 CA，`verifyTls: false` 需显式选择才会关闭，且不会去动
   `NODE_TLS_REJECT_UNAUTHORIZED`；git 侧对应写 `sslCAInfo` / `sslVerify`。
 
-## 依赖
+## 依赖与客户端半边
 
-不 import 任何 `@deepseek-ai/*`：插件装在 profile 的 node_modules 下，而 DSH 内部包
-嵌在 `@deepseek-ai/dsh/node_modules` 里，从插件位置解析不到。全部协作通过 `ctx`
-上的 `webServer` / `settings` / `credentials` 服务完成。
+宿主侧**不 import 任何 `@deepseek-ai/*`**，全部协作通过 `ctx` 上的服务完成：
+`webServer` / `settings` / `credentials` / `logger`，以及 0.2.0 起优先使用的
+`agentDefaultModel`（默认模型选择的正式写入路径；`settings()` 那套仍是回退路径）。
+
+> 早先这里写的理由是「内部包从插件位置解析不到」。实测不准确：profile 的
+> `node_modules` 里有 pnpm 提升出来的 `@deepseek-ai/*` 软链，`require.resolve`
+> 在 profile 目录下是成功的。真实约束是**不该**依赖内部包（它们不是给第三方插件的
+> 稳定接口），而不是**不能** —— 上面的写法依旧照此执行。
+
+**客户端半边**（`lib/client.js`）：按 0.2.0 的客户端模块契约注册一个 id 等于包名的
+惰性工厂（`window.__ModuleLoader__.load`，React 从浏览器模块表取），因此本插件**仍然
+是零构建**的 —— 没有打包步骤，也没有 node_modules 运行时依赖。它只贡献一件事：
+`plugins.detail.actions` 槽位上的「完全还原（卸载前）」按钮。
+
+宿主侧用 0.2.0 的**结构化 index 注入**（`webserver/index-inject` 事件的 `global` 与
+`script-src` 行）取代了原先的 `tapIndex` 字符串改写，把按钮所需的 boot 负载（含 CSRF
+token）下发到页面；`tapIndex` 仍是官方保留的逃生通道。
 
 ## 许可
 

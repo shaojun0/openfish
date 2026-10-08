@@ -13,15 +13,17 @@ DSH（DeepSeek Harness）的**企业内网模式**插件。它让 DSH：
    而是把用户送到平台的设备授权页登录，**登录成功后平台签发的 key 由插件自动
    收下**，不需要复制粘贴。
 2. **自动接入模型路由的默认模型**：读 `GET /api/v1/models/resolved`，为每条启用
-   的**对话 / 补全**路由（`kind` 为 `chat` / `completion`）注册一个 `llm-ai`
+   的**对话 / 补全**路由（`kind` 为 `chat` / `completion`）注册一个 `llm-pi-ai`
    provider，并把 `agent-default-model` 指向 `aliases` 含 `default` 的那条。其余
    功能（embedding / rerank / ocr / asr / tts）只在面板里展示。
 3. **切换内网包源**：pip / npm / apt / docker / nvm 的配置一次写好。
 4. **接上工具与文档目录**：面板里列出 `/api/v1/tools`、`/api/v1/docs`。
 5. **可以干净卸载**：面板「完全还原」会注销 provider、还原默认模型、删除平台
    api-key 与各路由 key、删除 git 凭据助手、删除本插件生成的包源配置与状态文件
-   （被用户改过的文件保留）。DSH 没有卸载钩子，所以顺序是「先完全还原，再
-   `dsh plugin remove`」，详见插件 README。
+   （被用户改过的文件保留）。DSH 至今没有卸载钩子（0.2.0 的
+   `plugin-manager/changed` 是在插件已被卸载之后才发出的），所以顺序仍是「先完全
+   还原，再卸载」；0.2.0 起 DSH 插件页的本插件详情页头部就带这个按钮，详见插件
+   README。
 
 ### 它依赖平台的哪些接口
 
@@ -34,8 +36,9 @@ DSH（DeepSeek Harness）的**企业内网模式**插件。它让 DSH：
 | 身份探测 | `GET /api/v1/session` | 匿名（返回 `authenticated:false`） |
 
 这些接口由 `backend/routes/device.py`、`backend/services/device_auth.py` 和
-`backend/services/model_routes.py::resolve` 提供，回归门槛是
-`backend/scripts/check_device_flow.py`。
+`backend/services/model_routes.py::resolve` 提供。平台侧已不再有 `backend/scripts/`
+门禁目录（原先指向的 `check_device_flow.py` 随目录一起删除），因此这些接口目前没有
+仓库内的自动回归门禁。
 
 ### 安装
 
