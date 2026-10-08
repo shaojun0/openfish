@@ -30,11 +30,6 @@ const { page, pageSize, pageSizes, total, rows, reset } = usePagination(tools, {
 // A search that changes what this category holds is a new result set.
 watch(tools, reset)
 
-function download(tool: ToolEntry): void {
-  if (!tool.download_url) return
-  window.open(tool.download_url, '_blank', 'noopener')
-}
-
 function copySha(tool: ToolEntry): void {
   if (tool.sha256) void copy(tool.sha256)
 }
@@ -89,10 +84,10 @@ function copySha(tool: ToolEntry): void {
 
     <el-table-column :label="t('common.actions')" width="130" align="right">
       <template #default="{ row }">
-        <el-button size="small" type="primary" @click="download(row)">
+        <el-link type="primary" :href="row.download_url || undefined" download>
           <el-icon><Download /></el-icon>
           <span class="btn-label">{{ t('tools.download') }}</span>
-        </el-button>
+        </el-link>
       </template>
     </el-table-column>
   </el-table>

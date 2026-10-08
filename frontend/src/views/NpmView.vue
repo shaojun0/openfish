@@ -42,20 +42,6 @@ async function load(): Promise<void> {
   }
 }
 
-function download(item: NpmPackage): void {
-  if (!item.download_url) return
-  window.open(item.download_url, '_blank', 'noopener')
-}
-
-/** The server-rendered index — same data, plus the legacy `/-/all` JSON. */
-function openStaticIndex(): void {
-  window.open('/npm/', '_blank', 'noopener')
-}
-
-function openTab(url: string): void {
-  window.open(url, '_blank', 'noopener')
-}
-
 onMounted(() => {
   if (infoType.value === 'package') load()
 })
@@ -74,19 +60,19 @@ onMounted(() => {
           <el-option value="build" :label="t('npm.infoBuilds')" />
         </el-select>
         <template v-if="infoType === 'package'">
-          <el-button @click="openStaticIndex">
+          <el-link href="/npm/" target="_blank" rel="noopener">
             <el-icon><Link /></el-icon>
             <span class="btn-label">{{ t('npm.staticIndex') }}</span>
-          </el-button>
+          </el-link>
           <el-button :loading="loading" @click="load">
             <el-icon><Refresh /></el-icon>
             <span class="btn-label">{{ t('common.refresh') }}</span>
           </el-button>
         </template>
-        <el-button v-else @click="openTab('/node-builds/')">
+        <el-link v-else href="/node-builds/" target="_blank" rel="noopener">
           <el-icon><Link /></el-icon>
           <span class="btn-label">{{ t('build.staticIndex') }}</span>
-        </el-button>
+        </el-link>
       </div>
     </div>
 
@@ -140,15 +126,15 @@ onMounted(() => {
 
         <el-table-column :label="t('common.actions')" width="130" align="right">
           <template #default="{ row }">
-            <el-button
-              size="small"
+            <el-link
               type="primary"
+              :href="row.download_url || undefined"
               :disabled="!row.download_url"
-              @click="download(row)"
+              download
             >
               <el-icon><Download /></el-icon>
               <span class="btn-label">{{ t('npm.download') }}</span>
-            </el-button>
+            </el-link>
           </template>
         </el-table-column>
       </el-table>
