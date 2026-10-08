@@ -239,10 +239,9 @@ const buildId = __BUILD_ID__
  */
 function onSelect(index: string): void {
   const item = allItems.value.find((candidate) => candidate.index === index)
-  if (item?.href) {
-    window.open(item.href, '_blank', 'noopener')
-    return
-  }
+  // Items with an `href` are real links in the template, so the browser already
+  // handled the click.  Navigating here as well would open a second tab.
+  if (item?.href) return
   router.push(index)
 }
 </script>
@@ -276,10 +275,32 @@ function onSelect(index: string): void {
           <span>{{ t(group.titleKey) }}</span>
         </template>
         <el-menu-item v-for="item in group.items" :key="item.index" :index="item.index">
-          <el-icon><component :is="item.icon" /></el-icon>
+          <!-- Collapsed, el-menu moves `#title` into a tooltip and only the icon
+               stays visible, so a machine-facing index page has to be a link in
+               both slots -- otherwise its click reaches `onSelect` and does
+               nothing.  Real links keep the browser in charge of the new tab. -->
+          <a
+            v-if="item.href"
+            class="sidebar__external-link"
+            :href="item.href"
+            target="_blank"
+            rel="noopener"
+          >
+            <el-icon><component :is="item.icon" /></el-icon>
+          </a>
+          <el-icon v-else><component :is="item.icon" /></el-icon>
           <template #title>
-            <span>{{ t(item.titleKey) }}</span>
-            <el-icon v-if="item.href" class="sidebar__external"><TopRight /></el-icon>
+            <a
+              v-if="item.href"
+              class="sidebar__external-link"
+              :href="item.href"
+              target="_blank"
+              rel="noopener"
+            >
+              {{ t(item.titleKey) }}
+              <el-icon class="sidebar__external"><TopRight /></el-icon>
+            </a>
+            <span v-else>{{ t(item.titleKey) }}</span>
           </template>
         </el-menu-item>
       </el-sub-menu>
@@ -332,6 +353,13 @@ function onSelect(index: string): void {
 .sidebar__external {
   margin-left: 6px;
   color: var(--el-text-color-placeholder);
+}
+
+.sidebar__external-link {
+  display: inline-flex;
+  align-items: center;
+  color: inherit;
+  text-decoration: none;
 }
 
 .sidebar__footer {

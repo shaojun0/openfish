@@ -59,15 +59,6 @@ async function load(): Promise<void> {
   }
 }
 
-function download(item: FlatArtifact): void {
-  if (!item.download_url) return
-  window.open(item.download_url, '_blank', 'noopener')
-}
-
-function openStaticIndex(): void {
-  window.open(indexUrl.value, '_blank', 'noopener')
-}
-
 // ── Upload (docker:upload) ───────────────────────────────────────────
 
 function openUpload(): void {
@@ -120,10 +111,10 @@ onMounted(load)
           <el-icon><Upload /></el-icon>
           <span class="btn-label">{{ t('docker.upload') }}</span>
         </el-button>
-        <el-button @click="openStaticIndex">
+        <el-link :href="indexUrl" target="_blank" rel="noopener">
           <el-icon><Link /></el-icon>
           <span class="btn-label">{{ t(`${endpoint}.staticIndex`) }}</span>
-        </el-button>
+        </el-link>
         <el-button :loading="loading" @click="load">
           <el-icon><Refresh /></el-icon>
           <span class="btn-label">{{ t('common.refresh') }}</span>
@@ -203,15 +194,15 @@ onMounted(load)
 
         <el-table-column :label="t('common.actions')" width="130" align="right">
           <template #default="{ row }">
-            <el-button
-              size="small"
+            <el-link
               type="primary"
+              :href="row.download_url || undefined"
               :disabled="!row.download_url"
-              @click="download(row)"
+              download
             >
               <el-icon><Download /></el-icon>
               <span class="btn-label">{{ t(`${endpoint}.download`) }}</span>
-            </el-button>
+            </el-link>
           </template>
         </el-table-column>
       </el-table>

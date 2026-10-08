@@ -76,11 +76,6 @@ async function load(): Promise<void> {
   }
 }
 
-function open(url: string | null | undefined): void {
-  if (!url) return
-  window.open(url, '_blank', 'noopener')
-}
-
 onMounted(load)
 watch(() => props.kind, load)
 </script>
@@ -187,14 +182,14 @@ watch(() => props.kind, load)
 
           <el-table-column :label="t('common.actions')" width="190" align="right">
             <template #default="{ row }">
-              <el-button size="small" type="primary" @click="open(row.download_url)">
+              <el-link type="primary" :href="row.download_url || undefined" download>
                 <el-icon><Download /></el-icon>
                 <span class="btn-label">{{ t('build.download') }}</span>
-              </el-button>
+              </el-link>
               <el-tooltip :content="t('build.checksum')">
-                <el-button size="small" text @click="open(row.sha256_url)">
+                <el-link :href="row.sha256_url || undefined" target="_blank" rel="noopener">
                   <el-icon><Document /></el-icon>
-                </el-button>
+                </el-link>
               </el-tooltip>
             </template>
           </el-table-column>
