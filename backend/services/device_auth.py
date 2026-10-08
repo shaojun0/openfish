@@ -60,6 +60,14 @@ _CODE_LEN = 4
 #: How often the plugin is told to poll, in seconds.
 POLL_INTERVAL = 2
 
+#: Document version this module writes.  A document from an earlier version is
+#: ignored rather than migrated: the only field whose shape has ever changed is
+#: the minted key's, and a record still carrying the old name would read as one
+#: holding no key at all — the poll would then answer ``api_key: null`` *and*
+#: consume the entry, which is strictly worse than making the plugin re-run the
+#: flow (one `POST /api/v1/device/code`, and the pending window is 15 minutes).
+_DOCUMENT_VERSION = 2
+
 #: SHA-256 of the device code is the storage key; the raw code never hits disk.
 def _hash(device_code: str) -> str:
     return hashlib.sha256(device_code.encode("utf-8")).hexdigest()
@@ -115,13 +123,23 @@ class DeviceAuthStore:
             data = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             return {}
-        raw = data.get("requests") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return {}
+        try:
+            version = int(data.get("version") or 0)
+        except (TypeError, ValueError):
+            return {}
+        if version < _DOCUMENT_VERSION:
+            # Written before the minted key's field was renamed.  Dropping the
+            # whole document is deliberate — see `_DOCUMENT_VERSION`.
+            return {}
+        raw = data.get("requests")
         return raw if isinstance(raw, dict) else {}
 
     def _write(self, requests: Mapping[str, Any]) -> None:
         """Atomically replace the document (temp file + ``os.replace``)."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"version": 1, "requests": dict(requests)}
+        payload = {"version": _DOCUMENT_VERSION, "requests": dict(requests)}
         blob = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
         fd, tmp_name = tempfile.mkstemp(prefix=".tmp-device-", dir=self._path.parent)
         try:
@@ -168,7 +186,7 @@ class DeviceAuthStore:
                 "expires_at": now + self._ttl,
                 "approved_at": None,
                 "polls": 0,
-                "key": None,
+                "key_credential": None,
                 "key_id": None,
                 "key_name": None,
                 "key_prefix": None,
@@ -226,7 +244,7 @@ class DeviceAuthStore:
                 item.update({
                     "status": "approved",
                     "approved_at": _now(),
-                    "key": key.get("key"),
+                    "key_credential": key.get("key"),
                     "key_id": key.get("id"),
                     "key_name": key.get("name"),
                     "key_prefix": key.get("prefix"),
@@ -267,7 +285,7 @@ class DeviceAuthStore:
             requests.pop(digest, None)
             self._write(requests)
             return "approved", {
-                "api_key": item.get("key"),
+                "api_key": item.get("key_credential"),
                 "key_id": item.get("key_id"),
                 "key_name": item.get("key_name"),
                 "key_prefix": item.get("key_prefix"),
