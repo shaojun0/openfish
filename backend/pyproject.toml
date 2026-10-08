@@ -8,6 +8,12 @@ version = "0.1.0"
 description = "A lightweight Python package server built with Flask."
 requires-python = ">=3.12"
 dependencies = [
+    # Atomic, symlink-refusing small-file writes.  ``services/agent_runner.py``
+    # marks a finished task's work directory with ``atomic_save``, whose part
+    # file is opened ``O_CREAT|O_EXCL|O_NOFOLLOW`` and then renamed into place.
+    # That is the guarantee the runner used to hand-roll with ``os.open``, and
+    # the work directory it writes into is group-writable by the sandbox uid.
+    "boltons>=24",
     "clamd>=1.0.2",
     # Fernet (AES-128-CBC + HMAC) for the Forgejo git-identity tokens.
     # A runtime dependency, not a dev one: ``services/git_identity.py`` seals
