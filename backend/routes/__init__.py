@@ -151,11 +151,10 @@ def register_all(app):
     # other npm route stays a plain `@npm_bp.route` and is registered unchanged.
     app.register_api(npm_bp, url_prefix=prefix)
     # `docker_bp` and `debian_bp` are flask-openapi3 APIBlueprints as well: the
-    # docker `tags/list` query, the docker artifact upload, the offline snapshot
-    # query and the offline bundle import bind their input as view parameters,
-    # which only the per-verb decorators install, so both go through
-    # `register_api`. Every other route on them stays a plain `@…_bp.route` and
-    # is registered unchanged.
+    # docker `tags/list` query and the docker artifact upload bind their input as
+    # view parameters, which only the per-verb decorators install, so both go
+    # through `register_api`. Every other route on them stays a plain
+    # `@…_bp.route` and is registered unchanged.
     app.register_api(docker_bp, url_prefix=prefix)
     app.register_api(debian_bp, url_prefix=prefix)
     # `docs_bp` binds request input on four of its views (the two Markdown
