@@ -94,6 +94,12 @@ ALLOWED_ENVIRON: dict[str, str] = {
 #: Compose variables that are deliberately not configuration: they tune the
 #: container runtime or a child toolchain rather than this process.
 NOT_CONFIG: dict[str, str] = {
+    "OPENFISH_ROLE": (
+        "selects which plane the container starts at run time — read by the "
+        "image's docker-entrypoint.sh, never by the application.  The two "
+        "compose anchors set it per service (backend / runner), so one image "
+        "serves both without the application knowing about it"
+    ),
     "GIT_TERMINAL_PROMPT": (
         "set for the git children of the runner so a missing credential fails "
         "instead of blocking on a prompt"

@@ -13,7 +13,9 @@ properties that makes ``--scale runner=N`` true, all offline:
 
 1. **The compose service is scalable.**  ``runner`` carries no fixed
    ``container_name`` (which is what makes ``--scale`` fail), still keeps its
-   per-replica limits, and still shares one database with the backend.
+   per-replica limits, still selects the queue-worker plane with
+   ``OPENFISH_ROLE=runner`` (no ``command:`` shadowing the image entrypoint's
+   dispatch), and still shares one database with the backend.
 2. **A worker identity is unique per process.**  ``worker_id()`` folds host,
    pid and a random suffix together, so N replicas cannot claim as one another.
 3. **The claim path is backend-correct.**  Every claim first takes a
@@ -212,18 +214,24 @@ def check_compose() -> None:
         repr({k: runner.get(k) for k in
               ("cpus", "mem_limit", "pids_limit", "read_only", "cap_drop", "security_opt")}),
     )
-    command = runner.get("command") or []
+    environment = runner.get("environment") or {}
+    # The plane is a runtime choice now: this service sets OPENFISH_ROLE=runner
+    # and the single image's entrypoint execs the queue worker (that mapping is
+    # pinned in check_container_roles.py).  A leftover `command:` would shadow
+    # the dispatch and silently run something else under the same image.
     check(
-        "runner 命令跑的是队列 worker",
-        isinstance(command, list)
-        and "services.agent_queue" in command
-        and "worker" in command
-        and "--loop" in command,
-        repr(command),
+        "runner 用 OPENFISH_ROLE=runner 选择运行时平面",
+        environment.get("OPENFISH_ROLE") == "runner",
+        repr(environment.get("OPENFISH_ROLE")),
+    )
+    check(
+        "runner 没有 command 会顶掉入口脚本的派发",
+        "command" not in runner,
+        repr(runner.get("command")),
     )
     check(
         "所有副本共用同一个 /work 与同一个数据库",
-        (runner.get("environment") or {}).get("AGENT_WORK_ROOT") == "/work"
+        environment.get("AGENT_WORK_ROOT") == "/work"
         and any("agent-work:/work" in str(volume) for volume in runner.get("volumes") or []),
         repr(runner.get("volumes")),
     )

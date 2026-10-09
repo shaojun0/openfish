@@ -554,8 +554,9 @@ escalation:
 docker compose --profile runner up -d runner
 ```
 
-- 镜像 `openfish-runner`：基于 `python:3.12-slim` + `git` + 仓库所需基础工具；
-  **不含模型权重、不含宿主 docker socket**。
+- 镜像 `openfish`（与 backend **同一个镜像**，`OPENFISH_ROLE=runner` 选择平面；
+  不再有独立的 `openfish-runner`）：基于 `python:3.12-slim` + `git` + 仓库所需基础
+  工具；**不含模型权重、不含宿主 docker socket**。
 - 每个任务一个工作目录（默认 `/work/runners/<runner_id>/<task_id>`，即逻辑 runner
   前缀 + 任务 id；重试为 `…/<task_id>-attempt<n>`，避免回收后的第二次尝试删掉第一次
   仍在用的 checkout），任务结束**保留 24h** 便于排障再回收。

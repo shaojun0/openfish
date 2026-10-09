@@ -167,12 +167,16 @@ with a data-disk path it makes them symlinks into it —
 mount later is just `ln -sfn /srv/data/npm docker/npm`; the Compose file never
 changes. See `docker/README.md`.
 
-Four services are defined, each built from its own directory:
+The application side is one image: `openfish:latest`, built from
+`backend/Dockerfile`. The container's `OPENFISH_ROLE` selects which process it
+starts (`backend` → gunicorn, `runner` → the queue worker), so the two planes can
+never drift apart in their dependencies or their application code.
 
 | Service          | Container               | Port (host)        | Built from            | Purpose                                                     |
 | ---------------- | ----------------------- | ------------------ | --------------------- | ----------------------------------------------------------- |
 | `nginx`          | `openfish-nginx`        | `20416` → 80       | `docker/nginx/`       | **The only public entry point** — routes by path             |
-| `backend`        | `openfish-backend`      | *(internal 8080)*  | `backend/Dockerfile`  | Flask + gunicorn: JSON API, registry and mirror protocols    |
+| `backend`        | `openfish-backend`      | *(internal 8080)*  | `backend/Dockerfile` → `openfish:latest` | `OPENFISH_ROLE=backend` — Flask + gunicorn: JSON API, registry and mirror protocols |
+| `runner`         | `openfish-runner-<n>`   | *(no port)*        | same image, `openfish:latest` | `profile: runner` — `OPENFISH_ROLE=runner`, the agent-runtime queue worker; scale with `--scale runner=N` |
 | `frontend`       | `openfish-frontend`     | *(internal 80)*    | `frontend/Dockerfile` | Vue SPA built by node, served as static files by nginx       |
 | `db`             | `openfish-db`           | *(internal 5432)*  | `postgres:16-alpine`  | `profile: db` — optional PostgreSQL backend; set `DATABASE_URL` to use it |
 
@@ -199,7 +203,8 @@ published to the host at all:
 > the machine-facing catalog. The same holds for `npm`, `docker`, `debian` and
 > `packages`.
 
-Rebuild one side without touching the other:
+Rebuild one side without touching the other (`build backend` produces the single
+application image that both `backend` and `runner` run):
 
 ```bash
 docker compose build backend
@@ -213,6 +218,9 @@ docker compose --profile debug up -d          # idle backend bash box on 20417
 docker exec -it openfish-backend-debug bash
 
 docker compose --profile db up -d             # + PostgreSQL (see below to switch)
+
+docker compose --profile runner up -d         # + the agent-runtime plane (same image)
+docker compose --profile runner --scale runner=N up -d   # N queue workers
 ```
 
 > **About the `db` service.** Starting it alone changes nothing: the backend uses
@@ -1205,7 +1213,8 @@ backend/                        the Flask application — one build unit
 │                               Not a public directory — see Security notes.
 ├── pyproject.toml, uv.lock     dependency source of truth
 ├── .env.example                local-development environment template
-├── Dockerfile                  backend image (python only)
+├── Dockerfile                  the app image (API + agent runtime; OPENFISH_ROLE picks the plane)
+├── docker-entrypoint.sh        role dispatcher: backend → gunicorn, runner → queue worker
 ├── packages/, data/, certs/    runtime state, git-ignored
 └── .venv/                      local virtualenv, git-ignored
 
@@ -1220,7 +1229,7 @@ frontend/                       the Vue 3 SPA — one build unit
 └── dist/                       build output, git-ignored
 
 docker/                         orchestration — no application code
-├── docker-compose.yml          backend + frontend + nginx + db (profiles)
+├── docker-compose.yml          backend + runner + frontend + nginx + db (profiles)
 ├── nginx/nginx.conf            the edge gateway: path routing, upload size
 ├── .env.example                Compose variable template (copied to docker/.env)
 ├── prepare-mounts.sh           creates / re-points every bind-mount source

@@ -567,12 +567,15 @@ def check_source_wiring() -> None:
           "SANDBOX_HOME_DIRNAME" in runner_source)
 
 
-# ── 5. runner image / compose ────────────────────────────────────────
+# ── 5. app image / compose ──────────────────────────────────────────
 
 def check_runner_image() -> None:
-    section("5 · runner image: sandbox user exists, worker keeps the caps")
-    dockerfile_path = DOCKER_DIR / "runner" / "Dockerfile"
-    check("docker/runner/Dockerfile exists", dockerfile_path.is_file())
+    section("5 · app image: sandbox user exists, worker keeps the caps")
+    # One image serves both planes (``OPENFISH_ROLE`` picks the process), so the
+    # sandbox identity lives in the same Dockerfile the backend is built from.
+    # That there is only one image is check_container_roles.py's concern.
+    dockerfile_path = REPO_ROOT / "Dockerfile"
+    check("backend/Dockerfile (the one app image) exists", dockerfile_path.is_file())
     if not dockerfile_path.is_file():
         return
     dockerfile = _source(dockerfile_path)

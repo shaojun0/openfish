@@ -10,7 +10,7 @@ never editing the Compose file.
 
 ```
 docker/
-├── docker-compose.yml          # 4 services: backend, frontend, nginx, db(optional)
+├── docker-compose.yml          # backend/runner share one image; + frontend, nginx, db(optional)
 ├── docker-compose.postgres.yml # override: start backend after db is healthy
 ├── .env / .env.example         # interpolation source + container env (no host paths)
 ├── nginx/nginx.conf            # edge gateway :20416 -> frontend / backend
@@ -151,12 +151,45 @@ git-ignored, so the repository stays clean.
 docker compose up -d --build                     # default stack (backend/frontend/nginx)
 docker compose --profile debug up -d             # + backend-debug on :20417
 docker compose --profile db up -d                # + postgres (see below to switch the app)
+docker compose --profile runner up -d            # + the agent-runtime plane
+docker compose --profile runner --scale runner=N up -d   # N queue workers
 docker compose config                            # validate / inspect resolved mounts
 docker compose down                              # keep volumes and bind data
 ```
 
 Edge gateway: <http://127.0.0.1:20416> — `/health`, `/openapi.json`, `/llms.txt`,
 `/docs` and the SPA shell are served from here.
+
+## One image, two planes (`OPENFISH_ROLE`)
+
+The API and the agent runtime used to be two images built from the same
+`backend/` context. They are now **one** image, `openfish:latest` (build
+definition: the `x-app-build` anchor in `docker-compose.yml` →
+`backend/Dockerfile`), and the plane is a runtime choice:
+
+| `OPENFISH_ROLE` | Process | Services |
+| --- | --- | --- |
+| `backend` (default) | `gunicorn app:app` | `backend`, `backend-debug` |
+| `runner` | `python -m services.agent_queue worker --loop` | `runner` (profile `runner`) |
+
+`backend/docker-entrypoint.sh` is the only place that maps a role to a process;
+it exits non-zero on an unknown role rather than starting the wrong plane, and
+an explicit command still wins over the dispatch — which is how `backend-debug`
+runs `bash` and how a one-shot worker is run (note it uses the `runner` service,
+so it inherits `x-runner-env`, not the backend's secrets):
+
+```bash
+docker compose --profile runner run --rm runner \
+  python -m services.agent_queue worker --once
+```
+
+Everything that genuinely differs between the planes stays in Compose, per
+service: the two environment anchors (`x-backend-env` vs `x-runner-env`, so the
+runner never sees `SECRET_KEY` / `FORGEJO_ADMIN_TOKEN` / `GIT_IDENTITY_KEY`),
+the capability set, the read-only root and the resource limits. One image means
+the Python dependencies and the application code cannot drift between the API
+and the sandbox; the plane-specific security boundary is unchanged. See
+`runner/README.md` for the agent-runtime details.
 
 ## PostgreSQL
 
