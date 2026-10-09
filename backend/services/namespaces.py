@@ -211,6 +211,22 @@ def overlay_path(namespace: str) -> Path | None:
     return resolve(namespace).overlay_path
 
 
+def overlay_key(namespace: str) -> str:
+    """The top-level JSON key *namespace*'s overlay file uses.
+
+    Refuses a catalog whose metadata is not a single-key overlay (docs, tools):
+    the caller asked the wrong question, and an empty answer would be worse than
+    the refusal.
+    """
+    entry = resolve(namespace)
+    if entry.overlay_key is None:
+        raise ValueError(
+            f"namespace {namespace!r} has no overlay key "
+            f"(expected one of: {', '.join(MIRRORS)})"
+        )
+    return entry.overlay_key
+
+
 __all__ = [
     "DEBIAN",
     "DOCS",
@@ -226,6 +242,7 @@ __all__ = [
     "SEED_DIR",
     "TOOLS",
     "get",
+    "overlay_key",
     "overlay_path",
     "resolve",
     "root_for",

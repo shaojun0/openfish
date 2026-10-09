@@ -48,7 +48,7 @@ from config import settings
 from extensions.database import Session
 from openapi import api_operation, binary, errors, ok
 from routes.hub_common import spa_url, wants_json
-from services import debian_apt, hub, mirror_catalog
+from services import debian_apt, hub, mirror_catalog, namespaces
 
 debian_bp = APIBlueprint("debian", __name__)
 
@@ -68,7 +68,7 @@ def _debian_payload() -> dict:
     prefix = settings.server.route_prefix.rstrip("/") + "/debian/files"
     return hub.scan_debian(
         settings.hub.debian_dir,
-        overlay=mirror_catalog.overlay(Session, "debian"),
+        overlay=mirror_catalog.overlay(Session, namespaces.DEBIAN),
         url_prefix=prefix,
         mirror=settings.hub.debian_mirror,
     )

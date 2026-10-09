@@ -7,9 +7,18 @@ travel between networks by rsync — but the metadata is a table now:
 ``catalog_entries`` rows in the namespace ``npm`` / ``debian`` /
 ``docker-images``, sharing the table the tools catalog uses.
 
-A mirror row never owns bytes: the file *is* the bytes and stays where it is, so
-``storage_key`` is the empty string here (unlike a tools row, where it names the
-object the row owns).  Rows and files are merged by the scanner:
+Three layers, kept apart on purpose:
+
+* **the file is the artifact** — it stays where the operator put it, and it is
+  what a client downloads.  A mirror row never owns bytes, so its
+  ``storage_key`` is :data:`models.catalog.NO_STORAGE_KEY`.
+* **the row is the description** — display name, version, architecture, kind,
+  tags.  Losing the rows loses the metadata, never the artifact.
+* **the directory root is a port** — where the rows live is
+  :attr:`services.namespaces.Namespace.root`; where the *bytes* live is
+  :func:`services.objectstore.catalog_store`'s answer, which can be a bucket.
+
+Rows and files are merged by the scanner:
 
 * a row that names a file (``filename``) overrides that file's display metadata;
 * a row with no file is a **metadata-only** entry — what the UI shows as
@@ -30,16 +39,18 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from config import settings
 from models.catalog import CatalogEntry
+from services import namespaces
 
 #: The mirror namespaces whose metadata lives here, in the order the CLI lists.
-MIRRORS: tuple[str, ...] = ("npm", "debian", "docker-images")
+MIRRORS: tuple[str, ...] = namespaces.MIRRORS
 
-#: The overlay key each namespace's file uses.  npm's file says ``packages``;
-#: the flat mirrors (debian, docker-images) say ``artifacts``.
+
 def top_key(namespace: str) -> str:
-    return "packages" if namespace == "npm" else "artifacts"
+    """The overlay key each namespace's file uses.  npm's file says ``packages``;
+    the flat mirrors (debian, docker-images) say ``artifacts``."""
+    return namespaces.overlay_key(namespace)
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +103,7 @@ def overlay(session: Session, namespace: str) -> dict:
             "description": row.description,
             "tags": row.tag_list(),
         }
-        if namespace != "npm":
+        if namespace != namespaces.NPM:
             item["arch"] = row.arch
             item["kind"] = row.kind
         items.append({key: value for key, value in item.items() if value not in (None, "")})
@@ -117,12 +128,8 @@ def entries(session: Session, namespace: str) -> list[CatalogEntry]:
 
 def default_path(namespace: str) -> Path:
     """Where the overlay file for *namespace* lives in a deployment."""
-    roots = {
-        "npm": settings.hub.npm_dir,
-        "debian": settings.hub.debian_dir,
-        "docker-images": settings.hub.docker_dir,
-    }
-    return Path(roots[namespace]) / "catalog.json"
+    check_namespace(namespace)
+    return Path(namespaces.root_for(namespace)) / namespaces.OVERLAY_FILENAME
 
 
 def path_for(namespace: str, item: dict) -> str:
@@ -137,7 +144,7 @@ def path_for(namespace: str, item: dict) -> str:
     if filename:
         return filename
     name = str(item.get("name") or "").strip()
-    if namespace == "npm":
+    if namespace == namespaces.NPM:
         return name or "unnamed"
     version = str(item.get("version") or "").strip()
     arch = str(item.get("arch") or "").strip()
@@ -223,7 +230,7 @@ def export_file(session: Session, namespace: str, path: str | Path) -> OverlayRe
             "description": row.description,
             "tags": row.tag_list(),
         }
-        if namespace != "npm":
+        if namespace != namespaces.NPM:
             item["arch"] = row.arch
             item["kind"] = row.kind
         items.append({key: value for key, value in item.items() if value not in (None, "", [])})
@@ -252,7 +259,7 @@ def _fields(namespace: str, item: dict) -> dict:
         "version": str(item.get("version") or "") or None,
         "tags": "[]",
     }
-    if namespace != "npm":
+    if namespace != namespaces.NPM:
         fields["arch"] = str(item.get("arch") or "") or None
         fields["kind"] = str(item.get("kind") or "") or None
     tags = item.get("tags")

@@ -55,7 +55,7 @@ from extensions.database import Session
 from openapi import api_operation, binary, errors, json_body, ok
 from routes.hub_common import spa_url, wants_json
 from schemas import NpmPublishDocument, NpmSearchQuery
-from services import hub, mirror_catalog
+from services import hub, mirror_catalog, namespaces
 from services.npm_publish import publish as publish_package
 from services.npm_registry import (
     ABBREVIATED_ACCEPT, SEARCH_MAX_SIZE, NpmRegistry, clamp_search_size,
@@ -227,7 +227,7 @@ def _registry() -> NpmRegistry:
     hub_settings = settings.hub
     # The overlay lives in the database now, so it belongs in the key: a fresh
     # row must not be served by a registry whose index was built without it.
-    overlay = mirror_catalog.overlay(Session, "npm")
+    overlay = mirror_catalog.overlay(Session, namespaces.NPM)
     key = (
         str(hub_settings.npm_dir),
         str(hub_settings.npm_upstream),
@@ -276,7 +276,7 @@ def _npm_payload() -> dict:
     prefix = settings.server.route_prefix.rstrip("/") + "/npm/files"
     return hub.scan_npm(
         settings.hub.npm_dir,
-        overlay=mirror_catalog.overlay(Session, "npm"),
+        overlay=mirror_catalog.overlay(Session, namespaces.NPM),
         upstream=settings.hub.npm_upstream,
         url_prefix=prefix,
     )
