@@ -40,8 +40,6 @@ and the error envelope are part of the contract, so changing them needs care.
 
 from __future__ import annotations
 
-import json
-
 from flask import (
     jsonify, render_template, request, send_file, send_from_directory, url_for,
 )
@@ -236,7 +234,7 @@ def _registry() -> NpmRegistry:
         float(hub_settings.npm_timeout),
         str(hub_settings.npm_cache_dir),
         int(hub_settings.npm_cache_max_mb),
-        json.dumps(overlay, sort_keys=True, ensure_ascii=False),
+        mirror_catalog.fingerprint(overlay),
     )
     registry = _REGISTRY_CACHE.get(key)
     if registry is None:

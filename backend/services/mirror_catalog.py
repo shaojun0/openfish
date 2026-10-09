@@ -241,6 +241,18 @@ def export_file(session: Session, namespace: str, path: str | Path) -> OverlayRe
     return OverlayReport(namespace=namespace, path=str(target), exported=len(items))
 
 
+def fingerprint(overlay: Overlay) -> str:
+    """A stable string identifying one overlay's content.
+
+    The request path caches objects built *from* the overlay (the npm registry's
+    index, for one), so a cache entry must be reused for the same rows and must
+    not be reused after an import changed them.  Sorting the keys makes the value
+    independent of dict order; ``ensure_ascii=False`` keeps it the same JSON the
+    export would write.
+    """
+    return json.dumps(overlay, sort_keys=True, ensure_ascii=False)
+
+
 def _read_overlay(path: Path) -> dict:
     """Read a ``catalog.json``; a missing or malformed one degrades to empty.
 
@@ -283,6 +295,7 @@ __all__ = [
     "entries",
     "entry_fields",
     "export_file",
+    "fingerprint",
     "import_file",
     "overlay",
     "path_for",
