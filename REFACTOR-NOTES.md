@@ -107,6 +107,45 @@ Signature/annotation changes (runtime behaviour unchanged):
   would force a SQLite table rebuild.
 * No route, schema, OpenAPI or endpoint signature changed.
 
+## Follow-up (task-3): the overlay-import contract
+
+The verifier's `check_mirror_catalog.py` found three defects in
+`mirror_catalog.import_file`.  They are fixed, and the semantics are now the
+documented contract (the verifier pins all three):
+
+* **F1 — one identity twice in one file.**  The lookup only held *pre-import*
+  rows, so the second mention of a path was added again and the commit hit
+  `uq_catalog_entries_path`.  The file is collapsed by identity before writing:
+  **the last entry wins and the row keeps the first mention's position**, which
+  is what the old file-based `scan_npm` did (`dict[name] = item`).  One
+  transaction: success writes each row once, and any failure rolls the session
+  back, so the table is clean on both paths.  `path_for`'s npm rule ignoring
+  `version` means two versions of one package are exactly this case.
+* **F2 — missing or corrupt file must be loud.**  `_read_overlay` used to return
+  `{}`, so `import --prune` on a mistyped path deleted every row and exited 0.
+  It now raises `ValueError` for a missing file, unreadable bytes, invalid JSON
+  and a non-object document; `--dry-run` and `--prune` included, nothing is
+  touched.  A file that parses to `{"<key>": []}` is still a *valid* empty
+  overlay and does prune — the operator said so on purpose.  The CLI already
+  maps `ValueError` to a message and exit 1 (`cli.py main`), so no CLI change
+  was needed.
+* **F3 — `unnamed` is a legal package name.**  `path_for` returned the literal
+  `"unnamed"` for "names nothing" and `import_file` skipped that string, so a
+  real `unnamed` package could not be registered.  `path_for` now returns the
+  empty string for "no identity" (falsy, explicitly skipped) and `"unnamed"`
+  is just a name like any other.
+* **F4 — recorded, deliberately not fixed.**  npm's `filename` rows do not
+  override the matching tarball's `tags`: the scanner keys the overlay by
+  *package name* but looks a tarball's metadata up by *filename*
+  (`hub.scan_npm`'s `listed` vs `meta`).  This predates the refactor — the
+  endpoint baseline is byte-identical — so changing it would be a silent
+  behaviour change smuggled into a bug-fix task.  Left as-is, on purpose.
+
+API impact for the verifier: `mirror_catalog.path_for` returns `""` for "no
+identity" (was the word `"unnamed"`), and `mirror_catalog.import_file` now
+raises `ValueError` for an unreadable overlay (it used to return an
+all-zero/`pruned=N` report).  `import_file`'s signature is unchanged.
+
 ## Deliberately not abstracted
 
 * **The overlay key literals in the scanners.**  `scan_npm` reads `packages`,
@@ -159,7 +198,26 @@ Signature/annotation changes (runtime behaviour unchanged):
   `/debian/Packages`, `/docker/v2/_catalog`).  Baseline from `wt-base`
   (`9518be1`) vs this tree: `diff -r scratch/out-base scratch/out-current` is
   empty.  (The baseline is also byte-identical to unmodified `main`, checked
-  before the first change.)
+  before the first change; re-run after task-3, still empty.)
+* **The verifier's gate** (`catalog-verifier`'s `check_mirror_catalog.py`,
+  148 checks) run against this tree:
+  `BACKEND_DIR=<tree>/backend MIRROR_SCRATCH=<tree>/scratch
+  MIRROR_BASELINE_CACHE=/home/linaro/dsh/wt-verify/scratch/mirror-baseline
+  <venv>/python <snapshot of check_mirror_catalog.py>`
+  → `✅ mirror catalog check passed (148 checks)`.  It includes the
+  `CLI import contract (F1/F2/F3)` section (18 checks, all green) and compares
+  the three endpoint payloads byte-for-byte against the pre-change code.
+* **Task-3 minimal evidence**:
+  - F1: `{"packages":[{"name":"pkg","version":"1.0.0"},{"name":"pkg","version":"2.0.0"}]}`
+    via `cli.py catalogs import --namespace npm` → exit 0,
+    `npm: 新增 1 …`, and `export` shows one `pkg` row at `2.0.0`; a forced
+    mid-import error leaves `[]` rows and an empty `Session.new`.
+  - F2: `cli.py catalogs import --namespace npm --from missing.json --prune`
+    → stderr `error: overlay file not found: …`, exit 1, `export` before ==
+    after (no row deleted); corrupt JSON with `--dry-run --prune` → exit 1,
+    same.  A valid `{"packages": []}` still reports and performs `清理 N`.
+  - F3: `path_for("npm", {}) == ""`; a row named `unnamed` imports and
+    `/api/v1/npm` serves it.
 * **pyflakes**: no new warning.  Changed files report only the two pre-existing
   `services/npm_registry.py` unused `exc` locals (plus the documented
   `extensions/database.py` side-effect import, untouched).
