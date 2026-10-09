@@ -14,6 +14,10 @@ checks:
     # Mirrors' overlay rows, the shipped first-run seed, the endpoint payloads
     # (byte-for-byte against the pre-seed tree) and the CLI import contract.
     # Needs a git checkout: it fetches its own baseline with `git archive`.
+    # `python` is the interpreter the runner image provides (the same one its
+    # other checks assume).  On a developer box that has no `python` on PATH, or
+    # only a python3 too old for this backend, run the file directly:
+    #   backend/.venv/bin/python .agent/checks/check_mirror_catalog.py
     command: python .agent/checks/check_mirror_catalog.py
     timeout: 120
     validated: false
