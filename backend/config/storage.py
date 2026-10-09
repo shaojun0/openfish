@@ -78,6 +78,15 @@ class StorageConfig(EnvSettings):
     )
 
     # ── Catalog medium ───────────────────────────────────────────────
+    seed_catalogs: bool = Field(
+        default=True,
+        description=(
+            "Install the shipped default catalogs into an empty database at "
+            "initialization time (services/catalog_seed). On by default: a "
+            "fresh deployment should have documentation and tools to look at. "
+            "A test harness that needs a genuinely empty catalog turns it off."
+        ),
+    )
     object_backend: Literal["local", "s3"] = Field(
         default="local",
         description=(

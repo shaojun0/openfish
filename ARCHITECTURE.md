@@ -190,7 +190,12 @@ bind mount 注入容器，丢文件即生效、无需重建镜像；收在 `dock
 把对象放在各目录根的保留子目录 `objects/<uuid4>` 下（这样 `tools import` 不会把刚写入
 的对象当成新条目），S3 后端放在 `<S3_PREFIX>/<目录名>/<uuid4>` 下，两者形状一致。
 `tools` 与 `docs` 走同一套模型，各自的文件夹树只是 `cli.py tools|docs import/export`
-的迁移/备份桥；`npm` / `debian` / `docker-images` / `packages` 仍按路径寻址（它们的
+的迁移/备份桥。空数据库首次初始化时会装入自带的默认目录内容
+（`config/seed/*.sql` + `config/seed/objects/<ns>/<uuid4>`，由
+`services/catalog_seed.ensure_seed` 在 `init_engine` 里执行）：默认内容过去是目录里的
+文件、"目录即目录"让它们白来，表化之后必须显式装一次——装过就记在
+`catalog_seed_state` 里，所以运维删掉默认内容后重启不会复活，
+`cli.py catalogs seed --force` 才是要回来的方式；`npm` / `debian` / `docker-images` / `packages` 仍按路径寻址（它们的
 路径就是协议索引）。前端/协议面完全不变；`backend/scripts/s3_smoke.py` 是对真实
 S3 兼容端点（MinIO / Ceph）的显式连通性自检。
 

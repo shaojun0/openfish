@@ -228,7 +228,9 @@ x-backend-volumes: &backend-volumes
   # ── 内网制品中心 ────────────────────────────────────────
   # npm / node-builds / docker-images / debian：丢文件即生效，无需重建镜像。
   # tools / docs：条目在数据库里（见根 README 的 Artifact hub），这里的目录只是
-  #   对象的存放处与 import/export 的桥；丢入文件后要跑一次导入才会进目录：
+  #   对象的存放处与 import/export 的桥。空库首次启动就会由后端写入默认内容
+  #   （backend/config/seed/），所以起来就有文档和工具；丢入自己的文件后要跑一次
+  #   导入才会进目录：
   #     docker compose exec backend python cli.py tools import   # docs 同理
   #   两个目录下的 objects/ 属于存储端口，不要手工改动。
   - ./tools:/app/tools

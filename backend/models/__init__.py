@@ -23,6 +23,7 @@ from .catalog import (
     TOOLS_NAMESPACE,
     CatalogCategory,
     CatalogEntry,
+    CatalogSeedState,
     category_of,
     overlay_metadata,
 )
@@ -92,6 +93,7 @@ __all__ = [
     # ── Artifact catalogs ────────────────────────────────────────────
     "CatalogCategory",
     "CatalogEntry",
+    "CatalogSeedState",
     "TOOLS_NAMESPACE",
     "category_of",
     "overlay_metadata",

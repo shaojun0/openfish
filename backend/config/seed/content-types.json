@@ -1,0 +1,20 @@
+{
+  "docs": {
+    "2277d397-051e-56a6-b3f5-212fd1503319": "text/markdown",
+    "23d4593d-4e47-50a3-87f6-282e18079efa": "text/markdown",
+    "3e0573dc-448c-5e81-94a5-295877619a83": "text/markdown",
+    "6fefb6ae-2b93-59be-bc42-4a0a978b7de9": "text/markdown",
+    "aae87e2b-5f83-5c04-8b5c-3034761f3fb4": "text/markdown",
+    "bb35b5f4-6ccd-5ce7-83b7-cc12db9815e9": "text/markdown"
+  },
+  "tools": {
+    "0125853e-67ca-5392-b44c-bee7f915c284": "text/x-sh",
+    "0c4e317c-dcb0-56d9-9b8a-f24febffde59": "text/x-sh",
+    "18b8977f-1324-5608-856f-01782ea16783": "text/x-sh",
+    "39a52b73-458b-5d67-acfa-4af17de1ed69": "text/x-sh",
+    "5264a689-f1fc-5072-9310-979b067ba006": "application/octet-stream",
+    "69545a04-7823-57b4-96ac-3986e2888fb3": "text/x-sh",
+    "9af0b781-1adc-590f-841a-e79d5ac925e2": "text/x-sh",
+    "b79e28b0-e681-53f1-b27e-9a88f20cb62a": "text/x-sh"
+  }
+}
