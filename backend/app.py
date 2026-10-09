@@ -159,14 +159,11 @@ register_all(app)
 from services.authz import bootstrap as bootstrap_authz
 
 # Cold-start superusers.  Both sources are configuration, so neither can be
-# used to grant a role at runtime — they only seed the very first administrator
-# (see AuthzService.bootstrap_superusers).  Prefer `python cli.py create-admin`
+# server holds no superuser of its own: the first administrator is created
+# explicitly with `python cli.py create-admin <identity>`, and nothing in the
+# environment can grant the server to whoever can set a variable.
 # for everything afterwards.
-_bootstrap_ids = list(settings.server.admin_users)
-if settings.auth.basic_username:
-    _bootstrap_ids.append(settings.auth.basic_username)
-
-_authz_summary = bootstrap_authz(app.extensions["authz"], _bootstrap_ids)
+_authz_summary = bootstrap_authz(app.extensions["authz"])
 
 # ── Run ─────────────────────────────────────────────────────────────
 

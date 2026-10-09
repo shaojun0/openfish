@@ -33,7 +33,7 @@ class User(Base):
     # ``external_id`` is THE identity key and is unique on its own — not
     # (provider, external_id).  Rationale: the same human may reach this
     # server through more than one door (OAuth2/4A login, the HTTP Basic
-    # fallback, the ADMIN_USERS bootstrap list), and splitting them into
+    # fallback, an OAuth introspection response), and splitting them into
     # separate rows would mean roles granted through one door are invisible
     # through another.  ``provider`` records which door they were first seen
     # at; it is informational and never used for lookups.

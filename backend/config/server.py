@@ -33,10 +33,6 @@ class ServerConfig(EnvSettings):
         default="",
         description="Global URL prefix for all routes",
     )
-    admin_users: list[str] = Field(
-        default=[],
-        description="Whitelist of admin user identifiers",
-    )
     public_base_url: str = Field(
         default="",
         description=(
