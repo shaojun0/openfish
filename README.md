@@ -290,7 +290,7 @@ Templates are provided at `backend/.env.example` (local development) and
 | `MODEL_PROBE_TIMEOUT`   | `5`                    | Seconds allowed for one route connectivity probe    |
 | `OBJECT_BACKEND`        | `local`                | Catalog medium: `local` (a directory) or `s3` (an S3-compatible bucket, needs the `s3` extra); see [Storage backend](#storage-backend-local-or-s3) |
 | `S3_ENDPOINT` / `S3_BUCKET_NAME` / `S3_REGION` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` / `S3_ADDRESS_STYLE` / `S3_PREFIX` | *(empty)* | `OBJECT_BACKEND=s3` only. MinIO/Ceph want `S3_ADDRESS_STYLE=path`; the bucket must be pre-created |
-| `DOCS_DIR`              | `<project>/docker/docs` | Documentation root. The catalog lives in the `documents`/`document_revisions`/`document_assets` tables; this directory holds the stored objects under `objects/` and is where `cli.py docs import` reads a hand-written tree from by default |
+| `DOCS_DIR`              | `<project>/docker/docs` | Documentation root. The catalog lives in the `documents`/`document_revisions`/`document_assets` tables (a fresh database is initialized with `config/seed/`); this directory holds the stored objects under `objects/` and is where `cli.py docs import` reads a hand-written tree from by default |
 
 Nested fields can also be addressed with the `__` delimiter, e.g.
 `SERVER__PORT=9091`.
@@ -788,6 +788,9 @@ python cli.py tools export --to /tmp/tools-backup # writes the files + catalog.j
 
 Copying a file into `TOOLS_DIR` is no longer enough on its own — say
 `tools import` once (or upload it from the Tools page) and it is in the catalog.
+A fresh database already has the shipped defaults (see *Where the documentation
+comes from* above); `cli.py catalogs seed --force` reinstalls them after they
+have been deleted.
 
 **Why it moved out of the tree.**  A folder was the identity, so: an edit left
 no trace and could not be undone; two editors saving from the same page
@@ -836,12 +839,20 @@ document also has raw forms:
 * `GET /docs/<ecosystem>/<id>/assets/<name>` — one asset (images inline, other
   types as an attachment).
 
+**Where the documentation comes from.**  A fresh database is initialized with
+the shipped defaults — one document per ecosystem, under
+`backend/config/seed/` — so `/documentation/<eco>` is populated the moment the
+database is created (`extensions/database.py` calls
+`services.catalog_seed.ensure_seed`).  That is a **one-shot** install: the
+`catalog_seed_state` table records it, so deleting the defaults keeps them
+deleted.  `python cli.py catalogs seed --force` is how to ask for them back.
+
 **Moving documents in and out.**  The folder layout is still the friendliest
 way to hand a set of documents to (or take one from) a disconnected
 deployment, and it is the layout this feature used to *be*, so an existing
 `DOCS_DIR` migrates as-is.  **Upgrading a deployment that has documents in
-`DOCS_DIR`: run `docs import` once — the catalogue now starts empty, because the
-database did not exist before:**
+`DOCS_DIR`: run `docs import` once — those files predate the database, and the
+import is what turns them into rows:**
 
 ```bash
 cd backend

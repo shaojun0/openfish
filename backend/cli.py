@@ -881,6 +881,23 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--to", dest="target", required=True, metavar="DIR")
     q.set_defaults(func=cmd_tools_export)
 
+    # ── Catalogs: the shipped defaults a fresh database is initialized with ──
+    p = sub.add_parser(
+        "catalogs",
+        help="Inspect or re-install the default catalogs a fresh database gets.",
+    )
+    catalogs_cmd = p.add_subparsers(dest="catalogs_command", required=True)
+
+    q = catalogs_cmd.add_parser(
+        "seed",
+        help="Install the shipped documentation and tools defaults (idempotent).",
+    )
+    q.add_argument(
+        "--force", action="store_true",
+        help="Apply the seed even if it was applied before or the catalog has rows.",
+    )
+    q.set_defaults(func=cmd_catalogs_seed)
+
     return parser
 
 
@@ -940,6 +957,29 @@ def cmd_docs_history(args) -> int:
             f"{marker} r{row['revision']:<4} {row['created']}  {row['size_human']:>8}"
             f"  {row['created_by'] or '—'}  {row['title']}"
         )
+    return 0
+
+
+def cmd_catalogs_seed(args) -> int:
+    """Install (or re-install) the shipped default catalogs.
+
+    The same call runs automatically from ``init_engine`` on a fresh database;
+    this command is how an operator inspects that outcome or asks for the
+    defaults back after deleting them.
+    """
+    from services.catalog_seed import ensure_seed
+
+    engine = init_engine(args.db_url())
+    outcomes = ensure_seed(engine, force=args.force)
+    names = {
+        "seeded": "已写入默认内容",
+        "already": "此前已初始化，跳过",
+        "not-empty": "目录里已有内容，跳过并记录",
+        "absent": "没有对应的种子文件",
+    }
+    for outcome in outcomes:
+        detail = f"（{outcome.objects} 个对象 / {outcome.statements} 条语句）" if outcome.action == "seeded" else ""
+        print(f"  {outcome.namespace}: {names.get(outcome.action, outcome.action)}{detail}")
     return 0
 
 
@@ -1014,6 +1054,14 @@ def main(argv: list[str] | None = None) -> int:
         # These map their own domain errors onto exit 1 (a missing sealing key,
         # an unknown route) and take no authorization service.
         return args.func(args)
+    if getattr(args, "catalogs_command", None):
+        # The seed runs inside `build_authz`'s `init_engine` already; this branch
+        # only exists for the command that reports or forces it.
+        args.db_url = lambda: args.db
+        try:
+            return args.func(args)
+        except (OSError, ValueError) as exc:
+            return _fail(str(exc))
     if getattr(args, "docs_command", None) or getattr(args, "tools_command", None):
         # Same posture: an unreadable tree or an unknown document is a message
         # on stderr and exit 1, not a traceback.

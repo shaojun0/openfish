@@ -158,6 +158,24 @@ class CatalogEntry(Base):
         self.tags = json.dumps([str(item) for item in items], ensure_ascii=False)
 
 
+class CatalogSeedState(Base):
+    """One row per catalog that has had its first-run defaults installed.
+
+    The seed itself is a checked-in ``.sql`` (see ``config/seed/``) plus the
+    objects it names; this table is what makes installing it a **one-shot**
+    action.  Without it, "the catalog is empty, so seed it" would resurrect the
+    defaults every time an administrator deleted them all — the one way a boot
+    step like this can destroy an operator's decision rather than a blank page.
+    """
+
+    __tablename__ = "catalog_seed_state"
+
+    namespace: Mapped[str] = Column(String(32), primary_key=True)
+    seeded_at: Mapped[datetime] = Column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+
+
 def category_of(path: str) -> str:
     """The category a catalog path belongs to (``root`` when it has none)."""
     head, sep, _ = path.partition("/")
@@ -187,6 +205,7 @@ __all__ = [
     "TOOLS_NAMESPACE",
     "CatalogCategory",
     "CatalogEntry",
+    "CatalogSeedState",
     "category_of",
     "overlay_metadata",
 ]

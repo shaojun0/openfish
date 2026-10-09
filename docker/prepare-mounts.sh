@@ -9,8 +9,11 @@
 # -----
 #   ./prepare-mounts.sh
 #       Local defaults.  Each artifact mirror becomes a real, empty directory
-#       seeded from docker/examples/<name>/, and so do the two operator-written
-#       catalogs (tools, docs).  docker/data links to ../backend/data.  That
+#       seeded from docker/examples/<name>/.  The two operator-written catalogs
+#       (tools, docs) are created empty: a fresh database is initialized from
+#       backend/config/seed/, and these directories are where the operator's own
+#       files go before `cli.py tools|docs import`.  docker/data links to
+#       ../backend/data.  That
 #       link is what keeps `cd backend && python app.py` and the containers on
 #       one database — which now also holds the model route table.
 #
@@ -48,9 +51,11 @@ PROJECT_DIR="$(dirname "$DOCKER_DIR")"
 MIRRORS=(share npm node-builds docker-images debian)
 
 #: Operator-written catalogs.  Unlike the mirrors these are *not* moved to the
-#: data disk automatically — they are created as real directories seeded from
-#: ``docker/examples/<name>/`` and gitignored, so the browser upload endpoints
-#: never write into the work tree.  Re-pointing one at a data disk is still just
+#: data disk automatically — they are created as real directories and
+#: gitignored, so the browser upload endpoints never write into the work tree.
+#: They are *not* seeded from docker/examples/: the shipped defaults are
+#: installed into an empty database by services/catalog_seed.py, and what lives
+#: here is whatever the operator drops in for `cli.py tools|docs import`.  Re-pointing one at a data disk is still just
 #: ``ln -sfn /srv/data/tools docker/tools``: :func:`seed_dir` leaves a symlink
 #: alone, which is what makes both layouts work.
 CATALOGS=(tools docs)

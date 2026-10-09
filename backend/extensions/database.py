@@ -202,6 +202,18 @@ def init_engine(
     from models.agent_hub_migrate import ensure_schema
 
     ensure_schema(engine)
+    # A fresh database is initialized with the catalogs' shipped defaults
+    # (``config/seed/*.sql`` plus the objects they name).  The samples used to be
+    # files in the catalog directories, so "the directory is the catalog" made
+    # them appear for free; a table-backed catalog has to install them, and this
+    # is database initialization rather than a container-side step.  One-shot:
+    # ``catalog_seed_state`` records it, so an administrator who deletes the
+    # defaults keeps them deleted.
+    from config import settings
+    from services.catalog_seed import ensure_seed
+
+    if settings.storage.seed_catalogs:
+        ensure_seed(engine)
     return engine
 
 
