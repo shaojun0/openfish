@@ -74,6 +74,23 @@ CONTENT_TYPE_MAX = 255
 #: The catalog this project wires to these tables today.
 TOOLS_NAMESPACE = "tools"
 
+#: ``catalog_entries.filename`` sentinel: this row names no file.
+#:
+#: A mirror row may register only metadata (npm calls those "metadata only"): the
+#: file would be the artifact and it is not here.  The empty string is the
+#: sentinel rather than ``NULL`` because the column is ``NOT NULL`` in every
+#: deployment and SQLite cannot drop ``NOT NULL`` — switching to ``NULL`` would
+#: cost an existing database a table rebuild to say the same thing.
+NO_FILE = ""
+
+#: ``catalog_entries.storage_key`` sentinel: this row owns no bytes.
+#:
+#: A mirror's file *is* the artifact and stays where the operator put it, so the
+#: row only describes it.  Empty rather than ``NULL`` for the same reason as
+#: :data:`NO_FILE`: the column is ``NOT NULL`` in every deployment and SQLite
+#: cannot drop it.
+NO_STORAGE_KEY = ""
+
 
 class CatalogCategory(Base):
     """One category of one catalog, with the display metadata it carries."""
@@ -114,13 +131,10 @@ class CatalogEntry(Base):
     #: address this row has.  Never a storage key.
     path: Mapped[str] = Column(String(PATH_MAX), nullable=False)
     #: Last path segment; stored rather than split on every render, because it
-    #: is what the page and the download show.  The empty string on a mirror row
-    #: that registers metadata without naming a file (npm calls those "metadata
-    #: only"): the file would be the artifact and it is not here.  Empty rather
-    #: than ``NULL`` on purpose — the column is NOT NULL in every deployment, and
-    #: SQLite cannot drop NOT NULL, so ``NULL`` would cost an existing database a
-    #: table rebuild to say the same thing.
-    filename: Mapped[str] = Column(String(NAME_MAX), nullable=False, default="")
+    #: is what the page and the download show.  :data:`NO_FILE` on a mirror row
+    #: that registers metadata without naming a file — see that constant for why
+    #: the sentinel is the empty string and not ``NULL``.
+    filename: Mapped[str] = Column(String(NAME_MAX), nullable=False, default=NO_FILE)
     #: Overlay version / architecture / kind of a mirror row (``1.0.0`` /
     #: ``arm64`` / ``deb``).  Unused by the tools catalog, where the filename
     #: carries everything the listing shows.
@@ -141,11 +155,13 @@ class CatalogEntry(Base):
     size: Mapped[int] = Column(Integer, nullable=False, default=0)
     sha256: Mapped[str | None] = Column(String(64), nullable=True)
     #: The opaque object key — a bare uuid4.
-    #: The object this row owns.  The empty string for a mirror row: npm /
+    #: The object this row owns.  :data:`NO_STORAGE_KEY` for a mirror row: npm /
     #: debian / docker-images artifacts stay where the operator put them and the
     #: scanner reads the directory, so a mirror row only *describes* a file and
-    #: never names an object.
-    storage_key: Mapped[str] = Column(String(KEY_MAX), nullable=False, default="")
+    #: never names an object.  See that constant for why it is not ``NULL``.
+    storage_key: Mapped[str] = Column(
+        String(KEY_MAX), nullable=False, default=NO_STORAGE_KEY
+    )
     created_at: Mapped[datetime] = Column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )
@@ -216,6 +232,8 @@ __all__ = [
     "CONTENT_TYPE_MAX",
     "DESCRIPTION_MAX",
     "NAME_MAX",
+    "NO_FILE",
+    "NO_STORAGE_KEY",
     "PATH_MAX",
     "TOOLS_NAMESPACE",
     "CatalogCategory",

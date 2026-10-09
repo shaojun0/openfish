@@ -40,7 +40,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from models.catalog import CatalogEntry
+from models.catalog import CatalogEntry, NO_FILE
 from services import namespaces
 from services.fileio import read_json, write_json
 from services.hub import Overlay, OverlayItem
@@ -109,7 +109,7 @@ def overlay(session: Session, namespace: str) -> Overlay:
         if namespace != namespaces.NPM:
             item["arch"] = row.arch
             item["kind"] = row.kind
-        items.append({key: value for key, value in item.items() if value not in (None, "")})
+        items.append({key: value for key, value in item.items() if value not in (None, NO_FILE)})
     return {top_key(namespace): items}
 
 
@@ -143,7 +143,7 @@ def path_for(namespace: str, item: OverlayItem) -> str:
     by ``name`` + ``version`` (+ ``arch`` for debian, where the same version
     exists per architecture).
     """
-    filename = str(item.get("filename") or "").strip()
+    filename = str(item.get("filename") or NO_FILE).strip()
     if filename:
         return filename
     name = str(item.get("name") or "").strip()
@@ -235,7 +235,7 @@ def export_file(session: Session, namespace: str, path: str | Path) -> OverlayRe
         if namespace != namespaces.NPM:
             item["arch"] = row.arch
             item["kind"] = row.kind
-        items.append({key: value for key, value in item.items() if value not in (None, "", [])})
+        items.append({key: value for key, value in item.items() if value not in (None, NO_FILE, [])})
     payload: Overlay = {top_key(namespace): items}
     write_json(target, payload)
     return OverlayReport(namespace=namespace, path=str(target), exported=len(items))
@@ -260,8 +260,7 @@ def entry_fields(namespace: str, item: OverlayItem) -> dict[str, Any]:
     must not exist twice.
     """
     fields = {
-        # "" is the sentinel for "no file"; see CatalogEntry.filename.
-        "filename": str(item.get("filename") or ""),
+        "filename": str(item.get("filename") or NO_FILE),
         "display_name": str(item.get("name") or "") or None,
         "description": str(item.get("description") or "") or None,
         "version": str(item.get("version") or "") or None,
