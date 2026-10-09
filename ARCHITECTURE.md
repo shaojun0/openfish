@@ -8,7 +8,7 @@ openfish/
 ├── backend/          ① Flask 后端 + 智能体运行时 → openfish 镜像（两个平面）
 ├── frontend/         ② Vue 3 SPA          → openfish-frontend 镜像
 ├── docker/           ③ 编排、边缘网关与制品库 → 4 容器拓扑
-│   ├── tools/ npm/ node-builds/ docker-images/ debian/ docs/   ④ 制品库（操作员数据）
+│   ├── tools/ npm/ node-builds/ docker-images/ debian/ docs/   ④ 制品库（操作员数据，不提交）
 │   ├── docker-compose.yml  .env.example
 │   └── nginx/nginx.conf
 ├── integrations/     ⑤ 下游客户端代码（不进任何镜像）
@@ -51,9 +51,9 @@ app.py                     创建 Flask 应用，禁用内置 static handler
 | 配置 | `config/` | pydantic-settings 模型（server / storage / auth / security / hub）+ `paths.py` 路径锚定 |
 | 鉴权 | `auth/` | 装饰器、守卫、权限点目录、API key、OAuth2 |
 | 路由 | `routes/` | 每个生态一个蓝图；机器面协议与 `/api/v1` JSON 同址 |
-| 服务 | `services/` | 授权服务、目录聚合、Markdown 渲染（markdown-it-py 封装）、上游穿透代理与缓存、各生态 registry 适配器，以及三个共享原语：`format.py`（字节/时间格式化）、`fileio.py`（原子写 + JSON）、`digest.py`（SHA-256 缓存） |
+| 服务 | `services/` | 授权服务、目录聚合、Markdown 渲染（markdown-it-py 封装）、上游穿透代理与缓存、各生态 registry 适配器、文档目录（`docs.py`，DB + 对象存储），以及五个共享原语：`objectstore.py`（存储端口：put/open/stat/exists/delete/delete_many/walk；`local` 与 `s3` 两个后端，由 `OBJECT_BACKEND` 选择，加入新后端只需在 `catalog_store()` 加一个分支）、`tool_catalog.py`（工具目录：DB 行 + 对象，含 import/export 桥）、`format.py`（字节/时间格式化）、`fileio.py`（原子写 + JSON）、`digest.py`（一个哈希循环 + 一个 digest 缓存）、`paths.py`（外部名字 → 路径） |
 | 索引 | `index/` | 包 / CPython 构建 / Node 构建的发现与索引 |
-| 模型 | `models/` | SQLAlchemy 表：users / roles / permissions / user_roles / role_permissions / api_keys / stats |
+| 模型 | `models/` | SQLAlchemy 表：users / roles / permissions / user_roles / role_permissions / api_keys / stats / model_routes / agent-hub 各表，以及文档目录 `documents` / `document_revisions` / `document_assets`（见 `models/docs.py`） |
 | 描述 | `openapi/` | OpenAPI 3.1 元数据注册表、spec 生成、渲染器 |
 | 模板 | `static/<生态>/*.html` | **机器面** Jinja 模板（`pip`/`uv`/`nvm` 直接解析，不跑 JS），由 Flask 自带模板加载器（`template_folder="static"`）渲染，**不对外公开** |
 
@@ -85,7 +85,7 @@ app.py                     创建 Flask 应用，禁用内置 static handler
 | `/python-builds/` | python_build | uv |
 | `/node-builds/` | node_build | nvm / fnm / node-gyp |
 | `/tools/` `/npm/` `/docker/` `/debian/` | hub / npm / docker / debian | 制品中心协议 |
-| `/docs/` `/documentation/<生态>` | docs | Markdown 文档（后者是 SPA 页面） |
+| `/docs/` `/documentation/<生态>` | docs | Markdown 文档（DB 行 + 对象存储；后者是 SPA 页面） |
 | `/api/v1/*` | session / api_keys / admin / access / hub / npm / docker / debian / docs / device | SPA 与 API-key 客户端 |
 | `/auth/*` `/device` | auth_routes / device | 登录与设备授权 |
 | `/openapi.json` `/docs` `/llms.txt` `/.well-known/` | discovery | 匿名契约发布 |
@@ -185,6 +185,20 @@ registry 数据）；所有数据端点、`/docs/*`、`/api/v1` 仍各自鉴权�
 bind mount 注入容器，丢文件即生效、无需重建镜像；收在 `docker/` 下则是为了让
 仓库根只保留构建单元。
 
+目录模型是统一的：**条目（名称、公开路径、内容类型、摘要）在数据库里，字节在存储端口
+后面**，key 只有一个裸 uuid4 —— 没有扩展名、没有路径，任何代码都不解析它。本地后端
+把对象放在各目录根的保留子目录 `objects/<uuid4>` 下（这样 `tools import` 不会把刚写入
+的对象当成新条目），S3 后端放在 `<S3_PREFIX>/<目录名>/<uuid4>` 下，两者形状一致。
+`tools` 与 `docs` 走同一套模型，各自的文件夹树只是 `cli.py tools|docs import/export`
+的迁移/备份桥；`npm` / `debian` / `docker-images` / `packages` 仍按路径寻址（它们的
+路径就是协议索引）。前端/协议面完全不变；`backend/scripts/s3_smoke.py` 是对真实
+S3 兼容端点（MinIO / Ceph）的显式连通性自检。
+
+`tools/` 与 `docs/` 是**操作员在浏览器里写**的两个目录：它们不再提交（`.gitignore`），
+由 `prepare-mounts.sh` 从 `docker/examples/` 播种，因此一次上传不会弄脏工作区、
+`git checkout` 也不会带走唯一副本。文档的元数据已进一步搬进数据库（见
+`cli.py docs import/export` 的双向兼容桥）。
+
 **所有 bind mount 源都是 `docker/` 内的路径**（`./share` `./npm` `./data` …），
 `docker-compose.yml` 里既没有 `../backend/...` 也没有宿主机绝对路径。每个源都是
 **可插拔**的：它要么是真实目录，要么是指向数据盘的符号链接。`docker/prepare-mounts.sh`
@@ -201,7 +215,8 @@ compose 文件里。随仓库提交的样例目录移到了 `docker/examples/`�
 | `node-builds/` | `nodejs.org/dist` 布局的 Node 镜像 | `NODE_BUILDS_DIR` |
 | `docker-images/` | `docker save` tar + compose/Dockerfile 片段 | `DOCKER_DIR` |
 | `debian/` | 本地 `.deb` + apt 片段 | `DEBIAN_DIR` |
-| `docs/<生态>/<文档>/document.md` | 各生态 Markdown 文档 | `DOCS_DIR` |
+| `docs/objects/<uuid4>` | 各生态 Markdown 文档的对象（元数据在 `documents` / `document_revisions` / `document_assets` 表） | `DOCS_DIR` |
+| `tools/objects/<uuid4>` | 工具对象（条目在 `catalog_entries` / `catalog_categories` 表） | `TOOLS_DIR` |
 
 ---
 

@@ -64,6 +64,15 @@ dependencies = [
 
 [project.optional-dependencies]
 prod = ["gunicorn>=22"]
+# S3-compatible catalog storage (`OBJECT_BACKEND=s3`).  Optional on purpose: the
+# default local-directory deployment must not carry boto3, and the verification
+# gate drives `S3Store` through an in-memory double rather than this extra —
+# so the gates stay runnable in an offline deployment that never installs it.
+# The container image opts in with `--build-arg OPENFISH_EXTRAS=s3`.
+s3 = ["boto3>=1.34"]
+# Verification gates — see scripts/check_openapi.py, check_contract.py and
+# check_lint.py (pyflakes: undefined names / dead imports).
+dev = ["openapi-spec-validator>=0.7", "pyflakes>=3.2"]
 
 [project.scripts]
 cpypiserver = "app:main"

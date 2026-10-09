@@ -86,6 +86,13 @@ docker/node-builds
 docker/docker-images
 docker/debian
 docker/data
+# The two catalogs an administrator *writes through the browser* — tools and
+# documentation.  They used to be committed, which put operator data inside the
+# work tree: a browser upload dirtied `git status`, and a `git checkout` /
+# `git clean` could take the only copy with it.  They are seeded from
+# docker/examples/{tools,docs}/ instead, exactly like the mirrors above.
+docker/tools
+docker/docs
 # Uploaded packages and interpreter mirrors (bind-mounted in the container).
 packages/
 python-build-standalone/

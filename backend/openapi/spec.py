@@ -51,7 +51,7 @@ TAGS: list[dict[str, str]] = [
     {"name": "npm", "description": "npm registry protocol and local package catalog, consumed by `npm`/`pnpm`."},
     {"name": "Docker", "description": "Docker Registry v2 pull protocol and offline image catalog, consumed by `docker`/`skopeo`."},
     {"name": "Debian", "description": "Debian/apt repository — flat local index plus a read-through mirror proxy."},
-    {"name": "Docs", "description": "Per-ecosystem Markdown documentation, stored as folder projects with their own assets. Reading requires `doc:read`; creating, editing, deleting or attaching assets requires `doc:upload`."},
+    {"name": "Docs", "description": "Per-ecosystem Markdown documentation: one document per row, with a full revision history and its own assets, the bytes behind the storage port. A save carries the `revision` it is based on and a stale one is refused with `409`. Reading requires `doc:read`; creating, editing, deleting or attaching assets requires `doc:upload`."},
     {"name": "Upload", "description": "Publish packages, as `twine` does."},
 ]
 

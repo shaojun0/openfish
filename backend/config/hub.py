@@ -46,20 +46,27 @@ class HubConfig(EnvSettings):
     tools_dir: str = Field(
         default=catalog_path("tools"),
         description=(
-            "Root of the tools catalog. Each immediate sub-directory is a "
-            "category; files below a category are downloadable tools."
+            "Root of the tools catalog. The catalog itself is the "
+            "catalog_categories / catalog_entries tables; this directory holds "
+            "the stored objects under `objects/` (a bare uuid4 each) and is the "
+            "folder tree `cli.py tools import/export` reads and writes — a file "
+            "in it is not part of the catalog until it is imported. Each "
+            "immediate sub-directory is a category."
         ),
     )
     docs_dir: str = Field(
         default=catalog_path("docs"),
         description=(
-            "Root of the per-ecosystem Markdown documentation. Each immediate "
-            "sub-directory is one ecosystem (python/, npm/, docker/, debian/, "
-            "tools/, models/) and holds that ecosystem's document folder "
-            "projects; a project is <id>/document.md plus its own meta.json and "
-            "assets/. The directory is the catalog: an administrator creates "
-            "and edits documents in the browser, everyone else reads and "
-            "downloads them."
+            "Root of the documentation store. The catalog itself lives in the "
+            "`documents` / `document_revisions` / `document_assets` tables (see "
+            "models/docs.py); this directory holds the stored objects under "
+            "`objects/` (a bare uuid4 per revision body and per asset), and is "
+            "where `cli.py docs import` reads a hand-written tree from by "
+            "default. Each immediate sub-directory of that tree is one ecosystem "
+            "(python/, npm/, docker/, debian/, tools/, models/) and holds "
+            "`<slug>/document.md` plus an optional meta.json and assets/. "
+            "An administrator creates and edits documents in the browser, "
+            "everyone else reads and downloads them."
         ),
     )
     npm_dir: str = Field(

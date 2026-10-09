@@ -7,18 +7,23 @@ apt) lives next to the catalog page it belongs to.
 
 What is left here is the handful of things all of them do identically:
 content negotiation for the server-rendered index pages, building a
-browser-facing SPA link that honours the global route prefix, and the size gate a
-bound request body has to pass *before* the binder reads it.
+browser-facing SPA link that honours the global route prefix, and the two
+primitives a catalog download needs — the size gate a bound body has to pass
+*before* the binder reads it, and the streamed response that carries the HTTP
+semantics a file download implies.
 """
 
 from __future__ import annotations
 
 from functools import wraps
 
-from flask import request
+from typing import IO
+
+from flask import Response, request, send_file
 
 from config import settings
 from errors import BadRequestError
+from services.objectstore import ObjectInfo, etag_of
 
 
 def wants_json() -> bool:
@@ -68,4 +73,50 @@ def body_ceiling(max_bytes: int, message: str):
     return decorator
 
 
-__all__ = ["body_ceiling", "wants_json", "spa_url"]
+def stream_object(
+    info: ObjectInfo,
+    stream: IO[bytes],
+    *,
+    mimetype: str | None = None,
+    as_attachment: bool = False,
+    download_name: str | None = None,
+) -> Response:
+    """Stream one stored object with the HTTP semantics a download implies.
+
+    ``send_file`` cannot size a stream opened by a *store* — it reads
+    ``Content-Length``, ``Last-Modified``, ``ETag`` and ``Range`` off a path —
+    so handing it ``store.open(key)`` silently drops all four, and those are
+    exactly the headers a client resuming a multi-gigabyte artifact depends on.
+    The store's :class:`~services.objectstore.ObjectInfo` already knows the size
+    and the modification time, so this builds the response explicitly and lets
+    Werkzeug's own ``make_conditional`` do the
+    ``If-None-Match``/``If-Modified-Since``/``Range`` work.
+
+    ``send_file`` still provides what it is good at without a path: media-type
+    guessing from the download name and RFC 5987 encoding of a non-ASCII
+    filename.  The download name falls back to the key's last segment, which is
+    also what stops the response from leaking the absolute path a local store
+    opened the stream from.
+    """
+    response = send_file(
+        stream,
+        mimetype=mimetype,
+        as_attachment=as_attachment,
+        download_name=download_name or info.key.rsplit("/", 1)[-1],
+        # Both computed here, from what the store knows — see above.
+        conditional=False,
+        etag=False,
+    )
+    response.content_length = info.size
+    if info.modified is not None:
+        response.last_modified = info.modified
+        response.set_etag(etag_of(info))
+    # `complete_length` is not optional: Werkzeug only completes a Range
+    # request when it is told the full length, even though `content_length` is
+    # already set here.  Without it a `Range` request silently answers 200 with
+    # the whole body instead of 206.
+    response.make_conditional(request, accept_ranges=True, complete_length=info.size)
+    return response
+
+
+__all__ = ["body_ceiling", "stream_object", "wants_json", "spa_url"]

@@ -84,7 +84,12 @@ COPY pyproject.toml .
 # `$(python -c …)` expansion: `psycopg[binary]>=3.1` contains shell-glob
 # metacharacters, and a requirements file is immune to word-splitting and
 # pathname expansion.
-RUN python -c "import tomllib; deps = tomllib.loads(open('/app/pyproject.toml').read())['project']['dependencies']; open('/tmp/requirements.txt', 'w').write('\n'.join([*deps, 'gunicorn>=22']) + '\n')" \
+# Optional dependency groups to install as well: space-separated names from
+# `[project.optional-dependencies]`, e.g. `--build-arg OPENFISH_EXTRAS=s3` to
+# make `OBJECT_BACKEND=s3` usable in this image.  Empty (the default) keeps the
+# image at the mandatory set — a local-directory deployment does not carry boto3.
+ARG OPENFISH_EXTRAS=""
+RUN python -c "import tomllib; d = tomllib.loads(open('/app/pyproject.toml').read()); deps = [*d['project']['dependencies'], 'gunicorn>=22', *sum([d['project']['optional-dependencies'][e] for e in '${OPENFISH_EXTRAS}'.split()], [])]; open('/tmp/requirements.txt', 'w').write('\n'.join(deps) + '\n')" \
     && pip install -i https://mirrors.aliyun.com/pypi/simple/ --no-cache-dir \
        -r /tmp/requirements.txt
 

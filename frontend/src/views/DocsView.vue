@@ -326,7 +326,7 @@ watch(ecosystem, () => load(), { immediate: true })
           <div class="docs-view__content-header">
             <span class="docs-view__content-title">{{ detail.title }}</span>
             <span class="docs-view__content-meta">
-              {{ detail.id }}/document.md · {{ detail.size_human }}
+              {{ detail.id }} · r{{ detail.revision }} · {{ detail.size_human }}
               <template v-if="detail.modified"> · {{ formatDateOnly(detail.modified) }}</template>
             </span>
             <el-button

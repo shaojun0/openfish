@@ -809,8 +809,191 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.set_defaults(func=cmd_model_route_seal)
 
+    # ── Documentation: the folder tree as a migration bridge ────────
+    p = sub.add_parser(
+        "docs",
+        help="Import, export and inspect the documentation catalog.",
+    )
+    docs_cmd = p.add_subparsers(dest="docs_command", required=True)
+
+    q = docs_cmd.add_parser(
+        "import",
+        help="Read a DOCS_DIR-shaped folder tree into the database (idempotent).",
+    )
+    q.add_argument(
+        "--from", dest="source", default=None, metavar="DIR",
+        help=f"Tree to read; defaults to DOCS_DIR ({settings.hub.docs_dir}).",
+    )
+    q.add_argument(
+        "--dry-run", action="store_true",
+        help="Report what would change without writing anything.",
+    )
+    q.set_defaults(func=cmd_docs_import)
+
+    q = docs_cmd.add_parser(
+        "export",
+        help="Write every document out as <ecosystem>/<slug>/document.md.",
+    )
+    q.add_argument("--to", dest="target", required=True, metavar="DIR")
+    q.set_defaults(func=cmd_docs_export)
+
+    q = docs_cmd.add_parser("history", help="List a document's stored revisions.")
+    q.add_argument("ecosystem")
+    q.add_argument("doc_id")
+    q.set_defaults(func=cmd_docs_history)
+
+    q = docs_cmd.add_parser("show", help="Print one revision's Markdown (default: current).")
+    q.add_argument("ecosystem")
+    q.add_argument("doc_id")
+    q.add_argument("--revision", type=int, default=None, help="Revision to print.")
+    q.add_argument("--out", default=None, metavar="FILE", help="Write to FILE instead of stdout.")
+    q.set_defaults(func=cmd_docs_show)
+
+    # ── Tools catalog: the same bridge, one directory up ────────────
+    p = sub.add_parser(
+        "tools",
+        help="Import and export the tools catalog (rows + store objects).",
+    )
+    tools_cmd = p.add_subparsers(dest="tools_command", required=True)
+
+    q = tools_cmd.add_parser(
+        "import",
+        help="Read a TOOLS_DIR-shaped tree and its catalog.json into the catalog (idempotent).",
+    )
+    q.add_argument(
+        "--from", dest="source", default=None, metavar="DIR",
+        help=f"Tree to read; defaults to TOOLS_DIR ({settings.hub.tools_dir}).",
+    )
+    q.add_argument(
+        "--dry-run", action="store_true",
+        help="Report what would change without writing anything.",
+    )
+    q.add_argument(
+        "--prune", action="store_true",
+        help="Also remove entries that no longer exist in the tree.",
+    )
+    q.set_defaults(func=cmd_tools_import)
+
+    q = tools_cmd.add_parser(
+        "export",
+        help="Write every entry back out to its path, plus a catalog.json overlay.",
+    )
+    q.add_argument("--to", dest="target", required=True, metavar="DIR")
+    q.set_defaults(func=cmd_tools_export)
+
     return parser
 
+
+
+# ── Documentation catalog ───────────────────────────────────────────
+#
+# The docs feature lives in the database (see `models.docs`), but a folder tree
+# is still the friendliest way to move a set of documents into or out of a
+# disconnected deployment — and it is the layout this feature used to *be*, so
+# an existing `DOCS_DIR` imports as-is.
+
+def cmd_docs_import(args) -> int:
+    """Read a folder tree into the documentation tables."""
+    from services import docs
+
+    source = args.source or settings.hub.docs_dir
+    session = Session()
+    try:
+        report = docs.import_tree(session, source, dry_run=args.dry_run)
+    finally:
+        session.close()
+    for line in report.lines():
+        print(line)
+    if args.dry_run:
+        print("（--dry-run：没有写入任何东西）")
+    return 0 if not report.errors else 1
+
+
+def cmd_docs_export(args) -> int:
+    """Write every document back out as a folder tree."""
+    from services import docs
+
+    session = Session()
+    try:
+        count = docs.export_tree(session, args.target)
+    finally:
+        session.close()
+    print(f"已导出 {count} 篇文档到 {args.target}")
+    return 0
+
+
+def cmd_docs_history(args) -> int:
+    """Show one document's stored revisions, newest first."""
+    from services import docs
+
+    session = Session()
+    try:
+        rows = docs.history(session, args.ecosystem, args.doc_id)
+    finally:
+        session.close()
+    if not rows:
+        print("没有可显示的修订。")
+        return 0
+    for row in rows:
+        marker = "*" if row["current"] else " "
+        print(
+            f"{marker} r{row['revision']:<4} {row['created']}  {row['size_human']:>8}"
+            f"  {row['created_by'] or '—'}  {row['title']}"
+        )
+    return 0
+
+
+def cmd_tools_import(args) -> int:
+    """Read a TOOLS_DIR-shaped tree (and its catalog.json) into the catalog."""
+    from services import tool_catalog
+
+    source = args.source or settings.hub.tools_dir
+    session = Session()
+    try:
+        report = tool_catalog.import_tree(
+            session, source, dry_run=args.dry_run, prune=args.prune
+        )
+    finally:
+        session.close()
+    for line in report.lines():
+        print(line)
+    if args.dry_run:
+        print("（--dry-run：没有写入任何东西）")
+    return 0 if not report.errors else 1
+
+
+def cmd_tools_export(args) -> int:
+    """Write the tools catalog back out as a folder tree plus catalog.json."""
+    from services import tool_catalog
+
+    session = Session()
+    try:
+        count = tool_catalog.export_tree(session, args.target)
+    finally:
+        session.close()
+    print(f"已导出 {count} 个条目到 {args.target}")
+    return 0
+
+
+def cmd_docs_show(args) -> int:
+    """Print (or write out) one revision's Markdown."""
+    from services import docs
+
+    session = Session()
+    try:
+        row, revision, stream = docs.open_body(
+            session, args.ecosystem, args.doc_id, revision=args.revision
+        )
+        body = stream.read()
+        title = row.title
+    finally:
+        session.close()
+    if args.out:
+        Path(args.out).write_bytes(body)
+        print(f"已写出 r{revision}（{title}）到 {args.out}")
+        return 0
+    sys.stdout.write(body.decode("utf-8"))
+    return 0
 
 def _run_runner(args) -> int:
     """Dispatch a ``runner`` subcommand, mapping domain errors onto exit 1."""
@@ -831,6 +1014,13 @@ def main(argv: list[str] | None = None) -> int:
         # These map their own domain errors onto exit 1 (a missing sealing key,
         # an unknown route) and take no authorization service.
         return args.func(args)
+    if getattr(args, "docs_command", None) or getattr(args, "tools_command", None):
+        # Same posture: an unreadable tree or an unknown document is a message
+        # on stderr and exit 1, not a traceback.
+        try:
+            return args.func(args)
+        except (OSError, ValueError) as exc:
+            return _fail(str(exc))
     try:
         return args.func(args, authz)
     except ValueError as exc:
