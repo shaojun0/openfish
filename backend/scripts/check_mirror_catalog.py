@@ -39,17 +39,32 @@ a legal package name.  Those checks are the desired contract rather than a
 description of the tree, so they fail on a checkout where the fix is not in yet.
 
 The endpoint section compares this tree's ``app.test_client()`` responses,
-byte for byte, against a *pre-change checkout* (``BASELINE_BACKEND_DIR``) whose
-directories still contain their ``catalog.json``; the same comparison is made
-again with the file deleted.  The baseline is cached under
-``MIRROR_BASELINE_CACHE`` so a later run (e.g. against a refactor branch) needs
-neither the old checkout nor the network.
+byte for byte, against the *pre-change tree*, which this script fetches itself
+from the repository under test::
+
+    git -C <repo> archive 9518be1 backend docker/examples | tar -x
+
+That is the whole point of the section, and a run must not depend on a previous
+run's leftovers to get there — the gate has to reproduce on a machine that has
+never seen this working copy.  A checkout the caller already extracted may be
+pointed at with ``BASELINE_BACKEND_DIR``.  When neither works (no ``git``, no
+such commit) the endpoint and old-database sections print a ⚠ naming what they
+skipped and the script still exits 0 with the reduced count: a missing baseline
+is a runnable reduced gate, never a traceback.
+
+One trap this script has to step around: the catalog scanners hide any file
+whose *absolute* path has a dot-prefixed component, so fixtures placed under a
+scratch directory like ``/home/me/.cache/…`` would look invisible and fail every
+scanner check.  The scanner and endpoint fixtures therefore live under a
+dot-free directory chosen at start-up (``_FIXTURES``), never under the dotted
+scratch root.
 
 Environment overrides (nothing is hard-coded to one worktree):
 
 ``BACKEND_DIR``             the tree under test (default: this script's backend)
-``BASELINE_BACKEND_DIR``    the pre-change checkout (default: sibling ``wt-base``)
-``MIRROR_BASELINE_CACHE``   where the baseline JSON and its directories live
+``BASELINE_BACKEND_DIR``    an already-extracted pre-change checkout
+``MIRROR_BASELINE_COMMIT``  the commit whose tree is the pre-change baseline
+``MIRROR_SCRATCH``          where the throwaway databases and overlays go
 ``MIRROR_PYTHON``           interpreter for the subprocess runs (default: this one)
 
 Exits non-zero on the first property that fails.
@@ -57,11 +72,13 @@ Exits non-zero on the first property that fails.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 from pathlib import Path
 
@@ -71,6 +88,31 @@ BACKEND_DIR = Path(
 sys.path.insert(0, str(BACKEND_DIR))
 os.chdir(BACKEND_DIR)
 
+#: The commit ``docker/examples/*/catalog.json`` and the pre-overlay mirror code
+#: last existed in.  Overridable for a future baseline.
+BASELINE_COMMIT = os.environ.get("MIRROR_BASELINE_COMMIT") or "9518be1"
+
+
+def _dot_free_root(*candidates: Path) -> Path | None:
+    """The first candidate whose absolute path has no dot-prefixed component.
+
+    ``services.hub._visible_names`` refuses a file when *any* part of its path
+    starts with ``.`` — including the scratch directories above it.  A fixture
+    tree under ``/home/me/.cache`` would therefore be invisible to the very
+    scanners under test, and the gate would report production failures that are
+    its own.  ``None`` means no such directory is available and the sections
+    that scan a directory have to be skipped.
+    """
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:  # pragma: no cover - unresolvable path
+            continue
+        if not any(part.startswith(".") for part in resolved.parts):
+            return resolved
+    return None
+
+
 # The app reads its configuration once, at import — so the throwaway roots and
 # every switch that could leak in from the outside have to be set before anything
 # under `config`/`services` is imported.  `SEED_CATALOGS` in particular: a shell
@@ -79,8 +121,15 @@ os.chdir(BACKEND_DIR)
 _SCRATCH = Path(os.environ.get("MIRROR_SCRATCH") or (BACKEND_DIR.parent / "scratch"))
 _SCRATCH.mkdir(parents=True, exist_ok=True)
 _TMP = Path(tempfile.mkdtemp(prefix="mirror-check-", dir=_SCRATCH))
-_CACHE = Path(
-    os.environ.get("MIRROR_BASELINE_CACHE") or (_SCRATCH / "mirror-baseline")
+
+#: Where every directory the *scanners* read is built: the scan fixtures, the
+#: endpoint directories and the self-fetched baseline.  Kept apart from ``_TMP``
+#: because ``MIRROR_SCRATCH`` may be a dotted path.
+_FIXTURE_BASE = _dot_free_root(_SCRATCH, Path(tempfile.gettempdir()), BACKEND_DIR.parent)
+_FIXTURES = (
+    Path(tempfile.mkdtemp(prefix="mirror-fixtures-", dir=_FIXTURE_BASE))
+    if _FIXTURE_BASE is not None
+    else None
 )
 
 os.environ["SEED_CATALOGS"] = "1"
@@ -509,9 +558,24 @@ def _check_export(session) -> None:
 
 # ── 5. The scanners ──────────────────────────────────────────────────
 
+def _find(items: list[dict], key: str, value: str) -> dict:
+    """The one item whose *key* is *value*, or an empty dict.
+
+    A lookup that misses is a failed check, never a ``KeyError``: this gate is
+    also run cold, where a surprise should be reported, not raised.
+    """
+    for item in items:
+        if item.get(key) == value:
+            return item
+    return {}
+
+
 def _check_scanners(session) -> None:
     section("hub.scan_npm()")
-    npm_dir = _TMP / "scan-npm"
+    if _FIXTURES is None:
+        print("   ⚠ no dot-free directory for scanner fixtures — section skipped")
+        return
+    npm_dir = _FIXTURES / "scan-npm"
     npm_dir.mkdir(parents=True, exist_ok=True)
     (npm_dir / "widget-1.0.0.tgz").write_bytes(b"tgz-widget")
     (npm_dir / "gadget-2.0.0.tgz").write_bytes(b"tgz-gadget")
@@ -541,20 +605,23 @@ def _check_scanners(session) -> None:
     )
     by_name = {item["name"]: item for item in payload["packages"]}
     check("from-file" not in by_name, "the directory's catalog.json still changes nothing")
-    check(by_name["widget"]["description"] == "bound to the file by name",
+    widget = _find(payload["packages"], "name", "widget")
+    zzz = _find(payload["packages"], "name", "zzz-meta")
+    ghost = _find(payload["packages"], "name", "ghost")
+    check(widget.get("description") == "bound to the file by name",
           "a row is merged onto the tarball by package name")
-    check(by_name["widget"]["size"] is not None
-          and by_name["widget"]["download_url"].endswith("/widget-1.0.0.tgz"),
+    check(widget.get("size") is not None
+          and str(widget.get("download_url") or "").endswith("/widget-1.0.0.tgz"),
           "a file-backed entry reports its size and download URL")
-    check(by_name["zzz-meta"]["download_url"] is None
-          and by_name["zzz-meta"]["size"] is None,
+    check(zzz.get("download_url") is None and zzz.get("size") is None,
           "a metadata-only row has nothing to download")
-    check(by_name["zzz-meta"]["tags"] == ["z"] and by_name["zzz-meta"]["version"] == "3.0.0",
+    check(zzz.get("tags") == ["z"] and zzz.get("version") == "3.0.0",
           "a metadata-only row keeps its tags and version")
-    check(by_name["ghost"]["filename"] == "ghost-9.9.9.tgz",
+    check(ghost.get("filename") == "ghost-9.9.9.tgz",
           "a row whose file is absent is reported with its filename")
     order = [item["name"] for item in payload["packages"]]
-    check(order.index("zzz-meta") < order.index("aaa-meta"),
+    check("zzz-meta" in order and "aaa-meta" in order
+          and order.index("zzz-meta") < order.index("aaa-meta"),
           "metadata-only rows keep insertion order, not path order")
     check(payload["package_count"] == len(payload["packages"]),
           "package_count matches the list")
@@ -563,7 +630,7 @@ def _check_scanners(session) -> None:
           "a missing npm directory degrades to an empty catalog")
 
     section("hub.scan_flat()")
-    flat_dir = _TMP / "scan-debian"
+    flat_dir = _FIXTURES / "scan-debian"
     flat_dir.mkdir(parents=True, exist_ok=True)
     (flat_dir / "curl_8.5.0_arm64.deb").write_bytes(b"deb-curl")
     (flat_dir / "sources.list.example").write_text("deb http://x\n", encoding="utf-8")
@@ -596,23 +663,24 @@ def _check_scanners(session) -> None:
         url_prefix="/debian/files", mirror="",
     )
     by_filename = {item["filename"]: item for item in payload["artifacts"] if item["filename"]}
-    bound = by_filename["curl_8.5.0_arm64.deb"]
-    check(bound["name"] == "Curl Display" and bound["description"] == "overridden"
-          and bound["tags"] == ["net"],
+    bound = by_filename.get("curl_8.5.0_arm64.deb") or {}
+    check(bound.get("name") == "Curl Display" and bound.get("description") == "overridden"
+          and bound.get("tags") == ["net"],
           "a row naming a file overrides that file's metadata")
-    check(bound["download_url"].endswith("/curl_8.5.0_arm64.deb")
-          and bound["size"] is not None and bound["sha256"],
+    check(str(bound.get("download_url") or "").endswith("/curl_8.5.0_arm64.deb")
+          and bound.get("size") is not None and bound.get("sha256"),
           "the file-backed entry keeps its size, digest and URL")
-    check("absent_1.0.0_all.deb" in by_filename
-          and by_filename["absent_1.0.0_all.deb"]["download_url"] is None,
+    absent = by_filename.get("absent_1.0.0_all.deb") or {}
+    check(bool(absent) and absent.get("download_url") is None,
           "a row whose file is absent is metadata-only")
     order = [item["name"] for item in payload["artifacts"]]
-    check(order.index("meta-zzz") < order.index("meta-aaa"),
+    check("meta-zzz" in order and "meta-aaa" in order
+          and order.index("meta-zzz") < order.index("meta-aaa"),
           "flat metadata-only rows keep insertion order")
     check(payload["artifact_count"] == len(payload["artifacts"]),
           "artifact_count matches the list")
 
-    docker_dir = _TMP / "scan-docker"
+    docker_dir = _FIXTURES / "scan-docker"
     docker_dir.mkdir(parents=True, exist_ok=True)
     (docker_dir / "nginx-1.25.3.tar").write_bytes(b"tar")
     (docker_dir / "docker-compose.example.yml").write_text("services: {}\n", encoding="utf-8")
@@ -714,26 +782,89 @@ def _check_cli_fixes(session) -> None:
     check(paths == ["unnamed"], "[F3] its row identity is `unnamed`")
     check("unnamed" in names, "[F3] it appears in the npm overlay")
 
-    unnamed_dirs = _TMP / "unnamed-dirs"
-    for namespace in ("npm", "debian", "docker-images"):
-        (unnamed_dirs / namespace).mkdir(parents=True, exist_ok=True)
-    dump = _run_endpoint_dump(BACKEND_DIR, _TMP / "endpoint-unnamed.json", "unnamed",
-                              unnamed_dirs, db_path=fix_db)
-    check(dump["/api/v1/npm"]["status"] == 200, "[F3] /api/v1/npm still answers 200")
-    served = json.loads(dump["/api/v1/npm"]["body"])
-    check(any(item.get("name") == "unnamed" for item in served.get("packages", [])),
-          "[F3] the package named `unnamed` is served by /api/v1/npm")
+    unnamed_dirs = _FIXTURES / "unnamed-dirs" if _FIXTURES is not None else None
+    if unnamed_dirs is None:
+        print("   ⚠ no dot-free directory for the endpoint fixture — "
+              "the /api/v1/npm check is skipped")
+    else:
+        for namespace in ("npm", "debian", "docker-images"):
+            (unnamed_dirs / namespace).mkdir(parents=True, exist_ok=True)
+        dump = _run_endpoint_dump(BACKEND_DIR, _TMP / "endpoint-unnamed.json", "unnamed",
+                                  unnamed_dirs, db_path=fix_db)
+        check(dump["/api/v1/npm"]["status"] == 200, "[F3] /api/v1/npm still answers 200")
+        served = json.loads(dump["/api/v1/npm"]["body"])
+        check(any(item.get("name") == "unnamed" for item in served.get("packages", [])),
+              "[F3] the package named `unnamed` is served by /api/v1/npm")
 
 
-# ── 6. Endpoints versus the pre-change checkout ──────────────────────
+# ── 6. Endpoints versus the pre-change tree ─────────────────────────
 
-def _baseline_backend() -> Path | None:
+def _repo_root() -> Path | None:
+    """The git work tree that holds ``BASELINE_COMMIT``, or ``None``."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(BACKEND_DIR.parent), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    root = Path(proc.stdout.strip())
+    return root if root.is_dir() else None
+
+
+def _prepare_baseline() -> tuple[Path, Path] | None:
+    """The pre-change ``(backend, docker/examples)``, or ``None``.
+
+    ``BASELINE_BACKEND_DIR`` is honoured when the caller has already extracted a
+    checkout.  Otherwise the tree is fetched from the repository under test with
+    ``git archive <BASELINE_COMMIT> backend docker/examples`` — so a cold run on
+    a machine that has never seen this gate still gets the full comparison
+    instead of depending on a previous run's cache.  Everything is unpacked
+    under the dot-free ``_FIXTURES``, because the example directories are served
+    by the app and therefore scanned.
+    """
     configured = os.environ.get("BASELINE_BACKEND_DIR")
     if configured:
-        candidate = Path(configured).resolve()
-        return candidate if candidate.is_dir() else None
-    candidate = BACKEND_DIR.parent.parent / "wt-base" / "backend"
-    return candidate if candidate.is_dir() else None
+        backend = Path(configured).resolve()
+        examples = backend.parent / "docker" / "examples"
+        if (backend / "app.py").is_file() and examples.is_dir():
+            return backend, examples
+        return None
+    if _FIXTURES is None:
+        return None
+    root = _repo_root()
+    if root is None:
+        return None
+
+    target = _FIXTURES / "baseline"
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True)
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "archive", BASELINE_COMMIT,
+             "backend", "docker/examples"],
+            capture_output=True, timeout=180,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    try:
+        with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as archive:
+            archive.extractall(target, filter="data")
+    except TypeError:  # pragma: no cover - Python without the extraction filter
+        with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as archive:
+            archive.extractall(target)
+    except tarfile.TarError:
+        return None
+    backend = target / "backend"
+    examples = target / "docker" / "examples"
+    if not (backend / "app.py").is_file() or not examples.is_dir():
+        return None
+    return backend, examples
 
 
 def _copy_example_dirs(source: Path, target: Path) -> None:
@@ -769,47 +900,33 @@ def _write_bogus_catalog_json(dirs: Path) -> None:
 _ENDPOINT_PATHS = ("/api/v1/npm", "/api/v1/debian", "/api/v1/docker")
 
 
-def _check_endpoints() -> None:
+def _check_endpoints(baseline: tuple[Path, Path] | None) -> None:
     section("Endpoint byte-equality versus the pre-change code")
-    pristine = _CACHE / "example-dirs"
-    baseline_path = _CACHE / "baseline.json"
-    baseline_nocat_path = _CACHE / "baseline-nocat.json"
-    backend = _baseline_backend()
-
-    if not baseline_path.is_file():
-        if backend is None or backend == BACKEND_DIR:
-            print("   ⚠ no baseline checkout and no cached baseline — section skipped")
-            print(f"     set BASELINE_BACKEND_DIR=<old checkout>/backend (cache: {_CACHE})")
-            return
-        examples = backend.parent / "docker" / "examples"
-        if not examples.is_dir():
-            print(f"   ⚠ {examples} does not exist — section skipped")
-            return
-        if pristine.exists():
-            shutil.rmtree(pristine)
-        _copy_example_dirs(examples, pristine)
-
-    if not pristine.is_dir():
-        print("   ⚠ cached baseline has no example directories — section skipped")
+    if baseline is None:
+        print("   ⚠ no pre-change baseline (no git / no BASELINE_BACKEND_DIR) — "
+              "section skipped")
+        return
+    backend, examples = baseline
+    if backend.resolve() == BACKEND_DIR:
+        print("   ⚠ BASELINE_BACKEND_DIR is the tree under test — section skipped")
         return
 
-    dirs = _CACHE / "endpoint-dirs"
+    pristine = _FIXTURES / "example-dirs"
+    dirs = _FIXTURES / "endpoint-dirs"
+    _copy_example_dirs(examples, pristine)
     _copy_example_dirs(pristine, dirs)
 
-    if not baseline_path.is_file():
-        baseline = _run_endpoint_dump(backend, baseline_path, "baseline", dirs)
-        _remove_catalog_json(dirs)
-        _run_endpoint_dump(backend, baseline_nocat_path, "baseline-nocat", dirs)
-        _restore_catalog_json(pristine, dirs)
-    else:
-        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    baseline_payload = _run_endpoint_dump(backend, _TMP / "baseline.json", "baseline", dirs)
+    _remove_catalog_json(dirs)
+    baseline_nocat = _run_endpoint_dump(backend, _TMP / "baseline-nocat.json",
+                                        "baseline-nocat", dirs)
+    _restore_catalog_json(pristine, dirs)
 
-    baseline_app = Path(baseline["_app"]).resolve()
-    check(baseline_app != Path(BACKEND_DIR, "app.py").resolve(),
+    check(Path(baseline_payload["_app"]).resolve() == (backend / "app.py").resolve(),
+          "the baseline run really imported the pre-change app")
+    check(Path(baseline_payload["_app"]).resolve()
+          != Path(BACKEND_DIR, "app.py").resolve(),
           "the captured baseline came from a different tree than this one")
-    if backend is not None:
-        check(baseline_app == (backend / "app.py").resolve(),
-              "the captured baseline is the pre-change checkout's app")
 
     # One app boot per phase: with the real catalog.json, with it deleted, and
     # with a bogus one in its place.  All three must equal the baseline.
@@ -830,17 +947,15 @@ def _check_endpoints() -> None:
     for label, payload in phases:
         for path in _ENDPOINT_PATHS:
             check(payload[path]["status"] == 200, f"{path} answers 200 {label}")
-            check(payload[path]["body"] == baseline[path]["body"],
+            check(payload[path]["body"] == baseline_payload[path]["body"],
                   f"{path} {label} is byte-for-byte the pre-change response")
 
     # The baseline has to be a real baseline: the *old* code must change when the
     # file is taken away, or the comparisons above prove nothing.
-    if baseline_nocat_path.is_file():
-        baseline_nocat = json.loads(baseline_nocat_path.read_text(encoding="utf-8"))
-        changed = [path for path in _ENDPOINT_PATHS
-                   if baseline_nocat[path]["body"] != baseline[path]["body"]]
-        check(len(changed) == 3,
-              "the old code's own response depends on catalog.json (all three endpoints)")
+    changed = [path for path in _ENDPOINT_PATHS
+               if baseline_nocat[path]["body"] != baseline_payload[path]["body"]]
+    check(len(changed) == 3,
+          "the old code's own response depends on catalog.json (all three endpoints)")
 
 
 # ── 7. First-run seeding ─────────────────────────────────────────────
@@ -966,23 +1081,23 @@ def _check_one_shot(engine) -> None:
 
 # ── 8. A database that predates the overlay rows ─────────────────────
 
-def _check_legacy_upgrade() -> None:
+def _check_legacy_upgrade(baseline: tuple[Path, Path] | None) -> None:
     section("Upgrading a pre-overlay database")
-    backend = _baseline_backend()
-    legacy_path = _CACHE / "legacy.db"
-    legacy_report_path = _CACHE / "legacy-pre.json"
-    if not legacy_report_path.is_file():
-        if backend is None or backend == BACKEND_DIR:
-            print("   ⚠ no pre-change checkout and no cached legacy database — section skipped")
-            return
-        legacy_path.unlink(missing_ok=True)
-        env = _tree_env(backend, legacy_path, _TMP, tag="legacy")
-        stdout = _run_code(backend, _LEGACY_CREATE_CODE, env, "legacy database creation")
-        report = json.loads(stdout.strip().splitlines()[-1])
-        legacy_report_path.write_text(json.dumps(report), encoding="utf-8")
-    before = json.loads(legacy_report_path.read_text(encoding="utf-8"))
+    if baseline is None:
+        print("   ⚠ no pre-change baseline (no git / no BASELINE_BACKEND_DIR) — "
+              "section skipped")
+        return
+    backend, _examples = baseline
+    if backend.resolve() == BACKEND_DIR:
+        print("   ⚠ BASELINE_BACKEND_DIR is the tree under test — section skipped")
+        return
+
+    legacy_path = _TMP / "legacy.db"
+    env = _tree_env(backend, legacy_path, _FIXTURES, tag="legacy")
+    stdout = _run_code(backend, _LEGACY_CREATE_CODE, env, "legacy database creation")
+    before = json.loads(stdout.strip().splitlines()[-1])
     if not legacy_path.is_file():
-        print("   ⚠ the cached legacy database is missing — section skipped")
+        print("   ⚠ the pre-change code wrote no database — section skipped")
         return
 
     check(not {"version", "arch", "kind"} & set(before["columns"]),
@@ -992,8 +1107,7 @@ def _check_legacy_upgrade() -> None:
     check(before["entry_counts"].get("tools") == 8,
           "the pre-change database has the tools rows")
 
-    shutil.copy2(legacy_path, _TMP / "legacy.db")
-    upgraded = init_engine(f"sqlite:///{_TMP / 'legacy.db'}")
+    upgraded = init_engine(f"sqlite:///{legacy_path}")
     columns = {item["name"] for item in inspect(upgraded).get_columns("catalog_entries")}
     check({"version", "arch", "kind"} <= columns,
           "opening it adds the three overlay columns")
@@ -1046,8 +1160,11 @@ def _check_seed_objects() -> None:
 
 def main() -> int:
     print(f"backend under test: {BACKEND_DIR}")
-    print(f"baseline cache:     {_CACHE}")
     print(f"temporary root:     {_TMP}")
+    print(f"fixture root:       {_FIXTURES}")
+
+    baseline = _prepare_baseline()
+    print(f"pre-change baseline: {baseline[0] if baseline else 'none (sections will skip)'}")
 
     main_engine = init_engine(f"sqlite:///{_TMP / 'gate.db'}")
     Main = sessionmaker(bind=main_engine, expire_on_commit=False)
@@ -1066,10 +1183,10 @@ def main() -> int:
     _check_seed(seed_engine)
     _check_consistency(seed_engine)
 
-    _check_legacy_upgrade()
+    _check_legacy_upgrade(baseline)
     _check_seed_objects()
     _check_one_shot(seed_engine)
-    _check_endpoints()
+    _check_endpoints(baseline)
 
     print()
     if failures:
@@ -1077,9 +1194,13 @@ def main() -> int:
         for item in failures:
             print(f"   - {item}")
         print(f"temporary root kept for inspection: {_TMP}")
+        if _FIXTURES is not None:
+            print(f"fixture root kept for inspection:   {_FIXTURES}")
         return 1
     print(f"✅ mirror catalog check passed ({checks} checks)")
     shutil.rmtree(_TMP, ignore_errors=True)
+    if _FIXTURES is not None:
+        shutil.rmtree(_FIXTURES, ignore_errors=True)
     return 0
 
 
