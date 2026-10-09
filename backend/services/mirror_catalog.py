@@ -35,12 +35,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models.catalog import CatalogEntry
 from services import namespaces
+from services.hub import Overlay, OverlayItem
 
 #: The mirror namespaces whose metadata lives here, in the order the CLI lists.
 MIRRORS: tuple[str, ...] = namespaces.MIRRORS
@@ -87,16 +89,16 @@ def check_namespace(namespace: str) -> str:
     return namespace
 
 
-def overlay(session: Session, namespace: str) -> dict:
+def overlay(session: Session, namespace: str) -> Overlay:
     """The rows of *namespace* in the shape :mod:`services.hub` merges.
 
     The scanners take this dict instead of reading a file, so the file is no
     longer a source of truth for anything the request path serves.
     """
     check_namespace(namespace)
-    items = []
+    items: list[OverlayItem] = []
     for row in entries(session, namespace):
-        item = {
+        item: OverlayItem = {
             "filename": row.filename,
             "name": row.display_name,
             "version": row.version,
@@ -132,7 +134,7 @@ def default_path(namespace: str) -> Path:
     return Path(namespaces.root_for(namespace)) / namespaces.OVERLAY_FILENAME
 
 
-def path_for(namespace: str, item: dict) -> str:
+def path_for(namespace: str, item: OverlayItem) -> str:
     """The row identity of one overlay item.
 
     ``filename`` when the entry names a file — that is what the file scan
@@ -179,7 +181,7 @@ def import_file(
         if not key or key == "unnamed":
             continue
         seen.add(key)
-        fields = _fields(namespace, item)
+        fields = entry_fields(namespace, item)
         row = existing.get(key)
         if row is None:
             session.add(CatalogEntry(namespace=namespace, path=key, **fields))
@@ -249,8 +251,13 @@ def _read_overlay(path: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def _fields(namespace: str, item: dict) -> dict:
-    """The mutable columns one overlay item sets."""
+def entry_fields(namespace: str, item: OverlayItem) -> dict[str, Any]:
+    """The mutable columns one overlay item sets.
+
+    Public because :mod:`config.seed`'s generator builds the same columns when it
+    turns an overlay file into ``.sql``: the mapping from a JSON key to a column
+    must not exist twice.
+    """
     fields = {
         # "" is the sentinel for "no file"; see CatalogEntry.filename.
         "filename": str(item.get("filename") or ""),
@@ -274,6 +281,7 @@ __all__ = [
     "check_namespace",
     "default_path",
     "entries",
+    "entry_fields",
     "export_file",
     "import_file",
     "overlay",

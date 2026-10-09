@@ -35,15 +35,48 @@ from __future__ import annotations
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 from urllib.parse import quote
 
 from services.digest import sha256_or_none
 from services.format import human_size, iso_from_timestamp
+from services.namespaces import OVERLAY_FILENAME
 
 
-#: Files that are catalog metadata rather than catalog entries.
-_OVERLAY_FILENAME = "catalog.json"
+# ── Overlay shape ────────────────────────────────────────────────────
+# The scanners used to read a ``catalog.json`` themselves; now a caller hands
+# them the rows (``services.mirror_catalog.overlay``) as this shape.  A
+# TypedDict rather than a dataclass on purpose: the value is JSON all the way
+# down — it is exported to ``catalog.json`` unchanged — so keeping it a dict
+# keeps the merge, the export and the endpoint payload one representation.
+
+class OverlayItem(TypedDict, total=False):
+    """One metadata entry merged over the scanner's own view of a file.
+
+    ``total=False`` because a producer omits an empty field instead of writing a
+    null: that is what makes the merged entry byte-identical to the
+    ``catalog.json`` an operator has always had.
+    """
+
+    filename: str
+    name: str
+    version: str
+    arch: str
+    kind: str
+    description: str
+    tags: list[str]
+
+
+class Overlay(TypedDict, total=False):
+    """A mirror's overlay, keyed by the namespace's overlay top key.
+
+    npm says ``packages``; the flat mirrors (debian, docker-images) say
+    ``artifacts``.  See :data:`services.namespaces.Namespace.overlay_key`.
+    """
+
+    packages: list[OverlayItem]
+    artifacts: list[OverlayItem]
+
 
 #: Documentation next to the artifacts is not itself an artifact.
 _DOC_PREFIXES = ("readme", "license", "changelog")
@@ -69,7 +102,7 @@ def _visible_names(parts: Sequence[str]) -> bool:
     if not parts:
         return False
     name = parts[-1]
-    if name == _OVERLAY_FILENAME:
+    if name == OVERLAY_FILENAME:
         return False
     return not name.lower().startswith(_DOC_PREFIXES)
 
@@ -114,7 +147,7 @@ def _npm_tarball_entry(path: Path, *, url_prefix: str, meta: dict[str, Any]) -> 
 def scan_npm(
     root: str,
     *,
-    overlay: dict[str, Any] | None = None,
+    overlay: Overlay | None = None,
     upstream: str = "",
     url_prefix: str = "/npm/files",
 ) -> dict[str, Any]:
@@ -272,7 +305,7 @@ def scan_flat(
     url_prefix: str,
     parse: Any,
     extra: dict[str, Any] | None = None,
-    overlay: dict[str, Any] | None = None,
+    overlay: Overlay | None = None,
 ) -> dict[str, Any]:
     """Catalog a flat directory of artifacts (docker images, .deb files, …).
 
@@ -374,7 +407,7 @@ def _parse_debian_filename(filename: str) -> dict[str, Any]:
 def scan_docker(
     root: str,
     *,
-    overlay: dict[str, Any] | None = None,
+    overlay: Overlay | None = None,
     url_prefix: str,
     registry: str = "",
 ) -> dict[str, Any]:
@@ -391,7 +424,7 @@ def scan_docker(
 def scan_debian(
     root: str,
     *,
-    overlay: dict[str, Any] | None = None,
+    overlay: Overlay | None = None,
     url_prefix: str,
     mirror: str = "",
 ) -> dict[str, Any]:
@@ -454,6 +487,8 @@ def debian_packages_index(catalog: dict[str, Any]) -> str:
 # modules.  This module keeps only the artifact catalogs.
 
 __all__ = [
+    "Overlay",
+    "OverlayItem",
     "parse_docker_filename",
     "scan_npm",
     "npm_all_index",

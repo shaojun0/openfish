@@ -52,6 +52,7 @@ from services import namespaces, objectstore
 from services.digest import sha256_of
 from services.fileio import read_json, write_json
 from services.format import human_size
+from services.namespaces import OVERLAY_FILENAME
 from services.objectstore import ObjectInfo
 from services.paths import contained
 
@@ -67,9 +68,6 @@ DOC_PREFIXES = ("readme", "license", "changelog")
 #: :data:`services.objectstore.OBJECTS_DIRNAME`).  Reserved: an import that
 #: walked into it would catalogue the objects it had just written.
 RESERVED_DIRS = (objectstore.OBJECTS_DIRNAME,)
-
-#: The overlay file, imported and exported but never the source of truth.
-OVERLAY_FILENAME = "catalog.json"
 
 # ── Queries ──────────────────────────────────────────────────────────
 
