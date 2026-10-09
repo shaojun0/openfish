@@ -50,10 +50,12 @@ MIRRORS: tuple[str, ...] = namespaces.MIRRORS
 
 
 def top_key(namespace: str) -> str:
-    """The overlay key each namespace's file uses.  npm's file says ``packages``;
-    the flat mirrors (debian, docker-images) say ``artifacts``."""
-    return namespaces.overlay_key(namespace)
+    """The overlay key each namespace's file uses.
 
+    npm's file says ``packages``; the flat mirrors (debian, docker-images) say
+    ``artifacts``.  The registry is the one place that decides.
+    """
+    return namespaces.overlay_key(namespace)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +111,9 @@ def overlay(session: Session, namespace: str) -> Overlay:
         if namespace != namespaces.NPM:
             item["arch"] = row.arch
             item["kind"] = row.kind
-        items.append({key: value for key, value in item.items() if value not in (None, NO_FILE)})
+        items.append({
+            key: value for key, value in item.items() if value not in (None, NO_FILE)
+        })
     return {top_key(namespace): items}
 
 
@@ -235,7 +239,11 @@ def export_file(session: Session, namespace: str, path: str | Path) -> OverlayRe
         if namespace != namespaces.NPM:
             item["arch"] = row.arch
             item["kind"] = row.kind
-        items.append({key: value for key, value in item.items() if value not in (None, NO_FILE, [])})
+        items.append({
+            key: value
+            for key, value in item.items()
+            if value not in (None, NO_FILE, [])
+        })
     payload: Overlay = {top_key(namespace): items}
     write_json(target, payload)
     return OverlayReport(namespace=namespace, path=str(target), exported=len(items))

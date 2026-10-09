@@ -97,7 +97,12 @@ def ensure_seed(engine: Engine, *, force: bool = False) -> list[SeedOutcome]:
     return outcomes
 
 
-def _seed_namespace(engine: Engine, entry: namespaces.Namespace, *, force: bool = False) -> SeedOutcome:
+def _seed_namespace(
+    engine: Engine,
+    entry: namespaces.Namespace,
+    *,
+    force: bool = False,
+) -> SeedOutcome:
     sql_path = entry.seed_path
     if sql_path is None or not sql_path.is_file():
         return SeedOutcome(entry.name, "absent")
