@@ -1,4 +1,4 @@
-"""SHA-256 digests of on-disk artifacts — one cache, one hashing loop.
+"""SHA-256 digests of artifacts — one cache, one hashing loop.
 
 Three callers need the digest of a file that may be very large:
 
@@ -14,8 +14,12 @@ They used to implement that separately, with different caches keyed on different
 things and different side effects.  This is the single implementation, with two
 levels that share one hashing loop:
 
-* an in-memory cache keyed on ``(path, mtime_ns, size)``, so an edited file
-  misses automatically and an untouched one is never read twice;
+* an in-memory cache keyed on a **stamp** — whatever identifies the content
+  version of the bytes.  For a path that is ``(resolved path, mtime_ns, size)``,
+  so an edited file misses automatically and an untouched one is never read
+  twice; a store passes ``(namespace, key, modified, size)``, the same idea for
+  a medium that has no path.  One cache, because "the digest of this version of
+  these bytes" is one question.
 * an optional ``<file>.sha256`` sidecar for the package tree, which is what
   makes a cold start cheap.  A sidecar records the stat it was computed from
   (``<mtime_ns>:<size>:<digest>``), so it too goes stale by itself rather than
@@ -26,7 +30,9 @@ from __future__ import annotations
 
 import hashlib
 import threading
+from collections.abc import Hashable, Iterable
 from pathlib import Path
+from typing import IO
 
 #: Read size for the streaming hash: large enough that a multi-GB archive on an
 #: SSD is not dominated by syscalls.
@@ -36,15 +42,14 @@ _BLOCKSIZE = 8 << 20
 _HEXLEN = 64
 _HEXDIGITS = frozenset("0123456789abcdef")
 
-#: ``(resolved path, mtime_ns, size) -> digest``.  Bounded at
-#: :data:`_CACHE_MAX` entries (oldest out) so a long-lived process that sees many
-#: edits cannot grow it without limit.
+#: ``stamp -> digest``.  Bounded at :data:`_CACHE_MAX` entries (oldest out) so a
+#: long-lived process that sees many edits cannot grow it without limit.
 _CACHE_MAX = 8192
-_cache: dict[tuple[str, int, int], str] = {}
+_cache: dict[Hashable, str] = {}
 _lock = threading.Lock()
 
 
-def _remember(key: tuple[str, int, int], digest: str) -> None:
+def _remember(key: Hashable, digest: str) -> None:
     """Cache one digest, evicting the oldest entries past the cap."""
     with _lock:
         _cache[key] = digest
@@ -107,12 +112,36 @@ def sha256_text(text: str, *, encoding: str = "utf-8") -> str:
     return _hexdigest(text.encode(encoding))
 
 
-def _hash_file(path: Path) -> str:
+def sha256_of(chunks: Iterable[bytes], *, stamp: Hashable | None = None) -> str:
+    """SHA-256 of a byte stream, memoised on *stamp*.
+
+    The one hashing loop.  :func:`sha256_or_none` feeds it a file's blocks and
+    :func:`sha256_of_reader` feeds it a store object's, so the algorithm and its
+    cache exist once for both media.  *stamp* must change whenever the bytes do
+    — a path passes ``(resolved path, mtime_ns, size)``, a store passes
+    ``(namespace, key, modified, size)`` — because it *is* the cache key: a
+    caller with no version identity to offer passes ``None`` and gets a correct
+    digest with no memo.
+    """
+    if stamp is not None:
+        with _lock:
+            cached = _cache.get(stamp)
+        if cached is not None:
+            return cached
+
     digester = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for block in iter(lambda: fh.read(_BLOCKSIZE), b""):
-            digester.update(block)
-    return digester.hexdigest()
+    for block in chunks:
+        digester.update(block)
+    digest = digester.hexdigest()
+
+    if stamp is not None:
+        _remember(stamp, digest)
+    return digest
+
+
+def sha256_of_reader(handle: IO[bytes], *, stamp: Hashable | None = None) -> str:
+    """SHA-256 of an open binary stream, memoised on *stamp*."""
+    return sha256_of(iter(lambda: handle.read(_BLOCKSIZE), b""), stamp=stamp)
 
 
 def compute_sha256(file_path: str | Path, *, sidecar: bool = True) -> str:
@@ -171,11 +200,11 @@ def sha256_or_none(
                 return digest
 
     try:
-        digest = _hash_file(path)
+        with open(path, "rb") as fh:
+            digest = sha256_of_reader(fh, stamp=key)
     except OSError:
         return None
 
-    _remember(key, digest)
     if sidecar_file is not None:
         _write_sidecar(sidecar_file, _stamp(st), digest)
     return digest
@@ -207,6 +236,8 @@ def store_digest(file_path: str | Path, digest: str) -> None:
 __all__ = [
     "compute_sha256",
     "invalidate_digest_cache",
+    "sha256_of",
+    "sha256_of_reader",
     "sha256_or_none",
     "sha256_text",
     "store_digest",

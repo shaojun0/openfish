@@ -345,13 +345,19 @@ export interface DocAsset {
   url: string
 }
 
-/** One documentation document (a folder project). */
+/** One documentation document (a row plus its stored revision). */
 export interface DocEntry {
-  /** Folder id — the key used to read/edit/delete and to address assets. */
+  /** URL slug — the key used to read/edit/delete and to address assets. */
   id: string
-  /** Display title: the stored title, the first `#` heading, or the id. */
+  /** Display title: the stored title, the first `#` heading, or the slug. */
   title: string
   filename: string
+  /**
+   * Current revision. Sent back with a save so a write based on a document
+   * someone else has since changed is refused (`409`) instead of overwriting
+   * their edit.
+   */
+  revision: number
   size: number
   size_human: string
   modified: string | null
@@ -645,10 +651,13 @@ export async function saveDoc(
   ecosystem: string,
   docId: string,
   content: string,
+  revision?: number,
 ): Promise<DocDetail> {
   const data = await putJson<DocDetail>(
     `/docs/${encodeURIComponent(ecosystem)}/${encodeURIComponent(docId)}`,
-    { content },
+    // `revision` is what the editor loaded; the server answers `409` when it is
+    // no longer current. Omit it only for a caller that never read one.
+    { content, ...(revision === undefined ? {} : { revision }) },
   )
   return data
 }

@@ -8,13 +8,35 @@ collaboration history, findings, review runs and the agent task queue); its
 constants and ``to_dict()`` serializers are re-exported here so callers can say
 ``from models import FINDING_STATUS`` instead of reaching into the module.
 ``model_route`` is the model-routing registry the ``/models`` panel edits and a
-downstream DSH reads.
+downstream DSH reads.  ``catalog`` is the artifact-catalog index (categories and
+entries for the tools catalog, whose display metadata used to live in a
+``catalog.json`` file), and ``docs`` is the documentation registry: which
+documents exist, what each revision was, and which assets belong to them.  In all
+three the bytes live behind :mod:`services.objectstore`, under an opaque key.
 """
 
 from __future__ import annotations
 
 from .base import Base
 from .api_key import ApiKey, ApiKeyStats
+from .catalog import (
+    TOOLS_NAMESPACE,
+    CatalogCategory,
+    CatalogEntry,
+    category_of,
+    overlay_metadata,
+)
+from .docs import (
+    ASSET_NAME_MAX,
+    DOC_CONTENT_TYPE,
+    KEY_MAX,
+    SLUG_MAX,
+    TITLE_MAX,
+    Document,
+    DocumentAsset,
+    DocumentRevision,
+    new_key,
+)
 from .agent_hub import (
     CHECK_AUTHOR,
     CHECK_RUN_STATE,
@@ -67,6 +89,22 @@ __all__ = [
     "ModelRoute",
     "KINDS",
     "PROVIDERS",
+    # ── Artifact catalogs ────────────────────────────────────────────
+    "CatalogCategory",
+    "CatalogEntry",
+    "TOOLS_NAMESPACE",
+    "category_of",
+    "overlay_metadata",
+    # ── Documentation registry ───────────────────────────────────────
+    "Document",
+    "DocumentAsset",
+    "DocumentRevision",
+    "ASSET_NAME_MAX",
+    "DOC_CONTENT_TYPE",
+    "KEY_MAX",
+    "SLUG_MAX",
+    "TITLE_MAX",
+    "new_key",
     # ── Agent Hub tables ─────────────────────────────────────────────
     "AgentTask",
     "CheckRun",

@@ -42,6 +42,29 @@ class BadRequestError(PypiError):
         super().__init__(message=message, status_code=400)
 
 
+class RevisionConflictError(PypiError):
+    """409 for a documentation save whose base revision is stale.
+
+    The documentation editor loads a revision and sends it back with the save;
+    when someone else saved in between, refusing the write is the only outcome
+    that does not silently discard one of the two edits.  Both numbers are in
+    the message on purpose: a caller cannot resolve a conflict it cannot see,
+    and the SPA shows the operator what it lost to.  The body is the ordinary
+    ``PypiError`` envelope (``{"error": "<message>"}``), so the client's
+    existing error path renders it without a new branch.
+    """
+
+    def __init__(self, doc_id: str, *, expected: int, current: int) -> None:
+        super().__init__(
+            f"文档 {doc_id} 已被他人修改：你基于 revision {expected}，当前是 "
+            f"revision {current}。请刷新后重新应用你的修改。",
+            status_code=409,
+        )
+        self.doc_id = doc_id
+        self.expected = expected
+        self.current = current
+
+
 class UnauthorizedError(PypiError):
     def __init__(
         self,

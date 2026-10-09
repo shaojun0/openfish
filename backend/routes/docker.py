@@ -67,10 +67,11 @@ from openapi import api_operation, binary, errors, json_body, ok
 from routes.hub_common import spa_url, wants_json
 from schemas import DockerTagsQuery, DockerUploadForm
 from services import docker_registry as registry
-from services import hub, hub_upload
+from services import hub, hub_upload, objectstore
 
 
 docker_bp = APIBlueprint("docker", __name__)
+
 
 _DOCKER_SCHEMA = {
     "type": "object",
@@ -147,9 +148,9 @@ def _registry_error(exc: registry.DockerRegistryError) -> Response:
       the caller already sent, so they disclose nothing the caller did not
       arrive with.
     * From ``5xx`` up the failure is the *upstream's*: its message can carry the
-      upstream URL, a TLS error or a response body.  It is replaced with the
-      generic OCI ``UNAVAILABLE`` text, so a probe of this proxy cannot turn it
-      into a map of the network behind it.
+      upstream URL, a TLS error or a response body.  That is logged for the
+      operator and replaced with the generic OCI ``UNAVAILABLE`` text, so a probe
+      of this proxy cannot turn it into a map of the network behind it.
 
     A new message on the 4xx tier therefore has to stay static — never
     ``f"...{response.text}"`` or a URL — or it belongs on the redacted tier.
@@ -531,11 +532,12 @@ def upload_docker_artifact(form: DockerUploadForm):
     upload = form.file
     if not getattr(upload, "filename", None):
         raise BadRequestError("multipart/form-data 需要一个 file 字段")
-    target = hub_upload.docker_target(settings.hub.docker_dir, upload.filename)
-    hub_upload.save(target, upload)
-    entry = _docker_entry_by_filename(target.name)
+    key = hub_upload.docker_key(upload.filename)
+    store = objectstore.catalog_store("docker", settings.hub.docker_dir)
+    hub_upload.save(store, key, upload)
+    entry = _docker_entry_by_filename(key.rsplit("/", 1)[-1])
     if entry is None:
-        # `docker_target` refuses every name the scanner hides; reaching here
+        # `docker_key` refuses every name the scanner hides; reaching here
         # means the scanner's visibility rule changed under us.
         raise PypiError(
             "已写入文件，但 Docker 目录扫描未列出它；请检查 DOCKER_DIR 的可见性规则",

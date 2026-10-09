@@ -8,17 +8,13 @@ Docker catalogs have admin-only upload endpoints that write through
 :mod:`services.hub_upload` — but the endpoint is only a convenience in front of
 the same directory, never a second store.
 
-Layout
-------
-``tools/``::
-
-    tools/
-      catalog.json            optional display overlay (names, descriptions)
-      dev/                    a category (directory name = category slug)
-        fmt.sh
-        lint.py
-      ops/
-        check-health.sh
+The **tools** catalog is no longer here: it is a table-plus-object store now
+(:mod:`services.tool_catalog`), because listing it meant walking a directory and
+hashing it on every page load and because its display metadata was one more file
+to keep on disk.  What remains in this module are the catalogs whose *layout is
+the protocol* — an npm tarball beside its ``catalog.json``, an apt ``pool/``, a
+``docker save`` tarball — where the path is what a client asks for and the
+directory is the index::
 
 ``npm/``::
 
@@ -37,6 +33,7 @@ rather than on disk; :mod:`services.model_routes` owns it.
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -60,121 +57,47 @@ _HASH_LIMIT_BYTES = 64 * 1024 * 1024
 
 # ── Small helpers ────────────────────────────────────────────────────
 
-def _sha256(path: Path) -> str | None:
-    """SHA-256 of *path* when it is small enough to be worth hashing."""
-    return sha256_or_none(path, max_bytes=_HASH_LIMIT_BYTES)
+def _visible_names(parts: Sequence[str]) -> bool:
+    """The visibility rule, over the name parts of one entry.
+
+    The rule (no dotfile anywhere in the chain, no overlay, no
+    README/LICENCE/CHANGELOG) lives here once and is applied to the file
+    catalogs this module still serves; the tools catalog keeps the same rule in
+    :mod:`services.tool_catalog`, where the import reads a tree.
+    """
+    if any(part.startswith(".") for part in parts):
+        return False
+    if not parts:
+        return False
+    name = parts[-1]
+    if name == _OVERLAY_FILENAME:
+        return False
+    return not name.lower().startswith(_DOC_PREFIXES)
 
 
 def _load_overlay(root: Path) -> dict[str, Any]:
     """Read ``catalog.json`` when present; never let a bad file 500 the page."""
-    data = read_json(root / _OVERLAY_FILENAME, default={})
+    return _as_overlay(read_json(root / _OVERLAY_FILENAME, default={}))
+
+
+def _as_overlay(data: Any) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
 def _visible(path: Path) -> bool:
     """Skip dotfiles, the overlay and the README/licence that documents a tree."""
-    if any(part.startswith(".") for part in path.parts):
-        return False
-    if path.name == _OVERLAY_FILENAME:
-        return False
-    return not path.name.lower().startswith(_DOC_PREFIXES)
+    return _visible_names(path.parts)
 
 
-# ── Tools catalog ────────────────────────────────────────────────────
+def _sha256(path: Path) -> str | None:
+    """SHA-256 of one file, when it is small enough to be worth hashing.
 
-def _tool_entry(
-    root: Path,
-    file_path: Path,
-    *,
-    url_prefix: str,
-    meta: dict[str, Any],
-) -> dict[str, Any]:
-    stat = file_path.stat()
-    rel = file_path.relative_to(root).as_posix()
-    return {
-        "name": meta.get("name") or file_path.name,
-        "filename": file_path.name,
-        "relative_path": rel,
-        # Quote each segment but keep the separators so nested tools still work.
-        "download_url": f"{url_prefix.rstrip('/')}/{quote(rel)}",
-        "size": stat.st_size,
-        "size_human": human_size(stat.st_size),
-        "sha256": _sha256(file_path),
-        "modified": iso_from_timestamp(stat.st_mtime),
-        "description": meta.get("description"),
-        "tags": list(meta.get("tags") or []),
-    }
-
-
-def scan_tools(root: str, *, url_prefix: str = "/tools") -> dict[str, Any]:
-    """Group every file under *root* into its category directory.
-
-    Files sitting directly in *root* land in a synthetic ``root`` category the
-    UI labels "uncategorized"; a category with no files is reported too, so an
-    empty category is visible instead of silently missing.
+    The flat catalogs (docker / debian / npm) still name paths, so they hash one
+    — through the same :mod:`services.digest` cache the tools catalog reaches via
+    :func:`services.objectstore.digest_of`.  Moving them onto the store is the
+    next step; until then both are the same rule, one cache.
     """
-    base = Path(root)
-    if not base.is_dir():
-        return {
-            "root": str(base),
-            "exists": False,
-            "url_prefix": url_prefix,
-            "categories": [],
-            "tool_count": 0,
-        }
-
-    overlay = _load_overlay(base)
-    cat_meta: dict[str, Any] = overlay.get("categories") or {}
-    tool_meta: dict[str, Any] = overlay.get("tools") or {}
-
-    categories: list[dict[str, Any]] = []
-
-    # ── Root-level files → the synthetic "root" category ────────────
-    root_files = sorted(p for p in base.iterdir() if p.is_file() and _visible(p))
-    if root_files:
-        categories.append({
-            "slug": "root",
-            "name": None,
-            "description": None,
-            "icon": (cat_meta.get("root") or {}).get("icon"),
-            "tools": [
-                _tool_entry(base, f, url_prefix=url_prefix, meta=tool_meta.get(f.name) or {})
-                for f in root_files
-            ],
-        })
-
-    # ── One category per immediate sub-directory ────────────────────
-    for directory in sorted((p for p in base.iterdir() if p.is_dir()), key=lambda p: p.name):
-        if not _visible(directory):
-            continue
-        meta = cat_meta.get(directory.name) or {}
-        files = sorted(
-            (p for p in directory.rglob("*") if p.is_file() and _visible(p)),
-            key=lambda p: p.relative_to(directory).as_posix(),
-        )
-        categories.append({
-            "slug": directory.name,
-            "name": meta.get("name") or directory.name,
-            "description": meta.get("description"),
-            "icon": meta.get("icon"),
-            "tools": [
-                _tool_entry(
-                    base,
-                    f,
-                    url_prefix=url_prefix,
-                    meta=tool_meta.get(f.relative_to(base).as_posix()) or {},
-                )
-                for f in files
-            ],
-        })
-
-    return {
-        "root": str(base),
-        "exists": True,
-        "url_prefix": url_prefix,
-        "categories": categories,
-        "tool_count": sum(len(c["tools"]) for c in categories),
-    }
+    return sha256_or_none(path, max_bytes=_HASH_LIMIT_BYTES)
 
 
 # ── npm catalog ──────────────────────────────────────────────────────
@@ -518,7 +441,6 @@ def debian_packages_index(catalog: dict[str, Any]) -> str:
 
 __all__ = [
     "parse_docker_filename",
-    "scan_tools",
     "scan_npm",
     "npm_all_index",
     "scan_docker",

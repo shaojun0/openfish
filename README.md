@@ -29,11 +29,13 @@ the codebase.
 - **Ecosystem documentation** — every ecosystem group owns its own
   documentation leaf (`/documentation/python`, `/documentation/npm`,
   `/documentation/docker`, …) holding
-  that ecosystem's Markdown documents, stored as folder projects under
-  `DOCS_DIR/<ecosystem>/` with their own assets. Any signed-in user can read
-  and download them; only an administrator can create, edit or delete one —
-  through the **in-browser Markdown editor** (formatting toolbar + live
-  preview). See [Ecosystem documentation](#ecosystem-documentation).
+  that ecosystem's Markdown documents, stored in the `documents` table (bytes
+  behind the storage port) with their own assets and a full revision history.
+  Any signed-in user can read and download them; only an administrator can
+  create, edit or delete one — through the **in-browser Markdown editor**
+  (formatting toolbar + live preview). Every save carries the revision it was
+  based on, so two editors cannot silently overwrite each other.
+  See [Ecosystem documentation](#ecosystem-documentation).
 - **API keys** — issue, list, revoke and track per-key usage from a web
   dashboard; keys are stored hashed, in SQLite or PostgreSQL.
 - **Pluggable authentication** — HTTP Basic, twine-style `__token__` Basic,
@@ -286,7 +288,9 @@ Templates are provided at `backend/.env.example` (local development) and
 | `DEBIAN_CACHE_MAX_MB`   | `256`                  | Byte budget for the apt metadata cache             |
 | `DEBIAN_METADATA_TTL`   | `300`                  | Seconds a proxied `Release`/`Packages` document is trusted |
 | `MODEL_PROBE_TIMEOUT`   | `5`                    | Seconds allowed for one route connectivity probe    |
-| `DOCS_DIR`              | `<project>/docker/docs` | Per-ecosystem Markdown documentation root — one sub-directory per ecosystem, one folder project per document |
+| `OBJECT_BACKEND`        | `local`                | Catalog medium: `local` (a directory) or `s3` (an S3-compatible bucket, needs the `s3` extra); see [Storage backend](#storage-backend-local-or-s3) |
+| `S3_ENDPOINT` / `S3_BUCKET_NAME` / `S3_REGION` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` / `S3_ADDRESS_STYLE` / `S3_PREFIX` | *(empty)* | `OBJECT_BACKEND=s3` only. MinIO/Ceph want `S3_ADDRESS_STYLE=path`; the bucket must be pre-created |
+| `DOCS_DIR`              | `<project>/docker/docs` | Documentation root. The catalog lives in the `documents`/`document_revisions`/`document_assets` tables; this directory holds the stored objects under `objects/` and is where `cli.py docs import` reads a hand-written tree from by default |
 
 Nested fields can also be addressed with the `__` delimiter, e.g.
 `SERVER__PORT=9091`.
@@ -542,7 +546,7 @@ first, and an optional upstream mirror is fetched on demand and cached:
 | Debian       | `/debian`  | `DEBIAN_DIR`         | `DEBIAN_UPSTREAM`   | flat `Packages` + apt mirror proxy (`dists/`, `pool/`) |
 | 工具 / Tools | `/tools`   | `TOOLS_DIR`          | —                   | direct file downloads |
 | 模型路由     | `/models`  | `model_routes` 表（随 `API_KEYS_FILE` / `DATABASE_URL`） | —    | DB route table — read by everyone, **added/edited/probed by admins**；全新部署用 `config/model_routes.seed.sql` 预置 |
-| 文档 / Docs  | `/documentation/<eco>` | `DOCS_DIR/<eco>/<id>/` | —                | Markdown folder projects — read by everyone, **created/edited by admins** |
+| 文档 / Docs  | `/documentation/<eco>` | `documents` 表 + `DOCS_DIR/objects/` | —   | Markdown documents with revisions and per-document assets — read by everyone, **created/edited by admins**；`docker/docs/` 的文件夹树仍可用 `cli.py docs import/export` 往返 |
 
 The Python and npm pages each carry a **dropdown** that switches the page
 between its two sub-elements — packages vs. prebuilt builds for Python, npm
@@ -743,22 +747,60 @@ a route an administrator has since edited.
 Every ecosystem group in the sidebar carries a **documentation leaf of its own**
 — `/documentation/python`, `/documentation/npm`, `/documentation/docker`,
 `/documentation/debian`, `/documentation/tools` and `/documentation/models` —
-rather than one shared entry at the top of the menu. A document
-is a small **folder project**: its Markdown source, a `meta.json` title record,
-and its own `assets/` directory, so screenshots belong to the document that uses
-them instead of every ecosystem sharing one flat pile:
+rather than one shared entry at the top of the menu. A document is a **row plus
+an object**, not a folder: `documents` holds its identity (`ecosystem` +
+`slug` is the URL, `id` is the stable identity its history hangs off),
+`document_revisions` holds every version ever saved, `document_assets` holds
+the images and attachments it owns, and the bytes live in the **storage port**
+(`services/objectstore.py`) under `<DOCS_DIR>/objects/` — **one bare `uuid4` per
+object, no extension and no path**:
 
 ```
 docker/docs/
-  python/
+  objects/
+    8f14e45f-…-c9f0     # revision 1 of a document (a uuid4; the row knows the rest)
+    e2f7a19c-…-41bd     # revision 2 — the previous body is never overwritten
+    4b3c9e02-…-77aa     # an asset
+  python/                 # optional: a hand-written tree you can still import
     getting-started/
-      document.md          # the Markdown source
-      meta.json            # {title, created, modified}
-      assets/              # images the document references as assets/<name>
-  npm/
-    publishing/
       document.md
+      meta.json            # {title, created, modified}
+      assets/
 ```
+
+The key says nothing about the object: it is an identifier, and the row carries
+the media type, the display name and the public path. `objects/` is a reserved
+name inside a catalog directory — it is where the store lives, so the import
+walks the operator's tree and never the objects it wrote a moment ago.
+
+**Tools work the same way.**  `catalog_entries` + `catalog_categories` are the
+tools catalog — one row per artifact (public path, filename, display name,
+description, tags, media type, size, digest) and one per category — with the
+bytes under `<TOOLS_DIR>/objects/<uuid4>`.  `catalog.json` is no longer a second
+source of truth: it is the *import/export format* (`cli.py tools import|export`),
+so the display metadata an operator used to keep in that file is a row now, and
+the page is a query instead of a directory walk:
+
+```bash
+cd backend && python cli.py tools import          # or --dry-run / --prune
+python cli.py tools export --to /tmp/tools-backup # writes the files + catalog.json
+```
+
+Copying a file into `TOOLS_DIR` is no longer enough on its own — say
+`tools import` once (or upload it from the Tools page) and it is in the catalog.
+
+**Why it moved out of the tree.**  A folder was the identity, so: an edit left
+no trace and could not be undone; two editors saving from the same page
+silently overwrote each other; and the tree lived in the operator's work tree,
+where a browser save dirtied `git status` and a `git checkout` could take the
+only copy.  None of that is true now.
+
+**Versioning and conflicts.**  Every save writes a *new* immutable object and a
+`document_revisions` row.  The editor sends the `revision` it loaded with each
+save; a save whose base is no longer current is answered `409` (naming both
+revisions) instead of overwriting the other edit, and the buffer is kept so no
+work is lost.  Re-uploading an asset under the same name replaces it, which is
+what the asset panel has always done.
 
 **Who may do what.** Reading and downloading require `doc:read`, which the
 built-in `authenticated` role holds — every signed-in user can read the
@@ -794,21 +836,115 @@ document also has raw forms:
 * `GET /docs/<ecosystem>/<id>/assets/<name>` — one asset (images inline, other
   types as an attachment).
 
-The directory is the catalog, so a change is visible on the next request — no
-restart, no database.
+**Moving documents in and out.**  The folder layout is still the friendliest
+way to hand a set of documents to (or take one from) a disconnected
+deployment, and it is the layout this feature used to *be*, so an existing
+`DOCS_DIR` migrates as-is.  **Upgrading a deployment that has documents in
+`DOCS_DIR`: run `docs import` once — the catalogue now starts empty, because the
+database did not exist before:**
 
-All the artifact catalogs work the same way. Publishing through the browser is
+```bash
+cd backend
+python cli.py docs import                 # read DOCS_DIR into the database (idempotent)
+python cli.py docs import --dry-run       # report what would change first
+python cli.py docs export --to /tmp/docs-backup
+python cli.py docs history python getting-started
+python cli.py docs show python getting-started --revision 1 --out old.md
+```
+
+An import is idempotent: a document whose content and title are already stored
+is skipped rather than given another revision, so re-running it after dropping
+one more file in is safe.  `meta.json`'s `created`/`modified` are carried
+across, so a migration does not rewrite the catalog's dates to "the afternoon
+the import ran".
+
+**Storage is a port, not a path.**  The tools catalog and the documentation
+objects are read and written through `services/objectstore.py`
+(`put`/`open`/`stat`/`exists`/`delete`/`delete_many`/`walk`), which has two backends:
+the local directory (the default — a key *is* a path under the catalog root, so
+today's behaviour is literally yesterday's) and an S3-compatible bucket.  Keys
+stay human-readable POSIX paths on both: the catalogs *are* directory trees,
+because pip, npm, apt and Docker clients fetch by path and an operator's mental
+model is the tree.  See [Storage backend](#storage-backend-local-or-s3) below.
+npm, Debian and the package index still name paths directly; moving them onto
+the port is a separate step.
+
+All the artifact catalogs publish the same way — a copy into the catalog
+directory is the whole publish step. Publishing through the browser is
 deliberately narrow: documentation, tools and Docker artifacts each have an
 administrator-only upload (`doc:upload`, `tool:upload`, `docker:upload`), npm
 accepts a client's `npm publish`, and Debian stays copy-only — an operator drops
 a `.deb` into `DEBIAN_DIR`. A package fetched through a proxy also leaves a
 cached copy behind. The Docker image creates
 `/app/tools`, `/app/npm`, `/app/node-builds`, `/app/docker-images`,
-`/app/debian` and `/app/docs`, and
+`/app/debian` and `/app/docs` (plus an `objects/` sub-directory inside the tools
+and docs roots, where the port keeps the payload), and
 `docker/docker-compose.yml` bind-mounts the repository copies so an operator can
 edit them in place; the caches live under `/app/data/cache`, on the same
-persistent volume as the API-key database.
+persistent volume as the API-key database. `docker/tools` and `docker/docs` are
+**not** committed any more — they are operator data, gitignored and seeded from
+`docker/examples/` by `docker/prepare-mounts.sh`, exactly like the other
+mirrors.
 
+
+### Storage backend (local or S3)
+
+The catalogs live on a **storage port**, and which medium sits behind it is a
+configuration choice rather than a rewrite:
+
+| `OBJECT_BACKEND` | Where the bytes are | Keys |
+| --- | --- | --- |
+| `local` (default) | `<DOCS_DIR|TOOLS_DIR>/objects/<uuid4>` | the uuid4 |
+| `s3` | an S3-compatible bucket (MinIO, Ceph RGW, cloud S3) | `<S3_PREFIX>/<catalog>/<uuid4>` |
+
+Switching to a bucket needs the optional extra, because a local deployment
+should not carry boto3:
+
+```bash
+pip install '.[s3]'                                   # source deployment
+docker compose build --build-arg OPENFISH_EXTRAS=s3 backend   # image
+```
+
+A bucket to point at, if you do not already run one (openfish never creates
+it — `mc mb` is the operator's one-time step):
+
+```bash
+docker run -d --name minio -p 9000:9000 \
+  -e MINIO_ROOT_USER=openfish -e MINIO_ROOT_PASSWORD=change-me \
+  -v minio-data:/data minio/minio server /data
+docker run --rm --network host minio/mc \
+  alias set local http://127.0.0.1:9000 openfish change-me mb local/openfish
+```
+
+```ini
+OBJECT_BACKEND=s3
+S3_ENDPOINT=http://minio:9000        # any S3-compatible endpoint
+S3_BUCKET_NAME=openfish              # must already exist: the server never creates one
+S3_REGION=us-east-1                  # MinIO ignores it; a signature needs one anyway
+S3_ACCESS_KEY=…
+S3_SECRET_KEY=…
+S3_ADDRESS_STYLE=path                # MinIO/Ceph; `auto` for AWS
+S3_PREFIX=openfish                   # optional: several deployments can share a bucket
+```
+
+Everything the local backend does still holds: the catalog keeps its directory
+shape (`walk` reports the directories the keys imply), a download is streamed
+with `Content-Length`, `Last-Modified`, `ETag` and `Range`, and an operator's
+`docker/docs/<ecosystem>/<slug>/document.md` tree still imports with
+`cli.py docs import` — the *source* of an import is a directory; only the
+destination follows `OBJECT_BACKEND`.
+
+To check a bucket's wiring before pointing a deployment at it (it writes only
+under a `smoke/` prefix and removes what it created):
+
+```bash
+cd backend && OBJECT_BACKEND=s3 S3_ENDPOINT=… S3_BUCKET_NAME=… python scripts/s3_smoke.py
+```
+
+The offline gate suite covers the S3 backend through an in-memory double
+(`scripts/check_catalog_store.py`, 88 checks over both catalogs), so `make gates`
+needs no bucket and no network; `s3_smoke.py` is the part that needs the real
+thing.
 
 ### Static index elements
 

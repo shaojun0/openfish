@@ -575,6 +575,8 @@ export default {
     save: 'Save',
     saved: 'Saved',
     saveFailed: 'Failed to save the document',
+    conflictTitle: 'Save conflict',
+    conflictBadge: 'Conflict',
     discard: 'Discard changes',
     unsavedClose: 'There are unsaved changes. Close anyway?',
     unsavedBadge: 'Unsaved',

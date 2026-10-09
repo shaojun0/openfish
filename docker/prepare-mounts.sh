@@ -9,10 +9,10 @@
 # -----
 #   ./prepare-mounts.sh
 #       Local defaults.  Each artifact mirror becomes a real, empty directory
-#       seeded from docker/examples/<name>/, and docker/data links to
-#       ../backend/data.  That link is what keeps `cd backend && python app.py`
-#       and the containers on one database — which now also holds the model
-#       route table.
+#       seeded from docker/examples/<name>/, and so do the two operator-written
+#       catalogs (tools, docs).  docker/data links to ../backend/data.  That
+#       link is what keeps `cd backend && python app.py` and the containers on
+#       one database — which now also holds the model route table.
 #
 #   ./prepare-mounts.sh /media/disk/openfish-mirror
 #       The deployment layout: the five artifact mirrors become symlinks into
@@ -46,6 +46,14 @@ PROJECT_DIR="$(dirname "$DOCKER_DIR")"
 #: the data root itself because PACKAGES_DIR / PYTHON_BUILDS_DIR are sub-paths
 #: of it (`/app/share/python`, `/app/share/python-build-standalone`).
 MIRRORS=(share npm node-builds docker-images debian)
+
+#: Operator-written catalogs.  Unlike the mirrors these are *not* moved to the
+#: data disk automatically — they are created as real directories seeded from
+#: ``docker/examples/<name>/`` and gitignored, so the browser upload endpoints
+#: never write into the work tree.  Re-pointing one at a data disk is still just
+#: ``ln -sfn /srv/data/tools docker/tools``: :func:`seed_dir` leaves a symlink
+#: alone, which is what makes both layouts work.
+CATALOGS=(tools docs)
 
 log()  { printf '  %s\n' "$*"; }
 warn() { printf '  ! %s\n' "$*" >&2; }
@@ -106,6 +114,14 @@ else
         seed_dir "$DOCKER_DIR/$name" "$name"
     done
 fi
+
+# ── Operator-written catalogs ───────────────────────────────────────────────
+# Created (and seeded from the samples) either way: a data-disk layout may have
+# emptied them, and a fresh checkout has nothing there at all.  `seed_dir`
+# keeps an existing directory and an existing symlink untouched.
+for name in "${CATALOGS[@]}"; do
+    seed_dir "$DOCKER_DIR/$name" "$name"
+done
 
 # ── Runtime state: one database (queue + model route table) for both entry points
 mkdir -p "$PROJECT_DIR/backend/data"

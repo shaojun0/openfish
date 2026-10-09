@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+
 def atomic_write_bytes(path: Path, data: bytes) -> None:
     """Write *data* to *path* atomically (see the module docstring)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,24 +92,38 @@ def write_json(path: Path, payload: Any) -> None:
     atomic_write_bytes(path, text.encode("utf-8"))
 
 
+def parse_json(text: str, default: Any = None) -> Any:
+    """Parse *text* as JSON, returning *default* when it is malformed.
+
+    The "a bad catalog file must not 500 the page that reads it" rule, split out
+    of :func:`read_json` so the same rule applies to a document read through
+    :mod:`services.objectstore` instead of a path: a malformed overlay degrades
+    to the default, silently, exactly as a missing one does.
+    """
+    try:
+        return json.loads(text)
+    except ValueError:
+        return default
+
+
 def read_json(path: Path, default: Any = None) -> Any:
     """Parse *path* as JSON, returning *default* when it is missing or invalid.
 
     A catalog or state file is operator-owned: a malformed one must degrade to
-    the default rather than 500 the page that reads it.  A missing file is not
-    worth a log line — it is the normal state of an optional overlay — but a
-    file that exists and cannot be parsed is.
+    the default rather than 500 the page that reads it, and so must one that
+    cannot be read at all.
     """
     try:
         text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    except OSError:
         return default
-    except OSError as exc:
-        return default
-    try:
-        return json.loads(text)
-    except ValueError as exc:
-        return default
+    return parse_json(text, default=default)
 
 
-__all__ = ["atomic_write_bytes", "atomic_write_stream", "read_json", "write_json"]
+__all__ = [
+    "atomic_write_bytes",
+    "atomic_write_stream",
+    "parse_json",
+    "read_json",
+    "write_json",
+]

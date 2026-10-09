@@ -293,7 +293,7 @@ class DockerUploadForm(BaseModel):
     recognise and makes it look among the form's *text* fields instead — the
     trap ``PyPIUploadForm`` documents at length.
 
-    Which names may be stored is a rule of ``services.hub_upload.docker_target``
+    Which names may be stored is a rule of ``services.hub_upload.docker_key``
     (one path segment, an allowed suffix, a name the catalog will list), not of
     this model: the model's only job is to carry the part.  Whether the part has
     a usable *filename* is checked in the view, because a part with an empty one
@@ -312,22 +312,37 @@ class DocsContentRequest(BaseModel):
     """JSON body of the documentation editor's write and preview routes.
 
     ``PUT /api/v1/docs/<ecosystem>/<doc_id>`` and its ``/preview`` sibling both
-    replace one document's Markdown with ``content``; they used to share a
+    take one document's Markdown as ``content``; they used to share a
     ``_json_content()`` helper that read ``request.get_json(silent=True)`` and
     answered anything that was not ``{"content": "<str>"}`` with a prose ``400``.
     The binding owns that shape now — the endpoint's own ``request_body`` has
     always advertised ``required: ["content"]`` — so the helper is gone and the
     refusal arrives in the usual ``validation_error`` envelope.
 
-    Only ``content`` is declared: the body has always been just
-    ``{"content": "…"}``, and neither route reads a second key.  (The
-    ``?format=`` content negotiation belongs to the server-rendered index at
-    ``GET /docs/<ecosystem>/``, and ``POST /api/v1/docs/<ecosystem>`` — the
+    ``revision`` is the optimistic-concurrency token: the editor received it
+    with the document it loaded and sends it back, and a save whose base is
+    older than what is stored is refused with a ``409`` instead of overwriting
+    the other edit.  It is **optional**, and must be: the same model binds
+    ``/preview``, which touches nothing and has no revision to name, and an API
+    client that never read a revision keeps the historical last-write-wins
+    behaviour rather than being refused.  ``exclude_unset`` semantics apply —
+    absent means "no check", not "revision 0".
+
+    (The ``?format=`` content negotiation belongs to the server-rendered index
+    at ``GET /docs/<ecosystem>/``, and ``POST /api/v1/docs/<ecosystem>`` — the
     create route — takes ``title``/``file`` parts instead of this body.)
     """
 
     content: str = Field(
         description="The document's full Markdown source, replacing what is stored"
+    )
+    revision: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "The revision this edit is based on; a stale value is refused with "
+            "`409`. Omit to save unconditionally."
+        ),
     )
 
 

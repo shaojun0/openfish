@@ -10,7 +10,7 @@ import {
   type DocAsset,
   type DocDetail,
 } from '@/api'
-import { apiError } from '@/api/client'
+import { apiError, apiStatus } from '@/api/client'
 import DocAssetManager from '@/components/DocAssetManager.vue'
 
 /**
@@ -47,6 +47,14 @@ const mode = ref<'edit' | 'split' | 'preview'>('split')
 const saving = ref(false)
 const previewing = ref(false)
 const assetsOpen = ref(false)
+/** The revision this buffer is based on — the token a save is checked against. */
+const revision = ref(0)
+/**
+ * True after the server refused a save because someone else saved first.  The
+ * buffer is deliberately *kept*: the operator's work is the one thing a
+ * conflict must not throw away, so the editor stays dirty and says why.
+ */
+const conflict = ref(false)
 
 const dirty = computed(() => content.value !== baseline.value)
 let previewTimer: ReturnType<typeof setTimeout> | undefined
@@ -232,14 +240,26 @@ async function save(): Promise<void> {
   if (!props.doc || saving.value) return
   saving.value = true
   try {
-    const detail = await saveDoc(props.ecosystem, props.doc.id, content.value)
+    const detail = await saveDoc(
+      props.ecosystem,
+      props.doc.id,
+      content.value,
+      revision.value,
+    )
+    revision.value = detail.revision
+    conflict.value = false
     baseline.value = content.value
     assets.value = detail.assets
     previewHtml.value = detail.html
     ElMessage.success(t('docs.saved'))
     emit('saved', detail)
   } catch (e) {
-    ElMessage.error(apiError(e) || t('docs.saveFailed'))
+    if (apiStatus(e) === 409) {
+      conflict.value = true
+      ElMessageBox.alert(apiError(e), t('docs.conflictTitle'), { type: 'warning' })
+    } else {
+      ElMessage.error(apiError(e) || t('docs.saveFailed'))
+    }
   } finally {
     saving.value = false
   }
@@ -286,6 +306,8 @@ watch(
     baseline.value = props.doc.content
     previewHtml.value = props.doc.html
     assets.value = props.doc.assets
+    revision.value = props.doc.revision ?? 0
+    conflict.value = false
     mode.value = 'split'
     void runPreview()
   },
@@ -389,7 +411,9 @@ onBeforeUnmount(() => {
       <div class="doc-editor__footer">
         <span class="doc-editor__status">
           <span :class="dirty ? 'doc-editor__dirty' : 'doc-editor__clean'">
-            {{ dirty ? t('docs.unsavedBadge') : t('docs.savedBadge') }}
+            {{ conflict
+              ? t('docs.conflictBadge')
+              : dirty ? t('docs.unsavedBadge') : t('docs.savedBadge') }}
           </span>
           <code class="doc-editor__path">{{ doc.id }}/document.md</code>
         </span>

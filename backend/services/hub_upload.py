@@ -1,30 +1,31 @@
 """Admin-only uploads into the tools and Docker artifact directories.
 
-The tools and Docker catalogs are file-backed: the filesystem is the source of
-truth, and the next scan lists whatever is on disk.  Until this module existed
-the only way to publish was to copy a file in by hand; the browser upload
-endpoints in :mod:`routes.hub` and :mod:`routes.docker` now do that copy safely.
+The tools and Docker catalogs are file-backed: the object store is the source of
+truth, and the next scan lists whatever is in it.  Until this module existed the
+only way to publish was to copy a file in by hand; the browser upload endpoints
+in :mod:`routes.hub` and :mod:`routes.docker` now do that copy safely.
 
 What "safely" buys, in one place so both ecosystems enforce identical rules:
 
 * **One path segment.**  A *filename* is a basename — no ``/``, no ``\\``, no
   ``..``, no dotfile — and a tools *category* is a single directory name with the
   same restrictions.  A category is optional: an empty one places the file at the
-  tools root, which :func:`services.hub.scan_tools` reports as the synthetic
+  tools root, which :func:`services.tool_catalog.scan` reports as the synthetic
   ``root`` (the UI calls it “uncategorized”).
 * **An allow-list, not a deny-list.**  Tools may use a broad set of script,
   archive, binary and config suffixes; Docker accepts the ``docker save``
   tarballs and the compose/Dockerfile snippets the catalog already recognises.
   The lists are explicit, so a mistaken upload is a ``400`` instead of a file the
   catalog cannot describe.
-* **A name the catalog will actually show.**  ``scan_tools``/``scan_flat``
+* **A name the catalog will actually show.**  ``tools import``/``scan_flat``
   deliberately hide dotfiles, ``catalog.json`` and the README/licence files that
   document a tree; accepting one would write a file the response could not then
   report.
 * **Streamed, atomic writes.**  The body is read in chunks and written to a
-  sibling temp file that is ``os.replace``d into place, so a multi-gigabyte image
-  never lands in memory and an aborted upload leaves the previous file (or no
-  file) behind — never a half-written one.
+  sibling temp file that is ``os.replace``d into place — or, for a store that is
+  not a directory, whatever that medium's atomic-write story is; a multi-gigabyte
+  image never lands in memory and an aborted upload leaves the previous object
+  (or no object) behind, never a half-written one.
 
 The size ceiling is :attr:`config.StorageConfig.max_content_length`, the same one
 twine uploads honour.  Werkzeug additionally refuses an oversized body before a
@@ -34,14 +35,13 @@ gives a clearer message.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Iterator
 
 from config import settings
 from errors import BadRequestError, PypiError
-from services.fileio import atomic_write_stream
 from services.format import human_size
-from services.paths import MAX_NAME_BYTES, contained, single_segment
+from services.objectstore import ObjectStore
+from services.paths import MAX_NAME_BYTES, single_segment
 
 #: Read size for an upload stream.  Large enough to keep the syscall count low,
 #: small enough that a broken client cannot make the server allocate much.
@@ -135,29 +135,32 @@ def _check_suffix(
     raise BadRequestError(f"不支持的文件类型 {name}；允许的扩展名：{allowed}{extra}")
 
 
-def tools_target(root: str, filename: str, category: str = "") -> Path:
-    """The absolute path an uploaded tool will occupy under *root*.
+def tools_path(filename: str, category: str = "") -> str:
+    """The **public path** an uploaded tool will be catalogued under.
 
-    *category* is the catalog's immediate sub-directory; an empty value means
-    the tools root, matching :func:`services.hub.scan_tools`.  Validation happens
-    here, before any byte is read, so a rejected upload never creates a file.
+    Not a storage key: the tools catalog keeps its address in the database
+    (``catalog_entries.path``) and stores the bytes under an opaque uuid, so this
+    is the URL tail and the name `tools export` writes back.  *category* is the
+    catalog's immediate sub-directory; an empty value means the root, which the
+    page shows as "uncategorized".  Validation happens here, before any byte is
+    read, so a rejected upload never creates an object.
     """
     name = _single_segment(filename, what="文件名")
     _check_listed(name, what="文件名")
     _check_suffix(name, TOOL_SUFFIXES)
     if not category:
-        return contained(root, name)
+        return name
     folder = _single_segment(category, what="分类名")
     _check_listed(folder, what="分类名")
-    return contained(root, folder, name)
+    return f"{folder}/{name}"
 
 
-def docker_target(root: str, filename: str) -> Path:
-    """The absolute path an uploaded Docker artifact will occupy under *root*."""
+def docker_key(filename: str) -> str:
+    """The key an uploaded Docker artifact will occupy inside the Docker store."""
     name = _single_segment(filename, what="文件名")
     _check_listed(name, what="文件名")
     _check_suffix(name, DOCKER_SUFFIXES, bare_names=DOCKER_BARE_NAMES)
-    return contained(root, name)
+    return name
 
 
 def _capped(stream, *, limit: int, name: str) -> Iterator[bytes]:
@@ -181,30 +184,40 @@ def _capped(stream, *, limit: int, name: str) -> Iterator[bytes]:
         raise BadRequestError(f"{name} 是空文件")
 
 
-def save(target: Path, upload, *, overwrite: bool | None = None) -> int:
-    """Stream one multipart *upload* onto *target*; return the bytes written.
+def save(
+    store: ObjectStore,
+    key: str,
+    upload,
+    *,
+    content_type: str | None = None,
+    overwrite: bool | None = None,
+) -> int:
+    """Stream one multipart *upload* onto *key* in *store*; return the bytes written.
 
-    An existing file is refused with ``409`` unless
+    An existing object is refused with ``409`` unless
     :attr:`config.StorageConfig.overwrite` is true (*overwrite* overrides the
     setting for a caller that knows better).  The read is chunked and capped at
-    :attr:`config.StorageConfig.max_content_length`; the write is atomic and the
-    published file is chmodded 0644 by :func:`services.fileio.atomic_write_stream`.
+    :attr:`config.StorageConfig.max_content_length`; the write goes through the
+    store's atomic put, so a reader never sees a half-written artifact.
     """
-    if target.is_dir():
-        raise BadRequestError(f"{target.name} 已是一个目录，无法作为文件写入")
+    name = key.rsplit("/", 1)[-1]
+    existing = store.stat(key)
+    if existing is not None and existing.is_dir:
+        raise BadRequestError(f"{name} 已是一个目录，无法作为文件写入")
     allow_overwrite = settings.storage.overwrite if overwrite is None else overwrite
-    if target.exists() and not allow_overwrite:
+    if existing is not None and not allow_overwrite:
         raise PypiError(
-            f"{target.name} 已存在；如需覆盖请设置 STORAGE__OVERWRITE=true",
+            f"{name} 已存在；如需覆盖请设置 STORAGE__OVERWRITE=true",
             status_code=409,
         )
-    return atomic_write_stream(
-        target,
+    return store.put(
+        key,
         _capped(
             upload.stream,
             limit=settings.storage.max_content_length,
-            name=target.name,
+            name=name,
         ),
+        content_type=content_type,
     )
 
 
@@ -214,7 +227,7 @@ __all__ = [
     "TOOL_SUFFIXES",
     "DOCKER_SUFFIXES",
     "DOCKER_BARE_NAMES",
-    "docker_target",
+    "docker_key",
     "save",
-    "tools_target",
+    "tools_path",
 ]

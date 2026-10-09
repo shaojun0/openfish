@@ -560,6 +560,8 @@ export default {
     save: '保存',
     saved: '已保存',
     saveFailed: '保存文档失败',
+    conflictTitle: '保存冲突',
+    conflictBadge: '有冲突',
     discard: '放弃修改',
     unsavedClose: '有未保存的修改，确定要关闭吗？',
     unsavedBadge: '未保存',

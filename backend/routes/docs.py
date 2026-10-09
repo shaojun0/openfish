@@ -1,18 +1,20 @@
-"""Per-ecosystem Markdown documentation — folder projects, assets, editing.
+"""Per-ecosystem Markdown documentation — documents, revisions, assets, editing.
 
 Each ecosystem group in the sidebar has its own **documentation leaf**
-(``/documentation/<ecosystem>`` — the SPA page) whose documents live as folder
-projects under ``DOCS_DIR/<ecosystem>/<id>/`` — each with its own
-``document.md``, a ``meta.json`` title record and an ``assets/`` directory for
-the images the document uses.  This blueprint is the whole surface of that
-feature:
+(``/documentation/<ecosystem>`` — the SPA page) whose documents live in the
+``documents`` table with their bytes behind :mod:`services.objectstore`; see
+:mod:`models.docs` for why the catalogue stopped being a directory tree.  A
+document keeps its own ``assets/`` set, its full revision history, and the URL
+shape it always had (``/docs/<ecosystem>/<slug>``).  This blueprint is the whole
+surface of that feature:
 
 =========================================  ==========================
 ``GET    /api/v1/docs``                    every ecosystem + doc count
 ``GET    /api/v1/docs/<eco>``              one ecosystem's catalog
 ``POST   /api/v1/docs/<eco>``              create/replace a document — ``doc:upload``
 ``GET    /api/v1/docs/<eco>/<id>``         one document (source + HTML + assets)
-``PUT    /api/v1/docs/<eco>/<id>``         save in-browser edits — ``doc:upload``
+``PUT    /api/v1/docs/<eco>/<id>``         save in-browser edits — ``doc:upload``;
+                                           a stale ``revision`` answers ``409``
 ``DELETE /api/v1/docs/<eco>/<id>``         delete a document — ``doc:upload``
 ``POST   /api/v1/docs/<eco>/<id>/preview`` render unsaved source — ``doc:upload``
 ``GET    /api/v1/docs/<eco>/<id>/assets``  list a document's assets
@@ -34,6 +36,12 @@ only to redirect to the canonical slashed form, so old bookmarks keep working.
 ``authenticated`` role holds, so every signed-in user can read the handbook.
 Changing anything requires ``doc:upload``, which only the built-in ``admin``
 role holds.
+
+**Saves are checked, not last-write-wins.**  The editor sends the ``revision``
+it loaded with every save; a save whose base is no longer current is refused
+with a ``409`` naming both revisions, so one editor's work cannot silently erase
+another's.  A client that omits the revision keeps the old behaviour — see
+``schemas.DocsContentRequest``.
 
 ⚠ Decorator order is load-bearing (see ``routes/python_build.py``): the route
 decorator — ``@docs_bp.route``, or ``@docs_bp.get``/``@docs_bp.put``/
@@ -68,17 +76,17 @@ from pathlib import Path
 from urllib.parse import quote
 
 from flask import (
-    abort, jsonify, redirect, render_template, request,
-    send_from_directory, url_for,
+    abort, jsonify, redirect, render_template, request, url_for,
 )
 from flask_openapi3 import APIBlueprint, validate_request
 
-from auth.decorators import require_permission
+from auth.decorators import current_sub, require_permission
 from auth.permissions import DOC_READ, DOC_UPLOAD
 from config import settings
-from errors import BadRequestError
+from errors import BadRequestError, RevisionConflictError
+from extensions.database import Session
 from openapi import api_operation, errors, ok
-from routes.hub_common import spa_url, wants_json
+from routes.hub_common import spa_url, stream_object, wants_json
 from schemas import DocsAssetUploadForm, DocsContentRequest, DocsDownloadQuery
 from services import docs, markdown
 
@@ -109,6 +117,13 @@ _DOCUMENT_SCHEMA = {
         "id": {"type": "string"},
         "title": {"type": "string"},
         "filename": {"type": "string"},
+        "revision": {
+            "type": "integer",
+            "description": (
+                "Current revision. The editor sends it back with a save; a save "
+                "whose base is stale is refused with `409`."
+            ),
+        },
         "size": {"type": "integer"},
         "size_human": {"type": "string"},
         "modified": {"type": ["string", "null"]},
@@ -212,7 +227,7 @@ def _asset_base(ecosystem: str, doc_id: str) -> str:
 
 def _catalog(ecosystem: str) -> dict:
     return docs.scan(
-        settings.hub.docs_dir,
+        Session,
         ecosystem,
         url_prefix=spa_url("/docs"),
         api_prefix=spa_url("/api/v1"),
@@ -222,7 +237,7 @@ def _catalog(ecosystem: str) -> dict:
 def _read(ecosystem: str, doc_id: str) -> dict:
     """Read one document and attach its rendered HTML."""
     entry = docs.read(
-        settings.hub.docs_dir, ecosystem, doc_id, api_prefix=spa_url("/api/v1")
+        Session, ecosystem, doc_id, api_prefix=spa_url("/api/v1")
     )
     entry["html"] = markdown.render(
         entry["content"], asset_base=_asset_base(ecosystem, doc_id)
@@ -266,7 +281,7 @@ def _decode_markdown(upload) -> str:
 def docs_overview():
     return jsonify(
         docs.scan_all(
-            settings.hub.docs_dir,
+            Session,
             url_prefix=spa_url("/docs"),
             api_prefix=spa_url("/api/v1"),
         )
@@ -359,7 +374,7 @@ def docs_create(ecosystem: str):
 
     try:
         entry, replaced = docs.save_document(
-            settings.hub.docs_dir, ecosystem, title=title, content=content
+            Session, ecosystem, title=title, content=content, actor=current_sub()
         )
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
@@ -421,7 +436,7 @@ def docs_document(ecosystem: str, doc_id: str):
     },
     responses={
         "200": ok("The stored document", _DOC_DETAIL_SCHEMA),
-        **errors("400", "401", "403", "404", "413", "500"),
+        **errors("400", "401", "403", "404", "409", "413", "500"),
     },
 )
 def docs_update(ecosystem: str, doc_id: str, body: DocsContentRequest):
@@ -431,9 +446,21 @@ def docs_update(ecosystem: str, doc_id: str, body: DocsContentRequest):
     # now the binder's `validation_error` envelope, with the same status.
     content = body.content
     try:
-        docs.save_content(settings.hub.docs_dir, ecosystem, doc_id, content)
+        docs.save_content(
+            Session,
+            ecosystem,
+            doc_id,
+            content,
+            revision=body.revision,
+            actor=current_sub(),
+        )
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
+    except RevisionConflictError:
+        # A PypiError(409) — the global handler renders its envelope, and the
+        # message names both revisions so the editor can tell the operator what
+        # it lost to.
+        raise
     except FileNotFoundError:
         abort(404, description="Document not found")
     return jsonify(_read(ecosystem, doc_id))
@@ -444,9 +471,9 @@ def docs_update(ecosystem: str, doc_id: str, body: DocsContentRequest):
 @api_operation(
     summary="Delete a documentation document",
     description=(
-        "Removes one document project — its Markdown, metadata and every "
-        "uploaded asset. Like the write endpoints this requires `doc:upload`; "
-        "reading access is not enough."
+        "Removes one document — every revision and every asset it owns. Like "
+        "the write endpoints this requires `doc:upload`; reading access is not "
+        "enough."
     ),
     tags=["Docs"],
     parameters=[_ECOSYSTEM_PARAM, _DOC_PARAM],
@@ -458,7 +485,7 @@ def docs_update(ecosystem: str, doc_id: str, body: DocsContentRequest):
 def docs_delete(ecosystem: str, doc_id: str):
     _require_ecosystem(ecosystem)
     try:
-        entry = docs.delete(settings.hub.docs_dir, ecosystem, doc_id)
+        entry = docs.delete(Session, ecosystem, doc_id)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     except FileNotFoundError:
@@ -522,8 +549,8 @@ def docs_preview(ecosystem: str, doc_id: str, body: DocsContentRequest):
 @api_operation(
     summary="List a document's assets",
     description=(
-        "Every file in the document project's own `assets/` directory — the "
-        "images and attachments its Markdown can reference as `assets/<name>`."
+        "Every asset the document owns — the images and attachments its "
+        "Markdown can reference as `assets/<name>`."
     ),
     tags=["Docs"],
     parameters=[_ECOSYSTEM_PARAM, _DOC_PARAM],
@@ -541,16 +568,14 @@ def docs_preview(ecosystem: str, doc_id: str, body: DocsContentRequest):
 def docs_assets(ecosystem: str, doc_id: str):
     _require_ecosystem(ecosystem)
     try:
-        docs.resolve_doc_file(settings.hub.docs_dir, ecosystem, doc_id)
+        assets = docs.list_assets(
+            Session, ecosystem, doc_id, url_prefix=spa_url("/docs")
+        )
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     except FileNotFoundError:
         abort(404, description="Document not found")
-    return jsonify({
-        "assets": docs.list_assets(
-            settings.hub.docs_dir, ecosystem, doc_id, url_prefix=spa_url("/docs")
-        )
-    })
+    return jsonify({"assets": assets})
 
 
 @docs_bp.post("/api/v1/docs/<ecosystem>/<doc_id>/assets")
@@ -559,10 +584,10 @@ def docs_assets(ecosystem: str, doc_id: str):
 @api_operation(
     summary="Upload an asset into a document",
     description=(
-        "Stores one `multipart/form-data` `file` part inside the document's "
-        "own `assets/` directory. This is how an image belongs to a document "
-        "instead of every ecosystem sharing one flat folder. Requires "
-        "`doc:upload`."
+        "Stores one `multipart/form-data` `file` part as an asset of that "
+        "document. This is how an image belongs to a document instead of every "
+        "ecosystem sharing one flat pile of files. Re-uploading the same name "
+        "replaces it. Requires `doc:upload`."
     ),
     tags=["Docs"],
     parameters=[_ECOSYSTEM_PARAM, _DOC_PARAM],
@@ -607,7 +632,7 @@ def docs_asset_upload(ecosystem: str, doc_id: str, form: DocsAssetUploadForm):
         )
     try:
         entry = docs.save_asset(
-            settings.hub.docs_dir, ecosystem, doc_id, upload.filename, data
+            Session, ecosystem, doc_id, upload.filename, data, actor=current_sub()
         )
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
@@ -620,7 +645,7 @@ def docs_asset_upload(ecosystem: str, doc_id: str, form: DocsAssetUploadForm):
 @require_permission(DOC_UPLOAD)
 @api_operation(
     summary="Delete a document asset",
-    description="Removes one file from the document's `assets/` directory.",
+    description="Removes one asset from the document.",
     tags=["Docs"],
     parameters=[_ECOSYSTEM_PARAM, _DOC_PARAM, _ASSET_NAME_PARAM],
     responses={
@@ -631,7 +656,7 @@ def docs_asset_upload(ecosystem: str, doc_id: str, form: DocsAssetUploadForm):
 def docs_asset_delete(ecosystem: str, doc_id: str, name: str):
     _require_ecosystem(ecosystem)
     try:
-        entry = docs.delete_asset(settings.hub.docs_dir, ecosystem, doc_id, name)
+        entry = docs.delete_asset(Session, ecosystem, doc_id, name)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     except FileNotFoundError:
@@ -709,8 +734,8 @@ def docs_index(ecosystem: str):
 @api_operation(
     summary="Download a documentation document",
     description=(
-        "Streams one document's raw Markdown from "
-        "`DOCS_DIR/<ecosystem>/<doc_id>/document.md`. Add `?download=1` (the "
+        "Streams one document's raw Markdown — the current revision, out of "
+        "the store this deployment configured. Add `?download=1` (the "
         "`download_url` the catalog hands out) to receive it as an attachment; "
         "without it the file is served inline as `text/markdown`. Traversal "
         "outside the ecosystem directory is refused."
@@ -728,17 +753,19 @@ def docs_index(ecosystem: str):
 def docs_raw(ecosystem: str, doc_id: str, query: DocsDownloadQuery):
     _require_ecosystem(ecosystem)
     try:
-        docs.resolve_doc_file(settings.hub.docs_dir, ecosystem, doc_id)
+        info, stream, content_type = docs.open_body(Session, ecosystem, doc_id)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     except FileNotFoundError:
         abort(404, description="Document not found")
-    return send_from_directory(
-        docs.resolve_doc_dir(settings.hub.docs_dir, ecosystem, doc_id),
-        docs.DOC_FILENAME,
-        mimetype="text/markdown",
-        # `bool()` on the raw string, not a bound boolean: `?download=0` has
-        # always meant "attachment" — see `schemas.DocsDownloadQuery`.
+    # `bool()` on the raw string, not a bound boolean: `?download=0` has always
+    # meant "attachment" — see `schemas.DocsDownloadQuery`.  The `download_name`
+    # is what gives the user a `.md` file: the object key no longer carries an
+    # extension, and the media type comes from the revision row.
+    return stream_object(
+        info,
+        stream,
+        mimetype=content_type,
         as_attachment=bool(query.download),
         download_name=f"{doc_id}.md",
     )
@@ -749,10 +776,9 @@ def docs_raw(ecosystem: str, doc_id: str, query: DocsDownloadQuery):
 @api_operation(
     summary="Serve a documentation asset",
     description=(
-        "Streams one file from a document's `assets/` directory. Images are "
-        "served inline so Markdown can reference them; every other type is "
-        "served as an attachment. Traversal outside the assets directory is "
-        "refused."
+        "Streams one asset of one document. Images are served inline so "
+        "Markdown can reference them; every other type is served as an "
+        "attachment."
     ),
     tags=["Docs"],
     parameters=[_ECOSYSTEM_PARAM, _DOC_PARAM, _ASSET_NAME_PARAM],
@@ -767,18 +793,20 @@ def docs_raw(ecosystem: str, doc_id: str, query: DocsDownloadQuery):
 def docs_asset_raw(ecosystem: str, doc_id: str, name: str):
     _require_ecosystem(ecosystem)
     try:
-        docs.resolve_asset(settings.hub.docs_dir, ecosystem, doc_id, name)
+        info, stream, asset = docs.open_asset(Session, ecosystem, doc_id, name)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     except FileNotFoundError:
         abort(404, description="Asset not found")
-    assets_dir = docs.resolve_doc_dir(settings.hub.docs_dir, ecosystem, doc_id) / docs.ASSETS_DIRNAME
-    inline = docs.is_image_name(name)
-    return send_from_directory(
-        assets_dir,
-        name,
+    # The media type and the download name come from the row: the key is opaque,
+    # and the asset's *name* is the URL identity the Markdown references.
+    inline = docs.is_image_name(asset.name)
+    return stream_object(
+        info,
+        stream,
+        mimetype=asset.content_type or None,
         as_attachment=not inline,
-        download_name=None if inline else name,
+        download_name=asset.name,
     )
 
 

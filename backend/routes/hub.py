@@ -46,15 +46,15 @@ distinction is part of the wire contract, so it must not change.
 
 from __future__ import annotations
 
-from pathlib import Path
+import mimetypes
 
 from flask import (
-    abort, jsonify, render_template, send_from_directory, url_for,
+    abort, jsonify, render_template, url_for,
 )
 from flask_openapi3 import APIBlueprint, validate_request
 from sqlalchemy.exc import SQLAlchemyError
 
-from auth.decorators import require_permission
+from auth.decorators import current_sub, require_permission
 from auth.permissions import (
     MODEL_READ, MODEL_RESOLVE, MODEL_WRITE, TOOL_DOWNLOAD, TOOL_READ,
     TOOL_UPLOAD,
@@ -63,9 +63,11 @@ from config import settings
 from errors import BadRequestError, PypiError
 from extensions.database import Session
 from openapi import api_operation, binary, errors, json_body, ok
-from routes.hub_common import body_ceiling, spa_url, wants_json
+from routes.hub_common import body_ceiling, spa_url, stream_object, wants_json
 from schemas import ModelRouteProbeRequest, ModelRouteRequest, ToolUploadForm
-from services import hub, hub_upload, model_routes
+from models.docs import new_key
+from services import hub_upload, model_routes, objectstore, tool_catalog
+from services.objectstore import digest_of
 from services.sealing import SealingKeyMissing
 
 
@@ -85,7 +87,7 @@ _TOOLS_SCHEMA = {
     },
 }
 
-#: One `services.hub.scan_tools` entry — the shape both the catalog and the
+#: One `services.tool_catalog.scan` entry — the shape both the catalog and the
 #: upload response use, so the SPA can render an upload without a second fetch.
 _TOOL_ENTRY_SCHEMA = {
     "type": "object",
@@ -94,7 +96,10 @@ _TOOL_ENTRY_SCHEMA = {
         "filename": {"type": "string"},
         "relative_path": {
             "type": "string",
-            "description": "Path relative to `TOOLS_DIR` — the download URL's tail",
+            "description": (
+                "The catalog path — the download URL's tail, and what "
+                "`tools export` writes back"
+            ),
         },
         "download_url": {"type": "string"},
         "size": {"type": "integer"},
@@ -266,18 +271,13 @@ _ROUTE_RESULT_SCHEMA = {
 }
 
 
+def _tools_prefix() -> str:
+    """The browser-facing URL prefix of the tools downloads."""
+    return settings.server.route_prefix.rstrip("/") + "/tools"
+
+
 def _tools_payload() -> dict:
-    prefix = settings.server.route_prefix.rstrip("/") + "/tools"
-    return hub.scan_tools(settings.hub.tools_dir, url_prefix=prefix)
-
-
-def _tool_entry_by_path(relative_path: str) -> dict | None:
-    """The catalog entry for one on-disk tool, or ``None`` if it is hidden."""
-    for category in _tools_payload()["categories"]:
-        for tool in category["tools"]:
-            if tool["relative_path"] == relative_path:
-                return tool
-    return None
+    return tool_catalog.scan(Session, url_prefix=_tools_prefix())
 
 
 # ── Tools: static index + download ───────────────────────────────────
@@ -326,7 +326,7 @@ def tools_index():
     description=(
         "Streams one file out of `TOOLS_DIR`. The path is the tool's "
         "`relative_path` from the catalog; traversal outside the tools root is "
-        "refused by `send_from_directory`."
+        "refused by the store."
     ),
     tags=["Hub"],
     responses={
@@ -335,8 +335,22 @@ def tools_index():
     },
 )
 def download_tool(filepath: str):
-    root = settings.hub.tools_dir
-    return send_from_directory(root, filepath, as_attachment=True)
+    # The path is looked up in the catalog; a file in the store that no row
+    # names is not part of the catalog, so it is a 404 like any unknown address.
+    try:
+        info, stream, row = tool_catalog.open_entry(Session, filepath)
+    except FileNotFoundError:
+        abort(404, description="Tool not found")
+    # `stream_object` keeps Content-Length, Last-Modified, ETag and Range for a
+    # store-opened stream, and the media type comes from the row: the object key
+    # is a bare uuid and carries no extension to guess from.
+    return stream_object(
+        info,
+        stream,
+        mimetype=row.content_type or None,
+        as_attachment=True,
+        download_name=row.filename,
+    )
 
 
 # ── JSON API for the SPA ─────────────────────────────────────────────
@@ -426,21 +440,36 @@ def upload_tool(form: ToolUploadForm):
     if not getattr(upload, "filename", None):
         raise BadRequestError("multipart/form-data 需要一个 file 字段")
     category = (form.category or "").strip()
-    target = hub_upload.tools_target(
-        settings.hub.tools_dir, upload.filename, category
-    )
-    hub_upload.save(target, upload)
-    relative = target.relative_to(Path(settings.hub.tools_dir)).as_posix()
-    entry = _tool_entry_by_path(relative)
-    if entry is None:
-        # `tools_target` already refuses every name the scanner hides, so this
-        # only fires if that visibility rule drifts; fail loudly rather than
-        # answer 201 for a tool nobody can see.
+    path = hub_upload.tools_path(upload.filename, category)
+    # The address is the row's `path`, not the object key (which is a fresh
+    # uuid every time), so the "already exists" check has to be here.
+    existing = tool_catalog.find(Session, path)
+    if existing is not None and not settings.storage.overwrite:
         raise PypiError(
-            "已写入文件，但工具目录扫描未列出它；请检查 TOOLS_DIR 的可见性规则",
-            status_code=500,
+            f"{upload.filename} 已存在；如需覆盖请设置 STORAGE__OVERWRITE=true",
+            status_code=409,
         )
-    return jsonify(entry), 201
+    content_type = (
+        mimetypes.guess_type(upload.filename)[0] or "application/octet-stream"
+    )
+    store = objectstore.tools_store()
+    key = new_key()
+    written = hub_upload.save(store, key, upload, content_type=content_type)
+    info = store.stat(key)
+    row = tool_catalog.save_entry(
+        Session,
+        path=path,
+        filename=upload.filename,
+        content_type=content_type,
+        size=written,
+        sha256=digest_of(store, info) if info is not None else None,
+        storage_key=key,
+        actor=current_sub(),
+    )
+    if existing is not None and existing.storage_key != key:
+        # Best-effort: the row already points at the new object.
+        store.delete(existing.storage_key)
+    return jsonify(tool_catalog.entry_payload(row, url_prefix=_tools_prefix())), 201
 
 
 @hub_bp.route("/api/v1/models")

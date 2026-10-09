@@ -53,6 +53,17 @@ apiClient.interceptors.response.use(
   },
 )
 
+/** HTTP status of a thrown request error, when there is one.
+ *
+ * The companion to :func:`apiError`: a caller that has to *branch* on the
+ * failure (a document save refused with `409` because someone else edited it)
+ * asks here rather than reaching into the axios error shape itself, so axios
+ * stays an implementation detail of this module.
+ */
+export function apiStatus(error: unknown): number | undefined {
+  return (error as AxiosError)?.response?.status
+}
+
 /** Best-effort human readable message for any thrown value. */
 export function apiError(error: unknown): string {
   const err = error as AxiosError<ApiErrorBody>
