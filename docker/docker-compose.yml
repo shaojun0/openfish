@@ -319,7 +319,11 @@ services:
     networks:
       - openfish
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/v1/version"]
+      # 安装感知探针：向导页状态下 /api/healthz 也是 200（实测），所以同时要求
+      # INSTALL_LOCK 已写入实例配置。原先指向 /api/v1/version 是错的：本部署
+      # REQUIRE_SIGNIN_VIEW=true，匿名调用该端点 403，健康检查会永久失败（容器其实
+      # 完全正常）。grep 用宽松空白，兼容手写的 INSTALL_LOCK=true。
+      test: ["CMD-SHELL", "grep -qE '^INSTALL_LOCK[[:space:]]*=[[:space:]]*true' /data/gitea/conf/app.ini && curl -fsS http://127.0.0.1:3000/api/healthz"]
       interval: 30s
       timeout: 5s
       start_period: 30s
