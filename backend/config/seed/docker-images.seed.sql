@@ -1,0 +1,6 @@
+-- Generated from docker/examples/docker-images/catalog.json by config/seed/README.md's recipe.
+-- A mirror row describes a file and owns no bytes: filename / storage_key
+-- are the empty string when there is none (the columns are NOT NULL).
+
+INSERT INTO catalog_entries (namespace, path, filename, display_name, description, tags, version, arch, kind, content_type, size, sha256, storage_key, created_at, modified_at) SELECT 'docker-images', 'nginx:1.25.3', '', 'nginx', '示例：把 nginx-1.25.3.tar 放进本目录即可点击下载', '["web", "base"]', '1.25.3', NULL, 'image', 'application/octet-stream', 0, NULL, '', '2026-01-01 00:00:00', '2026-01-01 00:00:00' WHERE NOT EXISTS (SELECT 1 FROM catalog_entries WHERE namespace = 'docker-images' AND path = 'nginx:1.25.3');
+INSERT INTO catalog_entries (namespace, path, filename, display_name, description, tags, version, arch, kind, content_type, size, sha256, storage_key, created_at, modified_at) SELECT 'docker-images', 'redis:7.2.4', '', 'redis', '示例：离线缓存镜像', '["cache"]', '7.2.4', NULL, 'image', 'application/octet-stream', 0, NULL, '', '2026-01-01 00:00:00', '2026-01-01 00:00:00' WHERE NOT EXISTS (SELECT 1 FROM catalog_entries WHERE namespace = 'docker-images' AND path = 'redis:7.2.4');

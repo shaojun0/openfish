@@ -215,8 +215,8 @@ compose 文件里。随仓库提交的样例目录移到了 `docker/examples/`�
 
 | 目录 | 内容 | 主要环境变量 |
 | --- | --- | --- |
-| `tools/<分类>/<文件>` + `catalog.json` | 可下载工具 | `TOOLS_DIR` |
-| `npm/` | 本地 npm tarball / `catalog.json` | `NPM_DIR` |
+| `tools/<分类>/<文件>` + `catalog.json`（仅 import/export） | 可下载工具 | `TOOLS_DIR` |
+| `npm/` | 本地 npm tarball（overlay 元数据在 `catalog_entries` 的 `npm` 命名空间） | `NPM_DIR` |
 | `node-builds/` | `nodejs.org/dist` 布局的 Node 镜像 | `NODE_BUILDS_DIR` |
 | `docker-images/` | `docker save` tar + compose/Dockerfile 片段 | `DOCKER_DIR` |
 | `debian/` | 本地 `.deb` + apt 片段 | `DEBIAN_DIR` |

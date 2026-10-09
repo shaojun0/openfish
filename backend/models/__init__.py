@@ -10,7 +10,7 @@ constants and ``to_dict()`` serializers are re-exported here so callers can say
 ``model_route`` is the model-routing registry the ``/models`` panel edits and a
 downstream DSH reads.  ``catalog`` is the artifact-catalog index (categories and
 entries for the tools catalog, whose display metadata used to live in a
-``catalog.json`` file), and ``docs`` is the documentation registry: which
+``catalog_entries`` rows), and ``docs`` is the documentation registry: which
 documents exist, what each revision was, and which assets belong to them.  In all
 three the bytes live behind :mod:`services.objectstore`, under an opaque key.
 """

@@ -63,11 +63,12 @@ from auth.decorators import require_permission
 from auth.permissions import DOCKER_DOWNLOAD, DOCKER_READ, DOCKER_UPLOAD
 from config import settings
 from errors import BadRequestError, PypiError
+from extensions.database import Session
 from openapi import api_operation, binary, errors, json_body, ok
 from routes.hub_common import spa_url, wants_json
 from schemas import DockerTagsQuery, DockerUploadForm
 from services import docker_registry as registry
-from services import hub, hub_upload, objectstore
+from services import hub, hub_upload, mirror_catalog, objectstore
 
 
 docker_bp = APIBlueprint("docker", __name__)
@@ -122,6 +123,7 @@ def _docker_payload() -> dict:
     prefix = settings.server.route_prefix.rstrip("/") + "/docker/files"
     return hub.scan_docker(
         settings.hub.docker_dir,
+        overlay=mirror_catalog.overlay(Session, "docker-images"),
         url_prefix=prefix,
         registry=settings.hub.docker_registry,
     )

@@ -28,6 +28,19 @@ config/seed/
   installation, so an administrator who deletes the defaults keeps them deleted
   across restarts. `cli.py catalogs seed --force` is the way to ask for them back.
 
+## The mirror overlays
+
+`npm.seed.sql`, `debian.seed.sql` and `docker-images.seed.sql` carry the npm /
+debian / docker-images overlay entries.  Those namespaces name files that stay
+in the operator's directory, so their seed has no `objects/` and their rows have
+`storage_key` NULL: the file is the artifact, the row only describes it.  A row
+with no `filename` is a metadata-only entry — what the page shows as
+registered-but-not-served.
+
+`cli.py catalogs import --namespace npm|debian|docker-images` reads one of those
+`catalog.json` files back into rows (the upgrade path for a deployment whose
+metadata still lives in a file), and `catalogs export` writes the rows back out.
+
 ## Regenerating
 
 The seed is generated from a catalog tree by importing it through the normal
