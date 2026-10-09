@@ -42,6 +42,7 @@ from sqlalchemy.orm import Session
 
 from models.catalog import CatalogEntry
 from services import namespaces
+from services.fileio import read_json, write_json
 from services.hub import Overlay, OverlayItem
 
 #: The mirror namespaces whose metadata lives here, in the order the CLI lists.
@@ -222,10 +223,9 @@ def export_file(session: Session, namespace: str, path: str | Path) -> OverlayRe
     """Write the rows back out as a ``catalog.json`` (the format, not a truth)."""
     check_namespace(namespace)
     target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    items = []
+    items: list[OverlayItem] = []
     for row in entries(session, namespace):
-        item = {
+        item: OverlayItem = {
             "filename": row.filename,
             "name": row.display_name,
             "version": row.version,
@@ -236,18 +236,19 @@ def export_file(session: Session, namespace: str, path: str | Path) -> OverlayRe
             item["arch"] = row.arch
             item["kind"] = row.kind
         items.append({key: value for key, value in item.items() if value not in (None, "", [])})
-    payload = {top_key(namespace): items}
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    payload: Overlay = {top_key(namespace): items}
+    write_json(target, payload)
     return OverlayReport(namespace=namespace, path=str(target), exported=len(items))
 
 
 def _read_overlay(path: Path) -> dict:
-    if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError:
-        return {}
+    """Read a ``catalog.json``; a missing or malformed one degrades to empty.
+
+    Through :mod:`services.fileio` like every other JSON document this server
+    owns, so "a bad file must not 500 the page that reads it" has one
+    implementation rather than one per reader.
+    """
+    payload = read_json(path, default=None)
     return payload if isinstance(payload, dict) else {}
 
 
