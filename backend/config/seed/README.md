@@ -32,9 +32,12 @@ config/seed/
 
 `npm.seed.sql`, `debian.seed.sql` and `docker-images.seed.sql` carry the npm /
 debian / docker-images overlay entries.  Those namespaces name files that stay
-in the operator's directory, so their seed has no `objects/` and their rows have
-`storage_key` NULL: the file is the artifact, the row only describes it.  A row
-with no `filename` is a metadata-only entry — what the page shows as
+in the operator's directory, so their seed has no `objects/` and their rows use
+the `NO_STORAGE_KEY` sentinel (the empty string, not `NULL` — the column is
+`NOT NULL` in every deployment and SQLite cannot drop `NOT NULL`, so `NULL`
+would cost an existing database a table rebuild to say the same thing): the file
+is the artifact, the row only describes it.  A row with `NO_FILE` (again the
+empty string) is a metadata-only entry — what the page shows as
 registered-but-not-served.
 
 `cli.py catalogs import --namespace npm|debian|docker-images` reads one of those
