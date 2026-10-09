@@ -56,6 +56,7 @@ from typing import IO, Any, Iterable, Iterator, Protocol
 from config import settings
 from services.digest import sha256_of_reader
 from services.fileio import atomic_write_stream, parse_json
+from services.namespaces import DOCS, TOOLS, root_for
 from services.paths import contained
 
 
@@ -681,12 +682,12 @@ def catalog_store(namespace: str, root: str) -> ObjectStore:
 
 def tools_store() -> ObjectStore:
     """The ``TOOLS_DIR`` catalog."""
-    return catalog_store("tools", settings.hub.tools_dir)
+    return catalog_store(TOOLS, root_for(TOOLS))
 
 
 def docs_store() -> ObjectStore:
     """The ``DOCS_DIR`` catalog."""
-    return catalog_store("docs", settings.hub.docs_dir)
+    return catalog_store(DOCS, root_for(DOCS))
 
 
 __all__ = [
