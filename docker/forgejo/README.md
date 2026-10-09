@@ -81,7 +81,7 @@ python -c "import secrets; print(secrets.token_hex(32))"       # FORGEJO_WEBHOOK
 
 ## 4. 生成 admin token（migration 与 API 都要它）
 
-容器第一次起来会自动完成安装（`INSTALL_LOCK` 由环境变量推导）。然后：
+镜像本身不做安装向导：让实例算作「已安装」的是模板里的`FORGEJO__security__INSTALL_LOCK=true`——只给 `FORGEJO__*` 设置**不会**推导出它（实测不设时 `GET /` 是安装页、`GET /api/v1/version` 被 `install.Contexter` 拦成 404，而 compose 的 healthcheck 仍通过）。改这个值后重建容器即可生效：环境变量优先于 `app.ini`，不必删卷。然后：
 
 ```bash
 # 1. 建一个平台专用的管理员账号（只给平台用，不要复用人工账号）
