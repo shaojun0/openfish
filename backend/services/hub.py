@@ -39,7 +39,6 @@ from typing import Any
 from urllib.parse import quote
 
 from services.digest import sha256_or_none
-from services.fileio import read_json
 from services.format import human_size, iso_from_timestamp
 
 
@@ -73,15 +72,6 @@ def _visible_names(parts: Sequence[str]) -> bool:
     if name == _OVERLAY_FILENAME:
         return False
     return not name.lower().startswith(_DOC_PREFIXES)
-
-
-def _load_overlay(root: Path) -> dict[str, Any]:
-    """Read ``catalog.json`` when present; never let a bad file 500 the page."""
-    return _as_overlay(read_json(root / _OVERLAY_FILENAME, default={}))
-
-
-def _as_overlay(data: Any) -> dict[str, Any]:
-    return data if isinstance(data, dict) else {}
 
 
 def _visible(path: Path) -> bool:
@@ -121,8 +111,18 @@ def _npm_tarball_entry(path: Path, *, url_prefix: str, meta: dict[str, Any]) -> 
     }
 
 
-def scan_npm(root: str, *, upstream: str = "", url_prefix: str = "/npm/files") -> dict[str, Any]:
-    """Local npm catalog — explicit entries from ``catalog.json`` plus ``*.tgz``.
+def scan_npm(
+    root: str,
+    *,
+    overlay: dict[str, Any] | None = None,
+    upstream: str = "",
+    url_prefix: str = "/npm/files",
+) -> dict[str, Any]:
+    """Local npm catalog — ``*.tgz`` plus the rows of the npm overlay.
+
+    *overlay* is the shape :func:`services.mirror_catalog.overlay` builds from
+    ``catalog_entries`` (``{"packages": [...]}``); a caller that passes nothing
+    gets the file scan alone.
 
     This is the *catalog* view: what is physically present in ``NPM_DIR``.  The
     registry protocol itself — packuments, manifests, tarballs, search — is
@@ -141,9 +141,8 @@ def scan_npm(root: str, *, upstream: str = "", url_prefix: str = "/npm/files") -
             "package_count": 0,
         }
 
-    overlay = _load_overlay(base)
     listed: dict[str, Any] = {}
-    for item in overlay.get("packages") or []:
+    for item in (overlay or {}).get("packages") or []:
         if isinstance(item, dict) and item.get("name"):
             listed[str(item["name"])] = item
 
@@ -273,11 +272,13 @@ def scan_flat(
     url_prefix: str,
     parse: Any,
     extra: dict[str, Any] | None = None,
+    overlay: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Catalog a flat directory of artifacts (docker images, .deb files, …).
 
-    ``parse(filename)`` derives the display metadata from the filename; an
-    optional ``catalog.json`` under *root* overrides it per entry:
+    ``parse(filename)`` derives the display metadata from the filename; *overlay*
+    (the ``{"artifacts": [...]}`` shape :func:`services.mirror_catalog.overlay`
+    builds from ``catalog_entries``) overrides it per entry:
 
     .. code-block:: json
 
@@ -302,10 +303,9 @@ def scan_flat(
     if not base.is_dir():
         return result
 
-    overlay = _load_overlay(base)
     by_filename: dict[str, dict[str, Any]] = {}
     metadata_only: list[dict[str, Any]] = []
-    for item in overlay.get("artifacts") or []:
+    for item in (overlay or {}).get("artifacts") or []:
         if not isinstance(item, dict):
             continue
         filename = item.get("filename")
@@ -371,23 +371,37 @@ def _parse_debian_filename(filename: str) -> dict[str, Any]:
     return {"name": filename, "version": "", "kind": "file"}
 
 
-def scan_docker(root: str, *, url_prefix: str, registry: str = "") -> dict[str, Any]:
+def scan_docker(
+    root: str,
+    *,
+    overlay: dict[str, Any] | None = None,
+    url_prefix: str,
+    registry: str = "",
+) -> dict[str, Any]:
     """Docker catalog — image tarballs plus compose/Dockerfile snippets."""
     return scan_flat(
         root,
         url_prefix=url_prefix,
         parse=parse_docker_filename,
         extra={"registry": registry},
+        overlay=overlay,
     )
 
 
-def scan_debian(root: str, *, url_prefix: str, mirror: str = "") -> dict[str, Any]:
+def scan_debian(
+    root: str,
+    *,
+    overlay: dict[str, Any] | None = None,
+    url_prefix: str,
+    mirror: str = "",
+) -> dict[str, Any]:
     """Debian catalog — local ``.deb`` files plus apt config snippets."""
     return scan_flat(
         root,
         url_prefix=url_prefix,
         parse=_parse_debian_filename,
         extra={"mirror": mirror},
+        overlay=overlay,
     )
 
 

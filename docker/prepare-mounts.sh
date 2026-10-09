@@ -9,10 +9,11 @@
 # -----
 #   ./prepare-mounts.sh
 #       Local defaults.  Each artifact mirror becomes a real, empty directory
-#       seeded from docker/examples/<name>/.  The two operator-written catalogs
-#       (tools, docs) are created empty: a fresh database is initialized from
-#       backend/config/seed/, and these directories are where the operator's own
-#       files go before `cli.py tools|docs import`.  docker/data links to
+#       seeded from docker/examples/<name>/.  The catalog *metadata* is not in
+#       these directories any more: a fresh database is initialized from
+#       backend/config/seed/ (defaults for docs, tools and the three mirror
+#       overlays), and a directory is where files — and an operator's own
+#       catalog.json, for `cli.py catalogs import` — live.  docker/data links to
 #       ../backend/data.  That
 #       link is what keeps `cd backend && python app.py` and the containers on
 #       one database — which now also holds the model route table.

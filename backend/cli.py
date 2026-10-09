@@ -638,6 +638,8 @@ def _key_env() -> str:
 # ══════════════════════════════════════════════════════════════════════
 
 def build_parser() -> argparse.ArgumentParser:
+    from services import mirror_catalog
+
     parser = argparse.ArgumentParser(
         prog="cli.py",
         description="Administrative commands for cpypiserver.",
@@ -898,6 +900,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.set_defaults(func=cmd_catalogs_seed)
 
+    q = catalogs_cmd.add_parser(
+        "import",
+        help="Read a mirror's catalog.json into the catalog_entries overlay rows.",
+    )
+    q.add_argument("--namespace", required=True, choices=list(mirror_catalog.MIRRORS))
+    q.add_argument("--from", dest="source", metavar="FILE", default=None)
+    q.add_argument("--prune", action="store_true", help="Delete rows the file does not name.")
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_catalogs_import)
+
+    q = catalogs_cmd.add_parser(
+        "export",
+        help="Write a mirror's overlay rows back out as catalog.json.",
+    )
+    q.add_argument("--namespace", required=True, choices=list(mirror_catalog.MIRRORS))
+    q.add_argument("--to", dest="target", metavar="FILE", default=None)
+    q.set_defaults(func=cmd_catalogs_export)
+
     return parser
 
 
@@ -980,6 +1000,42 @@ def cmd_catalogs_seed(args) -> int:
     for outcome in outcomes:
         detail = f"（{outcome.objects} 个对象 / {outcome.statements} 条语句）" if outcome.action == "seeded" else ""
         print(f"  {outcome.namespace}: {names.get(outcome.action, outcome.action)}{detail}")
+    return 0
+
+
+def cmd_catalogs_import(args) -> int:
+    """Read a mirror's ``catalog.json`` into rows (the overlay is a table now)."""
+    from services import mirror_catalog
+
+    namespace = args.namespace
+    source = Path(args.source) if args.source else mirror_catalog.default_path(namespace)
+    session = Session()
+    try:
+        report = mirror_catalog.import_file(
+            session, namespace, source, prune=args.prune, dry_run=args.dry_run
+        )
+    finally:
+        session.close()
+    for line in report.lines():
+        print(line)
+    if args.dry_run:
+        print("（--dry-run：没有写入任何东西）")
+    return 0
+
+
+def cmd_catalogs_export(args) -> int:
+    """Write a mirror's overlay rows back out as ``catalog.json``."""
+    from services import mirror_catalog
+
+    namespace = args.namespace
+    target = Path(args.target) if args.target else mirror_catalog.default_path(namespace)
+    session = Session()
+    try:
+        report = mirror_catalog.export_file(session, namespace, target)
+    finally:
+        session.close()
+    for line in report.lines():
+        print(line)
     return 0
 
 

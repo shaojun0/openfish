@@ -2,7 +2,7 @@
 
 A catalog used to *be* a directory tree: the tools page scanned ``TOOLS_DIR`` on
 every request, the category was the first path segment, the display name came
-from an optional ``catalog.json`` sitting next to the files, and the download URL
+from ``catalog_entries`` rows (the interface is ``services.mirror_catalog``), and the URL
 was the file's path.  The tree was the truth, which meant listing was an
 ``os.walk`` with a SHA-256 of every small file, a bucket had to be walked
 recursively, and the overlay was one more file to keep on a writable disk even
@@ -114,8 +114,19 @@ class CatalogEntry(Base):
     #: address this row has.  Never a storage key.
     path: Mapped[str] = Column(String(PATH_MAX), nullable=False)
     #: Last path segment; stored rather than split on every render, because it
-    #: is what the page and the download show.
-    filename: Mapped[str] = Column(String(NAME_MAX), nullable=False)
+    #: is what the page and the download show.  The empty string on a mirror row
+    #: that registers metadata without naming a file (npm calls those "metadata
+    #: only"): the file would be the artifact and it is not here.  Empty rather
+    #: than ``NULL`` on purpose — the column is NOT NULL in every deployment, and
+    #: SQLite cannot drop NOT NULL, so ``NULL`` would cost an existing database a
+    #: table rebuild to say the same thing.
+    filename: Mapped[str] = Column(String(NAME_MAX), nullable=False, default="")
+    #: Overlay version / architecture / kind of a mirror row (``1.0.0`` /
+    #: ``arm64`` / ``deb``).  Unused by the tools catalog, where the filename
+    #: carries everything the listing shows.
+    version: Mapped[str | None] = Column(String(64), nullable=True)
+    arch: Mapped[str | None] = Column(String(32), nullable=True)
+    kind: Mapped[str | None] = Column(String(32), nullable=True)
     #: Overlay display name; ``NULL`` means "show the filename".
     display_name: Mapped[str | None] = Column(String(NAME_MAX), nullable=True)
     description: Mapped[str | None] = Column(String(DESCRIPTION_MAX), nullable=True)
@@ -130,7 +141,11 @@ class CatalogEntry(Base):
     size: Mapped[int] = Column(Integer, nullable=False, default=0)
     sha256: Mapped[str | None] = Column(String(64), nullable=True)
     #: The opaque object key — a bare uuid4.
-    storage_key: Mapped[str] = Column(String(KEY_MAX), nullable=False)
+    #: The object this row owns.  The empty string for a mirror row: npm /
+    #: debian / docker-images artifacts stay where the operator put them and the
+    #: scanner reads the directory, so a mirror row only *describes* a file and
+    #: never names an object.
+    storage_key: Mapped[str] = Column(String(KEY_MAX), nullable=False, default="")
     created_at: Mapped[datetime] = Column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )

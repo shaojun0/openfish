@@ -22,6 +22,9 @@ Three properties are deliberate:
   way of putting a catalog together.  The media type each object is stored with
   comes from ``config/seed/content-types.json``, not from the key: a key is an
   opaque uuid and says nothing about what it holds.
+* **A mirror namespace seeds rows only.**  npm / debian / docker-images name
+  files that stay in the operator's directory, so their seed carries no objects
+  and their rows have no ``storage_key``.
 * **It happens once.**  :class:`models.catalog.CatalogSeedState` records the
   installation, so an administrator who deletes the defaults keeps them deleted
   across restarts.  "The table is empty" alone would reinstall them on every
@@ -52,7 +55,13 @@ SEED_DIR = Path(__file__).resolve().parent.parent / "config" / "seed"
 #: sql file, object sub-directory).  Only the two catalogs whose content is
 #: application-managed are here; npm / docker-images / debian are mirrors whose
 #: contents an operator supplies.
-CATALOGS: tuple[tuple[str, str], ...] = (("docs", "docs.seed.sql"), ("tools", "tools.seed.sql"))
+CATALOGS: tuple[tuple[str, str], ...] = (
+    ("docs", "docs.seed.sql"),
+    ("tools", "tools.seed.sql"),
+    ("npm", "npm.seed.sql"),
+    ("debian", "debian.seed.sql"),
+    ("docker-images", "docker-images.seed.sql"),
+)
 
 
 @dataclass(frozen=True, slots=True)

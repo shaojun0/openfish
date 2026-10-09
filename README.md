@@ -265,7 +265,7 @@ Templates are provided at `backend/.env.example` (local development) and
 | `MAX_CONTENT_LENGTH`    | `104857600` (100 MiB)  | Maximum upload size                                |
 | `ADMIN_USERS`           | `[]`                   | Admin whitelist — **JSON array**, e.g. `["alice"]` |
 | `TOOLS_DIR`             | `<project>/docker/tools` | Tools catalog root — each sub-directory is a category |
-| `NPM_DIR`               | `<project>/docker/npm` | Local npm catalog (`*.tgz` / `catalog.json`)       |
+| `NPM_DIR`               | `<project>/docker/npm` | Local npm catalog (`*.tgz`; its overlay metadata is rows in `catalog_entries`)       |
 | `NPM_UPSTREAM`          | `https://registry.npmmirror.com` | Upstream npm registry — both the advertised `npm config set registry` target and the read-through source |
 | `NPM_PROXY_ENABLED`     | `true`                 | Serve the npm registry protocol; `false` answers only for already-cached packages |
 | `NPM_UPSTREAM_TOKEN`    | *(empty)*              | Bearer token for a private upstream npm registry   |
@@ -596,7 +596,7 @@ permission; the listing requires `tool:read`.
 server answers the registry protocol: a packument per package (abbreviated when
 the client sends `Accept: application/vnd.npm.install-v1+json`, full
 otherwise), one version manifest, the tarball itself, `npm ping` and the modern
-`/-/v1/search`. A `*.tgz` in `NPM_DIR` and an entry in `NPM_DIR/catalog.json` are
+`/-/v1/search`. A `*.tgz` in `NPM_DIR` is served, and a row in the `npm` overlay is
 the **local** source for that exact version, but they are *merged with* the
 `NPM_UPSTREAM` packument rather than replacing it — npm resolves a dependency
 range such as `accepts@^2.0.0` against the whole `versions` map, so a partially

@@ -429,6 +429,10 @@ class NpmRegistry:
     """One configured npm view of the world: local dir + optional upstream."""
 
     root: str | Path
+    #: The npm overlay rows (``{"packages": [...]}``) as
+    #: :func:`services.mirror_catalog.overlay` builds them.  Empty means "no
+    #: explicit entries": the directory scan alone describes the catalog.
+    overlay: dict[str, Any] = field(default_factory=dict)
     upstream_url: str = ""
     proxy_enabled: bool = False
     token: str = ""
@@ -569,7 +573,7 @@ class NpmRegistry:
                     }
 
         # catalog.json entries without a tarball on disk are still listed.
-        catalog = hub.scan_npm(str(self.root), url_prefix="")
+        catalog = hub.scan_npm(str(self.root), overlay=self.overlay, url_prefix="")
         for entry in catalog.get("packages", []):
             name = entry.get("name")
             if not name or name in index:

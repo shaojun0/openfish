@@ -45,9 +45,10 @@ from flask_openapi3 import APIBlueprint
 from auth.decorators import require_permission
 from auth.permissions import DEBIAN_DOWNLOAD, DEBIAN_READ
 from config import settings
+from extensions.database import Session
 from openapi import api_operation, binary, errors, ok
 from routes.hub_common import spa_url, wants_json
-from services import debian_apt, hub
+from services import debian_apt, hub, mirror_catalog
 
 debian_bp = APIBlueprint("debian", __name__)
 
@@ -67,6 +68,7 @@ def _debian_payload() -> dict:
     prefix = settings.server.route_prefix.rstrip("/") + "/debian/files"
     return hub.scan_debian(
         settings.hub.debian_dir,
+        overlay=mirror_catalog.overlay(Session, "debian"),
         url_prefix=prefix,
         mirror=settings.hub.debian_mirror,
     )

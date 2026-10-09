@@ -1,0 +1,6 @@
+-- Generated from docker/examples/npm/catalog.json by config/seed/README.md's recipe.
+-- A mirror row describes a file and owns no bytes: filename / storage_key
+-- are the empty string when there is none (the columns are NOT NULL).
+
+INSERT INTO catalog_entries (namespace, path, filename, display_name, description, tags, version, arch, kind, content_type, size, sha256, storage_key, created_at, modified_at) SELECT 'npm', 'openfish-hello', '', 'openfish-hello', '示例包：把 openfish-hello-1.0.0.tgz 放进本目录即可点击下载', '["demo"]', '1.0.0', NULL, NULL, 'application/octet-stream', 0, NULL, '', '2026-01-01 00:00:00', '2026-01-01 00:00:00' WHERE NOT EXISTS (SELECT 1 FROM catalog_entries WHERE namespace = 'npm' AND path = 'openfish-hello');
+INSERT INTO catalog_entries (namespace, path, filename, display_name, description, tags, version, arch, kind, content_type, size, sha256, storage_key, created_at, modified_at) SELECT 'npm', 'internal-ui-kit', '', 'internal-ui-kit', '仅登记元数据、暂无 tarball 的示例条目', '["demo", "metadata-only"]', '0.3.0', NULL, NULL, 'application/octet-stream', 0, NULL, '', '2026-01-01 00:00:00', '2026-01-01 00:00:00' WHERE NOT EXISTS (SELECT 1 FROM catalog_entries WHERE namespace = 'npm' AND path = 'internal-ui-kit');

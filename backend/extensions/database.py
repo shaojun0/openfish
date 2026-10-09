@@ -230,6 +230,15 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # (table, column, column DDL)
     ("api_keys", "user_id",
      "user_id INTEGER REFERENCES users(id) ON DELETE SET NULL"),
+    # The mirror overlays moved from docker/*/catalog.json into
+    # ``catalog_entries``; these three columns carry what the file said beyond
+    # name/description/tags.  ``filename`` and ``storage_key`` stay NOT NULL —
+    # a mirror row uses the empty string for "no file" / "owns no bytes", which
+    # is what keeps an existing database from needing a table rebuild (SQLite
+    # cannot drop NOT NULL) while new ones get the identical schema.
+    ("catalog_entries", "version", "version VARCHAR(64)"),
+    ("catalog_entries", "arch", "arch VARCHAR(32)"),
+    ("catalog_entries", "kind", "kind VARCHAR(32)"),
 )
 
 _INDEXES: tuple[tuple[str, str, str], ...] = (
