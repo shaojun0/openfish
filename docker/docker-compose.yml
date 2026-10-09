@@ -319,7 +319,7 @@ services:
     networks:
       - openfish
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/v1/version"]
       interval: 30s
       timeout: 5s
       start_period: 30s
