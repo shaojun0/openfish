@@ -223,7 +223,9 @@ def _tree_env(
     env["PACKAGES_DIR"] = str(_TMP / f"sub-{tag}-packages")
     env["TOOLS_DIR"] = str(_TMP / "tools")
     env["DOCS_DIR"] = str(_TMP / "docs")
-    env["ADMIN_USERS"] = '["e2e"]'
+    # By the time an app boots with this environment the identity below is an
+    # administrator because ``_create_admin`` ran ``cli.py create-admin`` against
+    # the same database — the environment itself grants nothing.
     env["AUTH_USERNAME"] = "e2e"
     env["AUTH_ASSERT"] = "pw"
     env["OAUTH2_INTROSPECT_URL"] = ""
@@ -254,6 +256,28 @@ def _run_code(
             f"{label} failed (exit {proc.returncode}):\n{proc.stderr[-1500:]}"
         )
     return proc.stdout
+
+
+def _create_admin(backend_dir: Path, env: dict[str, str], label: str) -> None:
+    """Promote ``e2e`` with ``cli.py`` before the endpoint app boots.
+
+    The gate used to make that identity the administrator through
+    ``ADMIN_USERS``.  The environment is not an authorization path any more, so
+    each run does what an operator does — and because it runs the real command
+    against the same tree, database and environment as the app boot that
+    follows, the CLI path itself stays under the gate.
+    """
+    proc = subprocess.run(
+        [PYTHON, "cli.py", "create-admin", "e2e"],
+        cwd=str(backend_dir),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    check(proc.returncode == 0, f"cli.py create-admin e2e succeeds ({label})")
+    if proc.returncode != 0:
+        print(f"      stderr: {proc.stderr.strip()[-500:]}")
 
 
 # ── The endpoint comparison's subprocess programs ────────────────────
@@ -343,6 +367,7 @@ def _run_endpoint_dump(
 ) -> dict:
     db = Path(db_path) if db_path is not None else (_TMP / f"endpoint-{tag}.db")
     env = _tree_env(backend_dir, db, dirs, tag=f"endpoint-{tag}")
+    _create_admin(backend_dir, env, tag)
     _run_code(backend_dir, _ENDPOINT_CODE, env, f"endpoint dump ({tag})", [str(out_path)])
     return json.loads(out_path.read_text(encoding="utf-8"))
 
