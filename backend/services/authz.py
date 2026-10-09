@@ -350,48 +350,6 @@ class AuthzService:
         if missing:
             pass
 
-    def bootstrap_superusers(self, identifiers: Iterable[str]) -> list[str]:
-        """Promote configured admins **only when no superuser exists yet**.
-
-        This makes ``ADMIN_USERS`` a one-shot cold-start seed rather than a
-        permanent back door: whoever can set an environment variable would
-        otherwise be able to grant themselves the server.  After the first
-        superuser exists the setting is inert.
-        """
-        wanted = [i for i in (identifiers or []) if i and str(i).strip()]
-        if not wanted:
-            return []
-
-        session = self._s
-        try:
-            has_super = (
-                session.query(User).filter(User.is_superuser.is_(True)).first() is not None
-            )
-            if has_super:
-                return []
-
-            promoted: list[str] = []
-            for ident in wanted:
-                ident = str(ident).strip()
-                user = session.query(User).filter(User.external_id == ident).first()
-                if user is None:
-                    user = User(
-                        provider="bootstrap", external_id=ident,
-                        display_name=ident, is_active=True, is_superuser=True,
-                    )
-                    session.add(user)
-                else:
-                    user.is_superuser = True
-                promoted.append(ident)
-            session.commit()
-            self.invalidate()
-            return promoted
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            session.close()
-
     # ══════════════════════════════════════════════════════════════════
     #  Users
     # ══════════════════════════════════════════════════════════════════
@@ -940,7 +898,7 @@ class AuthzService:
         }
 
 
-def bootstrap(authz: AuthzService, admin_users: Iterable[str] = ()) -> dict:
+def bootstrap(authz: AuthzService) -> dict:
     """Idempotent startup seeding.
 
     Call this *after* the blueprints have been imported, because route guards
@@ -949,14 +907,12 @@ def bootstrap(authz: AuthzService, admin_users: Iterable[str] = ()) -> dict:
     """
     perms = authz.sync_permissions()
     authz.sync_builtin_roles()
-    promoted = authz.bootstrap_superusers(admin_users)
 
     orphans = authz.orphan_permissions()
     stale = authz.stale_permissions()
 
     return {
         "permissions": perms,
-        "superusers": promoted,
         "orphans": orphans,
         "stale": stale,
     }

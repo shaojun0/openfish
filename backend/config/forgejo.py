@@ -14,7 +14,7 @@ all take one, and the offline gates inject their own) but is built from
 :func:`ImportConfig.from_settings` instead of from the environment.
 
 Field names are the flat variable names, lower-cased — the same convention
-``ServerConfig`` uses for ``ADMIN_USERS``/``PUBLIC_BASE_URL`` — because the
+``ServerConfig`` uses for ``PUBLIC_BASE_URL`` — because the
 deployment already speaks ``FORGEJO_BASE_URL`` and ``IMPORT_MAX_RATE`` and those
 names must keep working verbatim.
 """

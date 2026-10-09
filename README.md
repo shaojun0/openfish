@@ -262,7 +262,6 @@ Templates are provided at `backend/.env.example` (local development) and
 | `FRONTEND_DIST_DIR`     | *(empty)* = `<backend>/static/dist` | Directory holding the built SPA for Flask to serve. In the split Docker deployment the `frontend` container serves it instead, so this stays empty |
 | `STORAGE__OVERWRITE`    | `false`                | Allow re-uploading an existing filename            |
 | `MAX_CONTENT_LENGTH`    | `104857600` (100 MiB)  | Maximum upload size                                |
-| `ADMIN_USERS`           | `[]`                   | Admin whitelist — **JSON array**, e.g. `["alice"]` |
 | `TOOLS_DIR`             | `<project>/docker/tools` | Tools catalog root — each sub-directory is a category |
 | `NPM_DIR`               | `<project>/docker/npm` | Local npm catalog (`*.tgz`; its overlay metadata is rows in `catalog_entries`)       |
 | `NPM_UPSTREAM`          | `https://registry.npmmirror.com` | Upstream npm registry — both the advertised `npm config set registry` target and the read-through source |
@@ -304,7 +303,7 @@ Nested fields can also be addressed with the `__` delimiter, e.g.
 > units. Docker Compose overrides every one of them with an absolute `/app/…`
 > path.
 
-> **Note:** list-valued variables must be JSON. Writing `ADMIN_USERS=` (empty)
+> **Note:** list-valued variables must be JSON. Writing a list-valued variable (empty)
 > raises a settings error at startup — leave the line commented out instead.
 
 ### Authentication variables
@@ -323,7 +322,6 @@ Nested fields can also be addressed with the `__` delimiter, e.g.
 | `OAUTH2_AUTH_PREFERENCE` | Optional `auth-preference` query parameter for 4A-style flows      |
 | `OAUTH2_CA_BUNDLE`       | CA bundle (PEM) for verifying the provider's TLS certificate. Empty uses the system trust store; there is deliberately no way to disable verification |
 | `IS_4A`                  | Enable the 4A authentication mode                                 |
-| `ADMIN_USERS`            | JSON array. A **one-shot cold-start seed** for the first superuser only — inert once any superuser exists. Use `cli.py` afterwards |
 
 Basic Auth is only attempted when **both** `AUTH_USERNAME` and `AUTH_ASSERT`
 are non-empty, so an unconfigured deployment cannot be entered with `":"`.
@@ -359,7 +357,7 @@ Python — `auth/permissions.py` contains a catalog of points and their default
 labels, and nothing else. Adding a role, granting it permissions, and handing it
 to somebody are all database writes that take effect on the **next request**,
 with no redeploy. That is the whole point of the rewrite: the previous design
-carried a `ROLES` dict and read `ADMIN_USERS` from the environment, so every
+carried a `ROLES` dict and read its superuser list from the environment, so every
 authorization change was a code change and a restart.
 
 > Serving with several `gunicorn` workers? Each worker caches the grant sets it
@@ -467,10 +465,7 @@ cd backend && python cli.py create-admin zhangsan
 docker exec openfish-backend python /app/cli.py create-admin zhangsan
 ```
 
-2. **`ADMIN_USERS` / `AUTH_USERNAME`** — applied at startup **only while the
-   server has zero superusers**, and logged loudly when it fires. It is a
-   cold-start seed, not a standing grant: whoever can set an environment
-   variable cannot quietly promote themselves later.
+2. **环境变量不再是授权路径** — `ADMIN_USERS` 已删除。首个超管用 `python cli.py create-admin <账号>`（容器内：`docker compose exec backend python /app/cli.py create-admin <账号>`）；撤权用 `cli.py demote <账号>`。
 
 3. **The console** — an existing superuser can toggle the flag at
    `/access`. The API refuses this for anyone else, and refuses to demote the
@@ -491,7 +486,7 @@ Every one is idempotent.
 > what roles attach to. Renaming somebody in the directory changes their
 > `display_name` only — their roles survive. Accounts are unique on
 > `external_id` alone rather than `(provider, external_id)`, so the same person
-> reaching the server through OAuth2, the HTTP Basic fallback, or `ADMIN_USERS`
+> reaching the server through OAuth2 or the HTTP Basic fallback
 > is one account, not three.
 
 ### Upload validation

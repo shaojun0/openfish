@@ -53,7 +53,7 @@ def build_authz(database: str | None) -> AuthzService:
     authz = AuthzService(Session)
     # Seed the permission catalog and the built-in roles so the commands below
     # can refer to `admin` / `authenticated` even on a brand-new database.
-    bootstrap(authz, admin_users=[])
+    bootstrap(authz)
     return authz
 
 
