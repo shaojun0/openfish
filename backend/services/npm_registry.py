@@ -57,6 +57,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import unquote, urlparse
 
 from services import hub
+from services.namespaces import OVERLAY_FILENAME
 from services.fileio import read_json
 from services.format import iso_from_timestamp, utc_now_iso
 from services.upstream import DiskCache, Upstream, UpstreamError
@@ -120,11 +121,21 @@ _VERSION_SPLIT = re.compile(r"[.\-+]")
 
 # ── Small document helpers ───────────────────────────────────────────
 
-def _visible(path: Path) -> bool:
-    """Skip dotfiles and the human-facing README that documents the directory."""
-    if any(part.startswith(".") for part in path.parts):
+def _visible(path: Path, root: Path | None = None) -> bool:
+    """Skip dotfiles and the README that documents the directory.
+
+    Like :func:`services.hub._visible`, only the part below *root* decides: a
+    catalog that merely lives under a dot-prefixed path is not a dotfile.
+    """
+    parts = path.parts
+    if root is not None:
+        try:
+            parts = path.relative_to(root).parts
+        except ValueError:
+            parts = (path.name,)
+    if any(part.startswith(".") for part in parts):
         return False
-    if path.name == hub._OVERLAY_FILENAME:
+    if path.name == OVERLAY_FILENAME:
         return False
     return not path.name.lower().startswith(("readme", "license", "changelog"))
 
@@ -508,7 +519,7 @@ class NpmRegistry:
                             continue
             except OSError:
                 continue
-        for bookmark in (hub._OVERLAY_FILENAME, PUBLISH_INDEX_FILENAME):
+        for bookmark in (OVERLAY_FILENAME, PUBLISH_INDEX_FILENAME):
             path = self.root / bookmark
             try:
                 stat = path.stat()
@@ -531,7 +542,7 @@ class NpmRegistry:
         index: dict[str, dict[str, Any]] = {}
         if self.root.is_dir():
             for path in sorted(self.root.rglob("*.tgz")):
-                if not _visible(path):
+                if not _visible(path, self.root):
                     continue
                 manifest = _read_tarball_manifest(path)
                 if manifest is not None:
@@ -654,12 +665,12 @@ class NpmRegistry:
         if not filename or Path(filename).name != filename:
             return None
         candidate = self.root / filename
-        if candidate.is_file() and _visible(candidate):
+        if candidate.is_file() and _visible(candidate, self.root):
             return candidate
         if not self.root.is_dir():
             return None
         for path in self.root.rglob("*.tgz"):
-            if path.name == filename and _visible(path):
+            if path.name == filename and _visible(path, self.root):
                 return path
         return None
 

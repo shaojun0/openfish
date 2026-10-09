@@ -95,10 +95,11 @@ _HASH_LIMIT_BYTES = 64 * 1024 * 1024
 def _visible_names(parts: Sequence[str]) -> bool:
     """The visibility rule, over the name parts of one entry.
 
-    The rule (no dotfile anywhere in the chain, no overlay, no
-    README/LICENCE/CHANGELOG) lives here once and is applied to the file
-    catalogs this module still serves; the tools catalog keeps the same rule in
-    :mod:`services.tool_catalog`, where the import reads a tree.
+    The rule (no dotfile in the chain *below the catalog root*, no overlay, no
+    README/LICENCE/CHANGELOG) lives here once and is applied to the file catalogs
+    this module still serves; the tools catalog keeps the same rule in
+    :mod:`services.tool_catalog`, where the import reads a tree.  Callers pass the
+    path relative to what they scanned — see :func:`_visible`.
     """
     if any(part.startswith(".") for part in parts):
         return False
@@ -110,9 +111,23 @@ def _visible_names(parts: Sequence[str]) -> bool:
     return not name.lower().startswith(_DOC_PREFIXES)
 
 
-def _visible(path: Path) -> bool:
-    """Skip dotfiles, the overlay and the README/licence that documents a tree."""
-    return _visible_names(path.parts)
+def _visible(path: Path, root: Path | None = None) -> bool:
+    """Skip dotfiles, the overlay and the README/licence that documents a tree.
+
+    Only the part *below* the catalog root decides.  The rule used to look at
+    every component of the path, so a data directory that merely *lives* under a
+    dot-prefixed path — ``~/.local/share/openfish/npm``, a ``.data`` mount, a
+    scratch dir like ``.cold`` — hid the whole catalog: the files were there and
+    the page was empty.  *root* is the directory being scanned; without it the
+    path stands for a lone name, which is what the rule is really about.
+    """
+    parts = path.parts
+    if root is not None:
+        try:
+            parts = path.relative_to(root).parts
+        except ValueError:
+            parts = (path.name,)
+    return _visible_names(parts)
 
 
 def _sha256(path: Path) -> str | None:
@@ -186,7 +201,7 @@ def scan_npm(
     seen: set[str] = set()
 
     for tarball in sorted(base.rglob("*.tgz")):
-        if not _visible(tarball):
+        if not _visible(tarball, base):
             continue
         meta = listed.get(tarball.name) or {}
         entry = _npm_tarball_entry(tarball, url_prefix=url_prefix, meta=meta)
@@ -352,7 +367,7 @@ def scan_flat(
 
     artifacts: list[dict[str, Any]] = []
     matched: set[str] = set()
-    for path in sorted(p for p in base.iterdir() if p.is_file() and _visible(p)):
+    for path in sorted(p for p in base.iterdir() if p.is_file() and _visible(p, base)):
         meta = by_filename.get(path.name) or {}
         artifacts.append(_flat_entry(
             base, path, url_prefix=url_prefix, info=parse(path.name), meta=meta,
