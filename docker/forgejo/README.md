@@ -12,14 +12,14 @@ backend 容器通过 compose 注入同名变量。
 docker/forgejo/
 ├── README.md                 ← 本文件
 ├── forgejo.env.example       ← 非机密默认值模板；cp 成 forgejo.env 后填密钥
-└── forgejo/                  ← bind mount 的数据目录（prepare-mounts.sh 创建）
+└── forgejo/                  ← bind mount 的数据目录（`up` 时自动创建）
     ├── forgejo.db            ← SQLite（默认）
     ├── repositories/         ← bare repo 与 LFS
     ├── log/
     └── ...
 ```
 
-> 数据目录由 `docker/prepare-mounts.sh` 创建（见 S1.md 的挂载片段）。
+> 数据目录由 Docker 在 `up` 时创建；`forgejo.env` 从 `forgejo.env.example` 复制后填（compose 里声明为 `required: false`，缺失也能起）。
 > `docker/forgejo/` 本身在仓库里只保留 `README.md`、`forgejo.env.example`，
 > 运行态数据一律不进版本库。
 

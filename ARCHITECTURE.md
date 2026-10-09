@@ -200,14 +200,14 @@ bind mount 注入容器，丢文件即生效、无需重建镜像；收在 `dock
 S3 兼容端点（MinIO / Ceph）的显式连通性自检。
 
 `tools/` 与 `docs/` 是**操作员在浏览器里写**的两个目录：它们不再提交（`.gitignore`），
-由 `prepare-mounts.sh` 从 `docker/examples/` 播种，因此一次上传不会弄脏工作区、
+目录本身 gitignore、样例在 `docker/examples/`，因此一次上传不会弄脏工作区、
 `git checkout` 也不会带走唯一副本。文档的元数据已进一步搬进数据库（见
 `cli.py docs import/export` 的双向兼容桥）。
 
 **所有 bind mount 源都是 `docker/` 内的路径**（`./share` `./npm` `./data` …），
 `docker-compose.yml` 里既没有 `../backend/...` 也没有宿主机绝对路径。每个源都是
-**可插拔**的：它要么是真实目录，要么是指向数据盘的符号链接。`docker/prepare-mounts.sh`
-负责创建（`./prepare-mounts.sh /media/…/openfish-mirror` 走数据盘布局），以后
+**可插拔**的：它要么是真实目录（`docker compose up` 时自动创建），要么是指向数据盘的
+符号链接（`ln -sfn /media/…/openfish-mirror/npm docker/npm`），以后
 换存储只需 `ln -sfn` 重指一个链接，compose 一个字都不用改。原先的 `*_SRC` 环境
 变量已删除——符号链接是唯一的重定向机制，宿主机绝对路径因此无法再回流到
 compose 文件里。随仓库提交的样例目录移到了 `docker/examples/`，由该脚本播种进

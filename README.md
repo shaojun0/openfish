@@ -74,7 +74,7 @@ The repository is split so that each half builds on its own:
 backend/     Flask application, its own Dockerfile, its own venv and tests/gates
 frontend/    Vue 3 + Vite SPA, its own Dockerfile (node build → nginx)
 docker/      Compose orchestration, edge nginx, .env template, the
-             prepare-mounts.sh helper and the catalogs:
+             bind mounts and the catalogs:
              tools/ docs/ + share/ npm/ node-builds/ docker-images/ debian/
 integrations/   downstream client code (never part of an image)
 ```
@@ -157,17 +157,16 @@ cd frontend && npm run smoke
 ```bash
 cd docker
 cp .env.example .env      # REQUIRED: set SECRET_KEY, otherwise compose aborts
-./prepare-mounts.sh       # create the bind-mount sources (or point them at a data disk)
-docker compose up -d --build
+docker compose up -d --build   # 缺失的 bind 源由 Docker 自动创建；DB 直接用 backend/data
 ```
 
-`./prepare-mounts.sh` is the one setup step. Every bind-mount source in
-`docker-compose.yml` is a path **inside `docker/`**, and the script creates them:
-with no argument it makes real directories seeded from `docker/examples/`, and
-with a data-disk path it makes them symlinks into it —
-`./prepare-mounts.sh /media/root/Getea/openfish-mirror`. Re-pointing a single
-mount later is just `ln -sfn /srv/data/npm docker/npm`; the Compose file never
-changes. See `docker/README.md`.
+Every bind-mount source in `docker-compose.yml` is a path **inside `docker/`**,
+and Docker creates the missing ones when you `docker compose up` (empty,
+root-owned) — there is no setup step. `docker/examples/` holds the sample
+artifacts if you want a populated catalog to look at. The database is mounted
+straight from `backend/data/`, so `cd backend && python app.py` and the
+containers share one SQLite file. Re-pointing a single mount later is just
+`ln -sfn /srv/data/npm docker/npm`; the Compose file never changes.
 
 The application side is one image: `openfish:latest`, built from
 `backend/Dockerfile`. The container's `OPENFISH_ROLE` selects which process it
@@ -894,7 +893,7 @@ and docs roots, where the port keeps the payload), and
 edit them in place; the caches live under `/app/data/cache`, on the same
 persistent volume as the API-key database. `docker/tools` and `docker/docs` are
 **not** committed any more — they are operator data, gitignored and seeded from
-`docker/examples/` by `docker/prepare-mounts.sh`, exactly like the other
+`docker/examples/` (copy them in yourself), exactly like the other
 mirrors.
 
 
@@ -1378,7 +1377,6 @@ docker/                         orchestration — no application code
 ├── docker-compose.yml          backend + runner + frontend + nginx + db (profiles)
 ├── nginx/nginx.conf            the edge gateway: path routing, upload size
 ├── .env.example                Compose variable template (copied to docker/.env)
-├── prepare-mounts.sh           creates / re-points every bind-mount source
 ├── examples/                   committed sample catalogs, seeded into a fresh mount
 ├── certs/                      optional TLS material, git-ignored
 ├── tools/, docs/               small versioned catalogs (real directories)
@@ -1411,15 +1409,7 @@ code, and keeping them in the Compose directory leaves the repository root a
 short list of build units. Compose bind-mounts them into the backend container,
 so dropping a file in one takes effect without rebuilding anything.
 
-Every bind source is a path inside `docker/`, and each one is **pluggable**: it
-is either a real directory or a symlink to wherever the data actually lives.
-`docker/prepare-mounts.sh` creates them (`./prepare-mounts.sh
-/media/root/Getea/openfish-mirror` for the data-disk layout), and re-pointing one
-later is a single `ln -sfn`. There is deliberately no `*_SRC` environment
-override any more — the symlink is the only redirect mechanism, so an absolute
-host path can never creep back into `docker-compose.yml`. The committed sample
-catalogs live in `docker/examples/` and are copied into an empty mount by that
-script.
+`docker compose up` creates every missing bind source itself (empty, root-owned). The database is mounted straight from `backend/data/`, so the host CLI and the containers share one SQLite file, and `docker/` stays the place a deployment's operator data is re-pointed with `ln -sfn`.
 
 ## Security notes
 

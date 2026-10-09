@@ -226,6 +226,9 @@ x-backend-volumes: &backend-volumes
   # PACKAGES_DIR / PYTHON_BUILDS_DIR 指向。
   - ./share:/app/share
   # ── 内网制品中心 ────────────────────────────────────────
+  # 每个源由 Docker 在 `up` 时按需创建（空目录、root 属主）；放到另一块盘就
+  # `ln -sfn /srv/data/npm docker/npm`（符号链接照常跟随）。样例文件在
+  # docker/examples/ 里，需要时自己 `cp -a` 进对应目录。
   # npm / node-builds / docker-images / debian：丢文件即生效，无需重建镜像。
   # tools / docs：条目在数据库里（见根 README 的 Artifact hub），这里的目录只是
   #   对象的存放处与 import/export 的桥。空库首次启动就会由后端写入默认内容
@@ -242,7 +245,7 @@ x-backend-volumes: &backend-volumes
   # 模型路由表在数据库里（model_routes），随 ./data 卷持久化；改完刷新页面即可。
   # 全新部署想预置一组路由，用 config/model_routes.seed.sql（见 docker/README.md）。
   # SQLite 库与回源缓存，容器重建后不丢；backend/data 仍是本地开发的同一份
-  - ./data:/app/data
+  - ../backend/data:/app/data
   # 自备 TLS 证书（可选）：把 CA 链放到 docker/certs/ca_chain.pem 后取消注释。
   # 挂载点是 /app/certs（**不在** web 根目录）：服务端只匿名供应
   # GET /certs/ca_chain.pem 这一个文件，同目录下的私钥不会被暴露。
@@ -296,7 +299,7 @@ services:
   # 只做两件事：承载 bare 仓库、实现 smart HTTP clone/push；**不发布宿主端口**，
   # 由边缘 nginx 暴露 /git/。原生 GitHub/Gitee migration 会连 issue / PR /
   # label / milestone 一起拉进来——这正是 §8「导入历史 issue」的实现方式。
-  # 数据落在 ./forgejo（由 prepare-mounts.sh 创建），与现有 6 个挂载点同风格。
+  # 数据落在 ./forgejo（`up` 时自动创建），与现有挂载点同风格。
   forgejo:
     image: ${FORGEJO_IMAGE:-codeberg.org/forgejo/forgejo:15}
     container_name: openfish-forgejo
@@ -305,7 +308,10 @@ services:
       # The instance's identity and secrets live here, not in this file: the
       # template is tracked, the filled copy is 600 and gitignored.  Nothing
       # below overrides it, so `FORGEJO__server__ROOT_URL` in that file wins.
-      - ./forgejo/forgejo.env
+      # `required: false` keeps a fresh clone able to `docker compose up`: the
+      # file is operator-owned and no setup script creates it any more.
+      - path: ./forgejo/forgejo.env
+        required: false
     expose:
       - "3000"
     volumes:
@@ -355,10 +361,11 @@ services:
       # non-root `USER` would leave CapEff empty and the drop would fail closed.
       - SETUID
       - SETGID
-      # The worker also writes /work and /app/data bind mounts whose host owner
-      # is not root (prepare-mounts.sh creates them as the operator), and cleans
-      # up files the sandbox uid created.  DAC_OVERRIDE lets the *trusted* worker
-      # do that; the untrusted child is still dropped with CapEff=0.
+      # The worker also writes the /work and /app/data bind mounts, whose host
+      # owner may differ from the container's user — Docker creates a missing bind
+      # source as root, an operator may have made it themselves — and it cleans up
+      # files the sandbox uid created.  DAC_OVERRIDE lets the *trusted* worker do
+      # that; the untrusted child is still dropped with CapEff=0.
       - DAC_OVERRIDE
     tmpfs:
       - /tmp:size=512m
@@ -366,7 +373,7 @@ services:
       <<: *runner-env
     volumes:
       - ./agent-work:/work
-      - ./data:/app/data
+      - ../backend/data:/app/data
     networks:
       - openfish
     depends_on:

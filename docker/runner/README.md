@@ -26,7 +26,7 @@ docker run --rm -p 8080:8080 -e SECRET_KEY=dev-only openfish
 docker run --rm \
   -e OPENFISH_ROLE=runner \
   -e API_KEYS_FILE=/app/data/cpypiserver.db \
-  -v "$PWD/docker/data:/app/data" \
+  -v "$PWD/backend/data:/app/data" \
   -v "$PWD/docker/agent-work:/work" \
   openfish
 ```
@@ -172,7 +172,7 @@ gid 10000）执行，因此读不到 worker 的 `/proc/<pid>/environ`，偷不�
 | 沙箱 uid / gid | 10002 / 10000 | `AGENT_SANDBOX_UID` / `AGENT_SANDBOX_GID` |
 | 工作树属主 | **worker（root）** | 只 `chgrp` + `g+rwX` + 目录 setgid，**绝不 `chown`**（owner 不变，worker 的 `git` 不会报 dubious ownership）。工作目录若是符号链接则直接 `SandboxIdentityError`，绝不顺着链接 `chgrp/chmod` |
 | 沙箱 HOME | 系统临时目录下的 worker-owned 目录 | `sandbox_env_overrides()` 用 `tempfile.mkdtemp`（`/tmp`，sticky）创建一次，随后只用 `O_NOFOLLOW` fd 做 `fchown`/`fchmod`（2775）。**不**放在 checkout 里：仓库能写自己的工作树，放在里面等于把 worker 的下一次 chmod 交给它做符号链接攻击 |
-| 所需 capability | `CAP_SETUID` + `CAP_SETGID` + `CAP_DAC_OVERRIDE` | 前两枚在 `cap_drop: ALL` 后加回，用于把子进程降到 10002（只有 root worker 拿得到 effective 位）；`DAC_OVERRIDE` 让**受信任的** worker 能写 `prepare-mounts.sh` 以宿主机用户建的 `/work`、`/app/data` bind mount 并回收沙箱产物——被降权的子进程 CapEff 仍为 0 |
+| 所需 capability | `CAP_SETUID` + `CAP_SETGID` + `CAP_DAC_OVERRIDE` | 前两枚在 `cap_drop: ALL` 后加回，用于把子进程降到 10002（只有 root worker 拿得到 effective 位）；`DAC_OVERRIDE` 让**受信任的** worker 能写以宿主机用户建的 `/work`、`/app/data` bind mount 并回收沙箱产物——被降权的子进程 CapEff 仍为 0 |
 | worker 组 | gid 10000（`usermod -aG openfish root`） | root 只有属于目标组时才能把工作树 `chgrp` 到 10000（刻意不给 `CAP_CHOWN`） |
 | 子进程 umask | `0o002` | 与共享组一致；`0o022` 会让沙箱建出的目录对 worker 组只读，回收 `rmtree` 删不掉 |
 
@@ -237,7 +237,7 @@ networks:
 | 容器路径 | 宿主来源 | 模式 | 说明 |
 | --- | --- | --- | --- |
 | `/work` | `docker/agent-work/` | rw | 每任务一个子目录；任务结束写 `.done`，**保留 24h** 再回收 |
-| `/app/data` | `docker/data/` | rw | 与 backend 共用同一 SQLite / 缓存目录（同一数据库，模型路由表也在其中） |
+| `/app/data` | `backend/data/` | rw | 与 backend 共用同一 SQLite / 缓存目录（同一数据库，模型路由表也在其中） |
 
 24h 规则由 `services/agent_runner.py` 实现：
 
@@ -328,9 +328,9 @@ docker compose --profile runner --scale runner=N up -d  # N 副本（§2.1）
 > 注意：`runner` 与 `backend` 必须指向**同一个数据库**（同一个
 > `DATABASE_URL` 或同一个 `API_KEYS_FILE`），否则 API 入队的任务 runner 看不见。
 
-## 8. `docker/prepare-mounts.sh` 里的工作目录
+## 8. 工作目录（`agent-work`）
 
-`prepare-mounts.sh` 负责创建（或按数据盘布局重指）`agent-work`：
+`agent-work` 由 Docker 在 `up` 时创建；要放到数据盘就 `ln -sfn` 重指：
 
 ```bash
 # 智能体工作目录（§9.2）：每任务一个子目录，任务结束保留 24h 再回收。
@@ -339,7 +339,7 @@ link "$DOCKER_DIR/agent-work" "$PROJECT_DIR/backend/data/agent-work"
 ```
 
 说明：本地开发（`cd backend && python app.py`）下 `AGENT_WORK_ROOT` 默认 `/work`，
-可设成 `backend/data/agent-work`；`prepare-mounts.sh` 把它建在数据盘上时同样用
+可设成 `backend/data/agent-work`；放到数据盘时同样用
 `link`（与 `data -> ../backend/data` 同一手法），换存储只需重指符号链接。
 
 ## 9. 安全清单（构建后自查）
