@@ -7,9 +7,18 @@ travel between networks by rsync — but the metadata is a table now:
 ``catalog_entries`` rows in the namespace ``npm`` / ``debian`` /
 ``docker-images``, sharing the table the tools catalog uses.
 
-A mirror row never owns bytes: the file *is* the bytes and stays where it is, so
-``storage_key`` is the empty string here (unlike a tools row, where it names the
-object the row owns).  Rows and files are merged by the scanner:
+Three layers, kept apart on purpose:
+
+* **the file is the artifact** — it stays where the operator put it, and it is
+  what a client downloads.  A mirror row never owns bytes, so its
+  ``storage_key`` is :data:`models.catalog.NO_STORAGE_KEY`.
+* **the row is the description** — display name, version, architecture, kind,
+  tags.  Losing the rows loses the metadata, never the artifact.
+* **the directory root is a port** — where the rows live is
+  :attr:`services.namespaces.Namespace.root`; where the *bytes* live is
+  :func:`services.objectstore.catalog_store`'s answer, which can be a bucket.
+
+Rows and files are merged by the scanner:
 
 * a row that names a file (``filename``) overrides that file's display metadata;
 * a row with no file is a **metadata-only** entry — what the UI shows as
@@ -26,20 +35,27 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from config import settings
-from models.catalog import CatalogEntry
+from models.catalog import CatalogEntry, NO_FILE
+from services import namespaces
+from services.fileio import read_json, write_json
+from services.hub import Overlay, OverlayItem
 
 #: The mirror namespaces whose metadata lives here, in the order the CLI lists.
-MIRRORS: tuple[str, ...] = ("npm", "debian", "docker-images")
+MIRRORS: tuple[str, ...] = namespaces.MIRRORS
 
-#: The overlay key each namespace's file uses.  npm's file says ``packages``;
-#: the flat mirrors (debian, docker-images) say ``artifacts``.
+
 def top_key(namespace: str) -> str:
-    return "packages" if namespace == "npm" else "artifacts"
+    """The overlay key each namespace's file uses.
+
+    npm's file says ``packages``; the flat mirrors (debian, docker-images) say
+    ``artifacts``.  The registry is the one place that decides.
+    """
+    return namespaces.overlay_key(namespace)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,26 +92,28 @@ def check_namespace(namespace: str) -> str:
     return namespace
 
 
-def overlay(session: Session, namespace: str) -> dict:
+def overlay(session: Session, namespace: str) -> Overlay:
     """The rows of *namespace* in the shape :mod:`services.hub` merges.
 
     The scanners take this dict instead of reading a file, so the file is no
     longer a source of truth for anything the request path serves.
     """
     check_namespace(namespace)
-    items = []
+    items: list[OverlayItem] = []
     for row in entries(session, namespace):
-        item = {
+        item: OverlayItem = {
             "filename": row.filename,
             "name": row.display_name,
             "version": row.version,
             "description": row.description,
             "tags": row.tag_list(),
         }
-        if namespace != "npm":
+        if namespace != namespaces.NPM:
             item["arch"] = row.arch
             item["kind"] = row.kind
-        items.append({key: value for key, value in item.items() if value not in (None, "")})
+        items.append({
+            key: value for key, value in item.items() if value not in (None, NO_FILE)
+        })
     return {top_key(namespace): items}
 
 
@@ -117,33 +135,34 @@ def entries(session: Session, namespace: str) -> list[CatalogEntry]:
 
 def default_path(namespace: str) -> Path:
     """Where the overlay file for *namespace* lives in a deployment."""
-    roots = {
-        "npm": settings.hub.npm_dir,
-        "debian": settings.hub.debian_dir,
-        "docker-images": settings.hub.docker_dir,
-    }
-    return Path(roots[namespace]) / "catalog.json"
+    check_namespace(namespace)
+    return Path(namespaces.root_for(namespace)) / namespaces.OVERLAY_FILENAME
 
 
-def path_for(namespace: str, item: dict) -> str:
-    """The row identity of one overlay item.
+def path_for(namespace: str, item: OverlayItem) -> str:
+    """The row identity of one overlay item; ``""`` when it has none.
 
     ``filename`` when the entry names a file — that is what the file scan
     matches on.  Otherwise npm identifies a package by name, and a flat mirror
     by ``name`` + ``version`` (+ ``arch`` for debian, where the same version
     exists per architecture).
+
+    The empty string is the "names nothing" answer, and
+    :func:`import_file` skips it.  It is deliberately not a word like
+    ``unnamed``: an entry genuinely called ``unnamed`` is a perfectly good
+    identity and has to be registrable like any other.
     """
-    filename = str(item.get("filename") or "").strip()
+    filename = str(item.get("filename") or NO_FILE).strip()
     if filename:
         return filename
     name = str(item.get("name") or "").strip()
-    if namespace == "npm":
-        return name or "unnamed"
+    if namespace == namespaces.NPM:
+        return name
     version = str(item.get("version") or "").strip()
     arch = str(item.get("arch") or "").strip()
     if arch:
         return f"{name}_{version}_{arch}" if version else f"{name}_{arch}"
-    return f"{name}:{version}" if version else (name or "unnamed")
+    return f"{name}:{version}" if version else name
 
 
 def import_file(
@@ -158,47 +177,63 @@ def import_file(
 
     *prune* deletes rows this file does not name — the overlay file is the whole
     truth of a mirror's metadata, so a deletion in it has to be a deletion here.
+
+    A file that is missing or cannot be parsed raises :class:`ValueError` (see
+    :func:`_read_overlay`); it never prunes.  A file may name one identity
+    twice: the **last** entry wins — what the file-based scanner did, since it
+    keyed a dict by identity — and the row keeps the position of the first
+    mention so the page's order does not move.  The write is one transaction:
+    a failure leaves no row and no mutated attribute behind.
     """
     check_namespace(namespace)
     source = Path(path)
     payload = _read_overlay(source)
     items = [item for item in payload.get(top_key(namespace)) or [] if isinstance(item, dict)]
 
-    existing = {row.path: row for row in entries(session, namespace)}
-    report = {"created": 0, "updated": 0, "unchanged": 0}
-    seen: set[str] = set()
+    # One identity, one row.  ``dict`` assignment keeps the first insertion slot
+    # and replaces the value: "last entry wins, first position kept", which is
+    # exactly the answer the old directory scan gave.
+    by_path: dict[str, OverlayItem] = {}
     for item in items:
         key = path_for(namespace, item)
-        if not key or key == "unnamed":
-            continue
-        seen.add(key)
-        fields = _fields(namespace, item)
-        row = existing.get(key)
-        if row is None:
-            session.add(CatalogEntry(namespace=namespace, path=key, **fields))
-            report["created"] += 1
-            if dry_run:
-                session.rollback()
-                continue
-            continue
-        if all(getattr(row, name) == value for name, value in fields.items()):
-            report["unchanged"] += 1
-            continue
-        for name, value in fields.items():
-            setattr(row, name, value)
-        report["updated"] += 1
+        if key:
+            by_path[key] = item
 
+    existing = {row.path: row for row in entries(session, namespace)}
+    report = {"created": 0, "updated": 0, "unchanged": 0}
     pruned = 0
-    if prune:
-        for key, row in existing.items():
-            if key in seen:
+    try:
+        for key, item in by_path.items():
+            fields = entry_fields(namespace, item)
+            row = existing.get(key)
+            if row is None:
+                report["created"] += 1
+                if not dry_run:
+                    session.add(CatalogEntry(namespace=namespace, path=key, **fields))
                 continue
-            pruned += 1
+            if all(getattr(row, name) == value for name, value in fields.items()):
+                report["unchanged"] += 1
+                continue
+            report["updated"] += 1
             if not dry_run:
-                session.delete(row)
+                for name, value in fields.items():
+                    setattr(row, name, value)
 
-    if not dry_run:
-        session.commit()
+        if prune:
+            for key, row in existing.items():
+                if key in by_path:
+                    continue
+                pruned += 1
+                if not dry_run:
+                    session.delete(row)
+
+        if not dry_run:
+            session.commit()
+    except Exception:
+        # A half-applied import is worse than none: no pending row and no mutated
+        # attribute may leave the call with the exception.
+        session.rollback()
+        raise
     return OverlayReport(
         namespace=namespace,
         path=str(source),
@@ -213,46 +248,85 @@ def export_file(session: Session, namespace: str, path: str | Path) -> OverlayRe
     """Write the rows back out as a ``catalog.json`` (the format, not a truth)."""
     check_namespace(namespace)
     target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    items = []
+    items: list[OverlayItem] = []
     for row in entries(session, namespace):
-        item = {
+        item: OverlayItem = {
             "filename": row.filename,
             "name": row.display_name,
             "version": row.version,
             "description": row.description,
             "tags": row.tag_list(),
         }
-        if namespace != "npm":
+        if namespace != namespaces.NPM:
             item["arch"] = row.arch
             item["kind"] = row.kind
-        items.append({key: value for key, value in item.items() if value not in (None, "", [])})
-    payload = {top_key(namespace): items}
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        items.append({
+            key: value
+            for key, value in item.items()
+            if value not in (None, NO_FILE, [])
+        })
+    payload: Overlay = {top_key(namespace): items}
+    write_json(target, payload)
     return OverlayReport(namespace=namespace, path=str(target), exported=len(items))
 
 
+def fingerprint(overlay: Overlay) -> str:
+    """A stable string identifying one overlay's content.
+
+    The request path caches objects built *from* the overlay (the npm registry's
+    index, for one), so a cache entry must be reused for the same rows and must
+    not be reused after an import changed them.  Sorting the keys makes the value
+    independent of dict order; ``ensure_ascii=False`` keeps it the same JSON the
+    export would write.
+    """
+    return json.dumps(overlay, sort_keys=True, ensure_ascii=False)
+
+
+#: :func:`services.fileio.read_json` reports "missing" and "malformed" by
+#: returning its default; this object is the overlay reader's default, so those
+#: two failures can be told apart from a document that really is empty.
+_UNREADABLE = object()
+
+
 def _read_overlay(path: Path) -> dict:
+    """Read a ``catalog.json``, or refuse loudly.
+
+    ``catalogs import --from`` is an explicit operator action, and ``--prune``
+    makes the file the whole truth of a namespace: a mistyped path or a
+    truncated file that degraded to "the overlay is empty" would silently delete
+    every row.  So a missing file, unreadable bytes and invalid JSON all raise
+    :class:`ValueError` — the CLI prints the message and exits 1 — while a file
+    that parses to ``{"<key>": []}`` is a *valid* empty overlay and still prunes,
+    because that is what the operator asked for.
+
+    The parse itself goes through :mod:`services.fileio` like every other JSON
+    document this server owns, so there is still one parser.
+    """
     if not path.is_file():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+        raise ValueError(f"overlay file not found: {path}")
+    payload = read_json(path, default=_UNREADABLE)
+    if payload is _UNREADABLE:
+        raise ValueError(f"overlay file is not valid JSON: {path}")
+    if not isinstance(payload, dict):
+        raise ValueError(f"overlay file is not a JSON object: {path}")
+    return payload
 
 
-def _fields(namespace: str, item: dict) -> dict:
-    """The mutable columns one overlay item sets."""
+def entry_fields(namespace: str, item: OverlayItem) -> dict[str, Any]:
+    """The mutable columns one overlay item sets.
+
+    Public because :mod:`config.seed`'s generator builds the same columns when it
+    turns an overlay file into ``.sql``: the mapping from a JSON key to a column
+    must not exist twice.
+    """
     fields = {
-        # "" is the sentinel for "no file"; see CatalogEntry.filename.
-        "filename": str(item.get("filename") or ""),
+        "filename": str(item.get("filename") or NO_FILE),
         "display_name": str(item.get("name") or "") or None,
         "description": str(item.get("description") or "") or None,
         "version": str(item.get("version") or "") or None,
         "tags": "[]",
     }
-    if namespace != "npm":
+    if namespace != namespaces.NPM:
         fields["arch"] = str(item.get("arch") or "") or None
         fields["kind"] = str(item.get("kind") or "") or None
     tags = item.get("tags")
@@ -267,7 +341,9 @@ __all__ = [
     "check_namespace",
     "default_path",
     "entries",
+    "entry_fields",
     "export_file",
+    "fingerprint",
     "import_file",
     "overlay",
     "path_for",

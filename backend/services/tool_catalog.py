@@ -47,12 +47,12 @@ from models.catalog import (
     category_of,
     overlay_metadata,
 )
-from config import settings
 from models.docs import new_key
-from services import objectstore
+from services import namespaces, objectstore
 from services.digest import sha256_of
 from services.fileio import read_json, write_json
 from services.format import human_size
+from services.namespaces import OVERLAY_FILENAME
 from services.objectstore import ObjectInfo
 from services.paths import contained
 
@@ -68,9 +68,6 @@ DOC_PREFIXES = ("readme", "license", "changelog")
 #: :data:`services.objectstore.OBJECTS_DIRNAME`).  Reserved: an import that
 #: walked into it would catalogue the objects it had just written.
 RESERVED_DIRS = (objectstore.OBJECTS_DIRNAME,)
-
-#: The overlay file, imported and exported but never the source of truth.
-OVERLAY_FILENAME = "catalog.json"
 
 # ── Queries ──────────────────────────────────────────────────────────
 
@@ -210,9 +207,7 @@ def scan(
 
 def _root_for(namespace: str) -> str:
     """The local root a namespace maps to when the backend is a directory."""
-    if namespace == TOOLS_NAMESPACE:
-        return settings.hub.tools_dir
-    return namespace
+    return namespaces.resolve(namespace).root
 
 
 # ── Write path ───────────────────────────────────────────────────────

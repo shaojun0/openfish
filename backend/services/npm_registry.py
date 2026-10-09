@@ -432,7 +432,7 @@ class NpmRegistry:
     #: The npm overlay rows (``{"packages": [...]}``) as
     #: :func:`services.mirror_catalog.overlay` builds them.  Empty means "no
     #: explicit entries": the directory scan alone describes the catalog.
-    overlay: dict[str, Any] = field(default_factory=dict)
+    overlay: hub.Overlay = field(default_factory=dict)
     upstream_url: str = ""
     proxy_enabled: bool = False
     token: str = ""

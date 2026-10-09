@@ -40,8 +40,6 @@ and the error envelope are part of the contract, so changing them needs care.
 
 from __future__ import annotations
 
-import json
-
 from flask import (
     jsonify, render_template, request, send_file, send_from_directory, url_for,
 )
@@ -55,7 +53,7 @@ from extensions.database import Session
 from openapi import api_operation, binary, errors, json_body, ok
 from routes.hub_common import spa_url, wants_json
 from schemas import NpmPublishDocument, NpmSearchQuery
-from services import hub, mirror_catalog
+from services import hub, mirror_catalog, namespaces
 from services.npm_publish import publish as publish_package
 from services.npm_registry import (
     ABBREVIATED_ACCEPT, SEARCH_MAX_SIZE, NpmRegistry, clamp_search_size,
@@ -227,7 +225,7 @@ def _registry() -> NpmRegistry:
     hub_settings = settings.hub
     # The overlay lives in the database now, so it belongs in the key: a fresh
     # row must not be served by a registry whose index was built without it.
-    overlay = mirror_catalog.overlay(Session, "npm")
+    overlay = mirror_catalog.overlay(Session, namespaces.NPM)
     key = (
         str(hub_settings.npm_dir),
         str(hub_settings.npm_upstream),
@@ -236,7 +234,7 @@ def _registry() -> NpmRegistry:
         float(hub_settings.npm_timeout),
         str(hub_settings.npm_cache_dir),
         int(hub_settings.npm_cache_max_mb),
-        json.dumps(overlay, sort_keys=True, ensure_ascii=False),
+        mirror_catalog.fingerprint(overlay),
     )
     registry = _REGISTRY_CACHE.get(key)
     if registry is None:
@@ -276,7 +274,7 @@ def _npm_payload() -> dict:
     prefix = settings.server.route_prefix.rstrip("/") + "/npm/files"
     return hub.scan_npm(
         settings.hub.npm_dir,
-        overlay=mirror_catalog.overlay(Session, "npm"),
+        overlay=mirror_catalog.overlay(Session, namespaces.NPM),
         upstream=settings.hub.npm_upstream,
         url_prefix=prefix,
     )
