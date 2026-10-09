@@ -70,6 +70,19 @@ x-backend-env: &backend-env
   NPM_UPSTREAM: ${NPM_UPSTREAM:-https://registry.npmmirror.com}
   DOCKER_REGISTRY: ${DOCKER_REGISTRY:-}
   DEBIAN_MIRROR: ${DEBIAN_MIRROR:-}
+  # ── 目录介质：本地目录（默认）或 S3 兼容对象存储 ──────────────
+  # 工具/文档的条目在数据库里，字节走存储端口；下面这一组决定端口背后的介质。
+  # 容器里没有 .env 文件，所以这些变量必须在这里转发，否则在 docker/.env 里
+  # 配了也不会生效。默认全部留空 = local（与历史行为一致）。
+  # 切 s3 需重建镜像带上可选依赖：--build-arg OPENFISH_EXTRAS=s3。
+  OBJECT_BACKEND: ${OBJECT_BACKEND:-local}
+  S3_ENDPOINT: ${S3_ENDPOINT:-}
+  S3_BUCKET_NAME: ${S3_BUCKET_NAME:-}
+  S3_REGION: ${S3_REGION:-}
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+  S3_ADDRESS_STYLE: ${S3_ADDRESS_STYLE:-auto}
+  S3_PREFIX: ${S3_PREFIX:-}
   # ── 只读穿透代理（回源地址留空则仅服务本地制品）──────────
   NPM_PROXY_ENABLED: ${NPM_PROXY_ENABLED:-true}
   NPM_UPSTREAM_TOKEN: ${NPM_UPSTREAM_TOKEN:-}
@@ -212,7 +225,12 @@ x-backend-volumes: &backend-volumes
   # /app/share：python 包与 python-build-standalone；容器内两个子路径分别由
   # PACKAGES_DIR / PYTHON_BUILDS_DIR 指向。
   - ./share:/app/share
-  # ── 内网制品中心：丢文件即生效，无需重建镜像 ──────────────
+  # ── 内网制品中心 ────────────────────────────────────────
+  # npm / node-builds / docker-images / debian：丢文件即生效，无需重建镜像。
+  # tools / docs：条目在数据库里（见根 README 的 Artifact hub），这里的目录只是
+  #   对象的存放处与 import/export 的桥；丢入文件后要跑一次导入才会进目录：
+  #     docker compose exec backend python cli.py tools import   # docs 同理
+  #   两个目录下的 objects/ 属于存储端口，不要手工改动。
   - ./tools:/app/tools
   - ./npm:/app/npm
   - ./node-builds:/app/node-builds
