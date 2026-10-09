@@ -13,6 +13,9 @@ initialization**, not the container.
 
 Three properties are deliberate:
 
+* **The roster is the namespace registry.**  Which catalogs ship a seed, where
+  their directory is and which table their rows land in is answered once, in
+  :mod:`services.namespaces`; this module only knows how to apply one ``.sql``.
 * **The keys are literal uuid4s in the SQL.**  The seed is a data artifact, so
   what it installs is reviewable in the diff (and identical everywhere) instead
   of being generated at whichever moment a deployment first boots.
@@ -47,20 +50,20 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from models.catalog import CatalogEntry, CatalogSeedState
+from services import namespaces
 
 #: Where the seed lives, relative to the backend package root.
-SEED_DIR = Path(__file__).resolve().parent.parent / "config" / "seed"
+SEED_DIR = namespaces.SEED_DIR
 
-#: The catalogs a fresh database is initialized with: namespace -> (table,
-#: sql file, object sub-directory).  Only the two catalogs whose content is
-#: application-managed are here; npm / docker-images / debian are mirrors whose
-#: contents an operator supplies.
-CATALOGS: tuple[tuple[str, str], ...] = (
-    ("docs", "docs.seed.sql"),
-    ("tools", "tools.seed.sql"),
-    ("npm", "npm.seed.sql"),
-    ("debian", "debian.seed.sql"),
-    ("docker-images", "docker-images.seed.sql"),
+#: The catalogs a fresh database is initialized with: namespace -> seed file,
+#: in installation order.  Derived from the namespace registry, so registering a
+#: catalog there is what puts its defaults on this list.  npm / docker-images /
+#: debian are mirrors: their seed carries rows only, describing files an
+#: operator supplies.
+CATALOGS: tuple[tuple[str, str], ...] = tuple(
+    (entry.name, entry.seed_file)
+    for entry in namespaces.NAMESPACES.values()
+    if entry.seed_file is not None
 )
 
 
@@ -89,51 +92,46 @@ def ensure_seed(engine: Engine, *, force: bool = False) -> list[SeedOutcome]:
     a ``NOT EXISTS`` guard: re-applying it cannot duplicate a row.
     """
     outcomes: list[SeedOutcome] = []
-    for namespace, filename in CATALOGS:
-        outcomes.append(_seed_namespace(engine, namespace, SEED_DIR / filename, force=force))
+    for namespace in namespaces.SEEDED:
+        outcomes.append(_seed_namespace(engine, namespaces.resolve(namespace), force=force))
     return outcomes
 
 
-def _seed_namespace(
-    engine: Engine,
-    namespace: str,
-    sql_path: Path,
-    *,
-    force: bool = False,
-) -> SeedOutcome:
-    if not sql_path.is_file():
-        return SeedOutcome(namespace, "absent")
+def _seed_namespace(engine: Engine, entry: namespaces.Namespace, *, force: bool = False) -> SeedOutcome:
+    sql_path = entry.seed_path
+    if sql_path is None or not sql_path.is_file():
+        return SeedOutcome(entry.name, "absent")
     if not inspect(engine).has_table("catalog_seed_state"):
         # `create_all` has not run yet — nothing can be seeded into tables that
         # do not exist, and this call will happen again on the next boot.
-        return SeedOutcome(namespace, "absent")
+        return SeedOutcome(entry.name, "absent")
 
     statements = _statements(sql_path)
-    objects = _objects_for(namespace)
+    objects = _objects_for(entry.name)
 
     with Session(engine) as session:
-        if not force and session.get(CatalogSeedState, namespace) is not None:
-            return SeedOutcome(namespace, "already")
-        if not force and _has_rows(session, namespace):
+        if not force and session.get(CatalogSeedState, entry.name) is not None:
+            return SeedOutcome(entry.name, "already")
+        if not force and _has_rows(session, entry.name):
             # Rows without a marker: an upgraded deployment that already has a
             # catalogue.  Record the state and leave the content alone.
-            _mark(session, namespace)
-            return SeedOutcome(namespace, "not-empty")
+            _mark(session, entry.name)
+            return SeedOutcome(entry.name, "not-empty")
 
     # Objects first: a row that points at a missing object is a broken page,
     # while an object no row names is inert (and the integrity check reports it).
-    written = _install_objects(namespace, objects)
+    written = _install_objects(entry.name, objects)
 
     with engine.begin() as connection:
         for statement in statements:
             connection.exec_driver_sql(statement)
     with Session(engine) as session:
-        _mark(session, namespace)
-    return SeedOutcome(namespace, "seeded", objects=written, statements=len(statements))
+        _mark(session, entry.name)
+    return SeedOutcome(entry.name, "seeded", objects=written, statements=len(statements))
 
 
 def _has_rows(session: Session, namespace: str) -> bool:
-    if namespace == "docs":
+    if namespaces.resolve(namespace).rows == namespaces.DOCUMENT_ROWS:
         from models.docs import Document
 
         return session.scalar(select(func.count()).select_from(Document)) > 0
@@ -171,7 +169,14 @@ def _statements(sql_path: Path) -> list[str]:
 
 
 def _objects_for(namespace: str) -> dict[str, tuple[Path, str]]:
-    """``storage_key -> (source file, media type)`` for one namespace's objects."""
+    """``storage_key -> (source file, media type)`` for one namespace's objects.
+
+    Only a catalog that owns objects has any: a mirror's seed names files an
+    operator supplies, so a mirror registers ``owns_objects=False`` and this
+    returns nothing for it however the directory looks.
+    """
+    if not namespaces.resolve(namespace).owns_objects:
+        return {}
     directory = SEED_DIR / "objects" / namespace
     if not directory.is_dir():
         return {}
@@ -201,18 +206,12 @@ def _install_objects(namespace: str, objects: dict[str, tuple[Path, str]]) -> in
         return 0
     from services import objectstore
 
-    store = objectstore.catalog_store(namespace, _root_for(namespace))
+    store = objectstore.catalog_store(namespace, namespaces.root_for(namespace))
     written = 0
     for key, (path, content_type) in objects.items():
         store.put(key, (path.read_bytes(),), content_type=content_type)
         written += 1
     return written
-
-
-def _root_for(namespace: str) -> str:
-    from config import settings
-
-    return settings.hub.docs_dir if namespace == "docs" else settings.hub.tools_dir
 
 
 __all__ = ["CATALOGS", "SEED_DIR", "SeedOutcome", "ensure_seed"]
