@@ -1,25 +1,50 @@
-# openfish-runner — 智能体运行时沙箱
+# runner 平面 — 智能体运行时沙箱（`OPENFISH_ROLE=runner`）
 
-§9.2 的沙箱镜像与运行方式。它承载「智能体运行时」这一个平面：从队列里领任务、
+§9.2 的沙箱运行方式。它承载「智能体运行时」这一个平面：从队列里领任务、
 在 `/work/<task_id>` 里 clone 只读副本、跑 gates、产出 §9.5 的 `result.json`，
 仅 fix 模式**且结果门控通过**才推 `agent/*` 分支并开 PR（见 §10）。可以按
 `--scale runner=N` 起成一个 N 副本的池子（见 §2.1）。
 
-镜像里**没有**模型权重，**不挂宿主 docker socket**，**不发布宿主端口**。
+它**不再是一个独立镜像**：runner 与 backend 是同一个 `openfish:latest`
+（`backend/Dockerfile`）的两个运行时平面，容器起哪个由 `OPENFISH_ROLE` 决定
+（见 §1）。镜像里**没有**模型权重，**不挂宿主 docker socket**，**不发布宿主端口**。
 
 ---
 
-## 1. 构建
+## 1. 构建与启动（一个镜像，两个平面）
 
-构建上下文是 `backend/`（running 镜像 = 后端应用 + git + 最小构建工具）：
+构建上下文是 `backend/`（镜像 = 后端应用 + git + 最小构建工具）：
 
 ```bash
-# 在仓库根执行
-docker build -t openfish-runner:latest -f docker/runner/Dockerfile backend/
+# 在仓库根执行 —— 就是一个镜像，没有 openfish-runner 了
+docker build -t openfish backend/
+
+# 起后端平面（默认 OPENFISH_ROLE=backend）
+docker run --rm -p 8080:8080 -e SECRET_KEY=dev-only openfish
+
+# 起 runner 平面：同一个镜像，只是换个角色
+docker run --rm \
+  -e OPENFISH_ROLE=runner \
+  -e API_KEYS_FILE=/app/data/cpypiserver.db \
+  -v "$PWD/docker/data:/app/data" \
+  -v "$PWD/docker/agent-work:/work" \
+  openfish
 ```
 
-`docker/runner/Dockerfile` 与 `backend/Dockerfile` 用同一份 `backend/pyproject.toml`
-安装依赖（依赖政策不变：不新增运行时依赖）。
+`OPENFISH_ROLE` 的取值只有两个（缺省 `backend`），由
+`backend/docker-entrypoint.sh` 派发；未知取值直接非零退出，不会静默起错平面。
+显式命令仍会覆盖派发，一次性 worker 就是这么跑的：
+
+```bash
+docker run --rm -e OPENFISH_ROLE=runner openfish \
+  python -m services.agent_queue worker --once
+```
+
+镜像依赖来自同一份 `backend/pyproject.toml`（依赖政策不变：不新增运行时依赖）。
+Compose 侧见 §7：`runner` 服务与 `backend` 共用 `x-app-build` 构建定义和
+`openfish:latest`，角色差异（密钥锚点、capability、只读根、资源上限）全部按
+服务声明——`x-runner-env` 刻意不含 `SECRET_KEY` / `FORGEJO_ADMIN_TOKEN` /
+`GIT_IDENTITY_KEY`。
 
 ## 2. 运行形态（§13 开放问题 5 的选择）
 
@@ -28,7 +53,7 @@ docker build -t openfish-runner:latest -f docker/runner/Dockerfile backend/
 ```
 backend (API 容器)  --enqueue-->  agent_tasks 表
                                         │
-runner (profile: runner)  python -m services.agent_queue worker --loop
+runner (profile: runner, OPENFISH_ROLE=runner)  python -m services.agent_queue worker --loop
     └─ 每个任务：/work/<task_id>/repo  (git clone --no-checkout + fetch <sha>)
        3 gates → 4 review → 5 search → 6 emit
        fix 模式：commit → git push origin HEAD:refs/heads/agent/<name> → Forgejo 开 PR（I4）
@@ -39,7 +64,8 @@ runner (profile: runner)  python -m services.agent_queue worker --loop
 1. **不挂宿主 docker socket** 是硬约束，而按任务起容器要么需要 socket，要么需要
    把 Docker API 暴露成服务，二者都扩大攻击面；
 2. 队列 worker 本来就要跑在某个进程里（§9.1 的 `python -m services.agent_queue
-   worker`），让它跑在 runner 容器内，沙箱边界与 worker 边界重合，没有第二套编排；
+   worker`），让它跑在同一镜像的 runner 平面里，沙箱边界与 worker 边界重合，
+   没有第二套编排；
 3. 任务间的隔离由「每任务一个 `/work/<task_id>`」+ 容器级资源/网络限制共同保证，
    对「一个任务只在一个仓库内」（§0.2）的规模足够。
 
@@ -239,22 +265,26 @@ docker compose --profile runner exec -T runner \
   日志走 `mask_env()` / `SecretRedactingFilter`，产物走 `mask_secrets()` 清洗。
 - 模型 key **不**放进 compose 的 `environment:`，避免落进 `docker inspect`。
 
-## 7. 精确的 compose 片段（写入 `docker/docker-compose.yml`，不直接改共享文件）
+## 7. 精确的 compose 片段（`docker/docker-compose.yml`）
 
-在 `services:` 下新增（`profiles: [runner]`，默认 `up` 不会启动它）：
+应用侧只有一个构建定义与一个 tag：顶层 `x-app-build` 锚点（`context: ../backend`,
+`dockerfile: Dockerfile`）→ `openfish:latest`，`backend` / `runner` /
+`backend-debug` 三个服务共用。因此 runner 服务**不再有第二个 Dockerfile、
+第二个 tag、也不写 `command`**：它由 `x-runner-env` 的
+`OPENFISH_ROLE=runner` 选成 runner 平面，命令派发在
+`backend/docker-entrypoint.sh` 里（写死 `command` 反而会顶掉那次派发）。
+`profiles: [runner]` 保证默认 `up` 不会启动它：
 
 ```yaml
-  # ── 智能体运行时沙箱（profile: runner）────────────────────────────
+  # ── 智能体运行时（profile: runner）────────────────────────────────
   runner:
-    build:
-      context: ../backend
-      dockerfile: ../docker/runner/Dockerfile
-    image: openfish-runner:latest
+    build: *app-build                 # 与应用镜像同一个构建定义
+    image: openfish:latest            # 与应用镜像同一个 tag
     # 不要写 container_name：固定名字会让 --scale runner=N 失败。
     profiles:
       - runner
     restart: unless-stopped
-    command: ["python", "-m", "services.agent_queue", "worker", "--loop"]
+    # 不要写 command：平面由 OPENFISH_ROLE 选择，命令是入口脚本的实现细节。
     cpus: 2.0
     mem_limit: 2g
     pids_limit: 512
@@ -267,12 +297,15 @@ docker compose --profile runner exec -T runner \
       # 把不可信子进程降到沙箱 uid 10002 需要这两枚；cap_drop: ALL 之后只加回它们。
       - SETUID
       - SETGID
+      # 受信任的 worker 还要写宿主机属主的 /work、/app/data bind mount。
+      - DAC_OVERRIDE
     tmpfs:
       - /tmp:size=512m
     environment:
       # 只挂 runner 专用的 env 锚点（compose 文件里的 x-runner-env）：
-      # 队列数据库 + 模型路由 + FORGEJO_RUNNER_TOKEN / RUNNER_CREDENTIAL_KEY
-      # + AGENT_SANDBOX_UID / AGENT_SANDBOX_GID + AGENT_* 旋钮。
+      # OPENFISH_ROLE=runner + 队列数据库 + 模型路由 +
+      # FORGEJO_RUNNER_TOKEN / RUNNER_CREDENTIAL_KEY + AGENT_SANDBOX_UID/GID
+      # + AGENT_* 旋钮。
       # **不要**在这里写 `<<: *backend-env`：那会把 SECRET_KEY /
       # FORGEJO_ADMIN_TOKEN / GIT_IDENTITY_KEY 交给一个会执行仓库自带
       # check_*.py 的容器。`GIT_IDENTITY_KEY`（用户身份主密钥）永不进 runner；
@@ -295,9 +328,9 @@ docker compose --profile runner --scale runner=N up -d  # N 副本（§2.1）
 > 注意：`runner` 与 `backend` 必须指向**同一个数据库**（同一个
 > `DATABASE_URL` 或同一个 `API_KEYS_FILE`），否则 API 入队的任务 runner 看不见。
 
-## 8. `docker/prepare-mounts.sh` 需要加的挂载点
+## 8. `docker/prepare-mounts.sh` 里的工作目录
 
-在「Runtime state」一节（`link "$DOCKER_DIR/data" …` 之前）加 `agent-work`：
+`prepare-mounts.sh` 负责创建（或按数据盘布局重指）`agent-work`：
 
 ```bash
 # 智能体工作目录（§9.2）：每任务一个子目录，任务结束保留 24h 再回收。
@@ -311,7 +344,12 @@ link "$DOCKER_DIR/agent-work" "$PROJECT_DIR/backend/data/agent-work"
 
 ## 9. 安全清单（构建后自查）
 
-- [ ] `docker inspect openfish-runner` 里没有 `/var/run/docker.sock` 挂载；
+- [ ] **只有一个应用镜像**：`docker images openfish` 只有一行；
+      `docker inspect -f '{{.Image}}' openfish-backend $(docker compose --profile
+      runner ps -q runner)` 两个平面输出同一个 image id（runner 没有
+      `container_name`，副本名是 `openfish-runner-<n>`）；
+- [ ] `docker inspect $(docker compose --profile runner ps -q runner)` 里没有
+      `/var/run/docker.sock` 挂载；
 - [ ] 镜像里没有模型权重、没有 `.env`、没有 `model_routes` 表的密钥副本
       （路由表在运行时从队列同一个库里只读解析）；
 - [ ] runner 不发布宿主端口（`docker compose --profile runner port runner` 为空）；

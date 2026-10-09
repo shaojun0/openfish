@@ -7,20 +7,44 @@
 #   可选数据库: docker compose --profile db up -d
 #              （要让应用真正切到 PostgreSQL，见 docker/README.md 的
 #                "PostgreSQL" 一节；仅起容器不会改变后端行为）
+#   智能体运行时: docker compose --profile runner up -d
+#              （runner 与 backend 是**同一个镜像**的两个平面，见下）
 #
-#   四个服务，各自独立构建：
+#   服务：
 #     frontend  Vue 3 SPA（node 构建 → nginx 静态托管）   ← frontend/Dockerfile
-#     backend   Flask + gunicorn（API 与各生态协议）      ← backend/Dockerfile
+#     backend   Flask + gunicorn（API 与各生态协议）      ┐
+#     runner    智能体运行时队列 worker（profile: runner）├ 同一个镜像 openfish:latest
+#                                                       ┘ OPENFISH_ROLE 决定起哪个
 #     nginx     边缘网关：唯一对外入口，按路径分流          ← docker/nginx/nginx.conf
 #     db        PostgreSQL（profile: db，可选后端）
+#
+#   应用侧只有**一个**镜像（backend/Dockerfile）：容器里起服务端还是队列 worker，
+#   由运行时环境变量 OPENFISH_ROLE 决定（backend | runner，见
+#   backend/docker-entrypoint.sh）。角色差异（密钥、capability、只读根、挂载、
+#   资源上限）全部留在本文件里按服务声明，不再有第二个 Dockerfile。
+#   两个服务引用同一份 build 定义（下面的 x-app-build 锚点），`docker compose
+#   build` 因此只构建一个镜像、只打一个 tag。
 #
 #   所有密钥/口令都通过同目录下的 .env 注入（见 .env.example），
 #   不要把真实凭据写进本文件或提交到仓库。
 
 name: openfish
 
+# ── 应用镜像的唯一定义（backend / runner / backend-debug 共用）────────
+# 三个服务都从这里构建，得到同一个 openfish:latest；谁都能单独
+# `docker compose build <service>`，但产物只有一个。OPENFISH_ROLE 才决定
+# 容器里跑什么，见 backend/docker-entrypoint.sh。
+x-app-build: &app-build
+  context: ../backend
+  dockerfile: Dockerfile
+
 # ── 后端共享配置（两个后端服务复用，避免逐项复制）──────────────────
 x-backend-env: &backend-env
+  # ── 运行时平面（唯一镜像，两平面二选一）─────────────────
+  # backend = Flask + gunicorn；runner = 队列 worker。这个锚点只给服务端平面
+  # 用，队列平面有它自己的 x-runner-env（密钥刻意分离）。显式 command 会覆盖
+  # 这个选择（见 backend/docker-entrypoint.sh）。
+  OPENFISH_ROLE: backend
   # ── 服务器 ──────────────────────────────────────────────
   SERVER_NAME: cpypiserver
   HOST: 0.0.0.0
@@ -140,6 +164,9 @@ x-backend-env: &backend-env
 # 完整隔离（`network: internal` + 出口白名单）仍需部署侧网络分段，见
 # docs/agent-hub/DESIGN-git-thin-layer.md。
 x-runner-env: &runner-env
+  # 运行时平面：同一个 openfish:latest 镜像，这里选队列 worker。
+  # （镜像由 backend/Dockerfile 构建；角色差异只在本锚点与 service 声明里。）
+  OPENFISH_ROLE: runner
   # 队列数据库：默认 SQLite 文件；PostgreSQL 部署用 DATABASE_URL。
   # 模型路由表（model_routes）也在同一个库里：runner 只读它。
   API_KEYS_FILE: /app/data/cpypiserver.db
@@ -203,11 +230,10 @@ x-backend-volumes: &backend-volumes
 
 services:
   # ── 后端：Flask + gunicorn，只在内网暴露 8080 ───────────────────
+  # 与 runner 是**同一个镜像**（openfish:latest），只是 OPENFISH_ROLE=backend。
   backend:
-    build:
-      context: ../backend
-      dockerfile: Dockerfile
-    image: openfish-backend:latest
+    build: *app-build
+    image: openfish:latest
     container_name: openfish-backend
     restart: unless-stopped
     expose:
@@ -277,11 +303,15 @@ services:
   # 沙箱边界 = 容器边界：每任务在本容器内的 /work/<task_id> 以子进程执行，
   # 不挂宿主 docker socket、不按任务起容器。必须与 backend 共用同一数据库，
   # 否则 worker 领不到 backend 入队的任务。
+  #
+  # 与 backend **同一个镜像**（openfish:latest，构建定义见 x-app-build）：
+  # OPENFISH_ROLE=runner（在 x-runner-env 里）让入口脚本 exec
+  # `python -m services.agent_queue worker --loop`。这里因此**没有** command：平面
+  # 由环境变量选择，命令只是它的实现细节（显式 command 仍会覆盖入口脚本的派发，
+  # 一次性 worker 就是这么跑的，见 backend/docker-entrypoint.sh）。
   runner:
-    build:
-      context: ../backend
-      dockerfile: ../docker/runner/Dockerfile
-    image: openfish-runner:latest
+    build: *app-build
+    image: openfish:latest
     # **No `container_name` on purpose.**  A fixed name makes
     # `docker compose --profile runner up --scale runner=N` fail with
     # "container name is already in use", which is exactly the horizontal
@@ -291,7 +321,6 @@ services:
     profiles:
       - runner
     restart: unless-stopped
-    command: ["python", "-m", "services.agent_queue", "worker", "--loop"]
     cpus: 2.0
     mem_limit: 2g
     pids_limit: 512
@@ -302,7 +331,7 @@ services:
       - ALL
     cap_add:
       # SETUID/SETGID drop the untrusted child to uid 10002; they are effective
-      # only because the worker runs as root (docker/runner/Dockerfile) — a
+      # only because the worker runs as root (backend/Dockerfile) — a
       # non-root `USER` would leave CapEff empty and the drop would fail closed.
       - SETUID
       - SETGID
@@ -382,11 +411,10 @@ services:
       retries: 5
 
   # ── 调试容器：只起 bash，方便改代码排查（profile: debug）─────────
+  # 显式 command 覆盖入口脚本的角色派发：这正是那个逃生口存在的意义。
   backend-debug:
-    build:
-      context: ../backend
-      dockerfile: Dockerfile
-    image: openfish-backend:latest
+    build: *app-build
+    image: openfish:latest
     container_name: openfish-backend-debug
     profiles:
       - debug

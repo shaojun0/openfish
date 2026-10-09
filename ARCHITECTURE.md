@@ -5,7 +5,7 @@
 
 ```
 openfish/
-├── backend/          ① Flask 后端         → openfish-backend 镜像
+├── backend/          ① Flask 后端 + 智能体运行时 → openfish 镜像（两个平面）
 ├── frontend/         ② Vue 3 SPA          → openfish-frontend 镜像
 ├── docker/           ③ 编排、边缘网关与制品库 → 4 容器拓扑
 │   ├── tools/ npm/ node-builds/ docker-images/ debian/ docs/   ④ 制品库（操作员数据）
@@ -17,11 +17,17 @@ openfish/
 
 ---
 
-## ① backend/ — Flask 后端
+## ① backend/ — Flask 后端与智能体运行时
 
 一个自包含的 Python 包：自带 `Dockerfile`、`pyproject.toml`、`uv.lock`、`.venv/`
 和全部验证门禁。构建上下文就是本目录，因此镜像里**不存在**任何前端或制品库
 内容。
+
+这个目录产出**一个**应用镜像 `openfish`，容器起来是服务端还是智能体运行时
+（队列 worker）由运行时的 `OPENFISH_ROLE` 决定（`backend | runner`，见
+`backend/docker-entrypoint.sh`）。角色差异——密钥、capability、只读根、挂载、
+资源上限——全部由 Compose 按服务声明；镜像与依赖因此只有一份，两个平面不会
+在依赖或应用代码上分叉。前端 `openfish-frontend` 仍是独立镜像。
 
 ### 请求处理链路
 
@@ -135,11 +141,15 @@ app.py                     创建 Flask 应用，禁用内置 static handler
 | 服务 | 镜像 | 宿主端口 | 角色 |
 | --- | --- | --- | --- |
 | `nginx` | `nginx:1.27-alpine` | `20416 → 80` | **唯一对外入口**，按路径分流 |
-| `backend` | `openfish-backend:latest` | 不发布（`expose 8080`） | Flask + gunicorn，API 与各生态协议 |
+| `backend` | `openfish:latest` | 不发布（`expose 8080`） | `OPENFISH_ROLE=backend` — Flask + gunicorn，API 与各生态协议 |
 | `frontend` | `openfish-frontend:latest` | 不发布（`expose 80`） | SPA 静态托管 |
 | `db` | `postgres:16-alpine` | 不发布（`expose 5432`） | `profile: db`，可选后端；设 `DATABASE_URL` 后应用整体切过去 |
 
-另有 `backend-debug`（`profile: debug`，空闲 bash 容器，端口 20417）。
+另有 `runner`（`profile: runner`，`OPENFISH_ROLE=runner`，跑队列 worker，可
+`--scale runner=N`；与 `backend` **同一个镜像** `openfish:latest`），以及
+`backend-debug`（`profile: debug`，空闲 bash 容器，端口 20417；显式 `command`
+覆盖入口脚本的平面派发）。应用侧只有一份构建定义，见 `docker/docker-compose.yml`
+的 `x-app-build` 锚点。
 
 ### 边缘路由表
 
@@ -216,11 +226,12 @@ compose 文件里。随仓库提交的样例目录移到了 `docker/examples/`�
 | `Dockerfile`（含 node 构建阶段） | `backend/Dockerfile`（纯 Python）+ `frontend/Dockerfile`（node → nginx） |
 | `.dockerignore`（根） | `backend/.dockerignore` + `frontend/.dockerignore`（根的那份已删除：没有根构建上下文） |
 | `data/` `packages/` `.venv/` `cpypiserver.egg-info/` | `backend/` 同名 |
-| `docker/docker-compose.yml`（2 服务） | 4 服务（backend / frontend / nginx / db）+ debug profile |
+| `docker/docker-compose.yml`（2 服务） | 4 服务（backend / frontend / nginx / db）+ runner / debug profile |
 | `docker/packages/` `docker/python_build_standalone/` | 删除（空目录，无人引用） |
 | 镜像内置但无配置的 nginx / supervisor | 删除；反向代理改为独立的 `nginx` 容器 |
 | 容器名 `cpypiserver-std` `cpypiserver-debug` | `openfish-backend` `openfish-frontend` `openfish-nginx` `openfish-db` `openfish-backend-debug` |
 | `python app.py`（容器 CMD） | `gunicorn --workers 1 --threads 8`（单进程以保持 RBAC 缓存语义） |
+| `backend/Dockerfile` + `docker/runner/Dockerfile` | 合并为 `backend/Dockerfile`：一个 `openfish` 镜像，`OPENFISH_ROLE` 在运行时选平面 |
 
 ---
 
@@ -254,12 +265,17 @@ npm run smoke                       # jsdom 全路由冒烟
 cd docker
 cp .env.example .env                # 必填 SECRET_KEY
 docker compose up -d --build
-docker compose build backend        # 只重建后端
+docker compose build backend        # 只重建应用镜像（backend 与 runner 共用）
 docker compose build frontend       # 只重建前端
+docker compose --profile runner up -d   # + 智能体运行时（同一个 openfish 镜像）
 
 # 单独构建某个镜像（构建上下文就是组件目录）
-docker build -t openfish-backend  backend/
+docker build -t openfish          backend/    # 一个镜像，两种平面
 docker build -t openfish-frontend frontend/
+
+# 运行时选平面（不显式给命令时由入口脚本派发）
+docker run --rm -e OPENFISH_ROLE=backend openfish      # gunicorn app:app
+docker run --rm -e OPENFISH_ROLE=runner  openfish      # 队列 worker --loop
 ```
 
 ---
@@ -275,8 +291,9 @@ docker build -t openfish-frontend frontend/
   另在一个只建了旧版 `api_keys`（无 `user_id`）的 PostgreSQL 库里验证了
   轻量迁移：`ALTER TABLE … ADD COLUMN user_id INTEGER REFERENCES users(id)`、
   索引与外键均正确建立，重复执行为幂等无操作。
-* **两个镜像构建成功**：`backend/Dockerfile`（pip 依赖 + gunicorn）、
-  `frontend/Dockerfile`（`npm ci` + vite build → nginx）。
+* **两个镜像构建成功**：`openfish`（`backend/Dockerfile`，pip 依赖 + gunicorn +
+  运行时的 git/build-essential，backend 与 runner 两个平面共用）、
+  `openfish-frontend`（`frontend/Dockerfile`，`npm ci` + vite build → nginx）。
 * **两个 nginx 配置 `nginx -t` 通过**，包括 `limit_except POST` 的根路由写法和
   精确匹配修正。
 * **真实三容器端到端路由验证**（两个镜像 + `nginx:1.27-alpine` 跑在同一
