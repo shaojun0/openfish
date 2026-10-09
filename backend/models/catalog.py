@@ -31,10 +31,12 @@ Two things this buys, both of which the file-based version could not have:
   no extension and no meaning (see :mod:`models.docs`).  Renaming a category, or
   moving a catalog to a bucket, changes rows — never object keys.
 
-``namespace`` scopes both tables (``tools`` today).  It exists because the key
-*is* the namespace-independent part of the design and because a second
-file-backed catalog (``docker-images``, ``debian``) can adopt the same tables
-without a migration; only ``tools`` is wired to them so far.
+``namespace`` scopes both tables (``tools``, ``npm``, ``debian`` and
+``docker-images`` today).  It exists because the key *is* the
+namespace-independent part of the design and because a further file-backed
+catalog (``node-builds``, say) can adopt the same tables without a migration —
+register it once in :mod:`services.namespaces` and the seed, the CLI and the
+mirror overlay all see it.
 """
 
 from __future__ import annotations
