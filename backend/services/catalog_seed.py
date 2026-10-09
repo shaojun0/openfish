@@ -11,7 +11,7 @@ initialization**, not the container.
     backend/config/seed/tools.seed.sql    the tool categories and entries
     backend/config/seed/objects/<ns>/<key>  the bytes each row references
 
-Three properties are deliberate:
+The properties that are deliberate:
 
 * **The roster is the namespace registry.**  Which catalogs ship a seed, where
   their directory is and which table their rows land in is answered once, in
@@ -27,7 +27,7 @@ Three properties are deliberate:
   opaque uuid and says nothing about what it holds.
 * **A mirror namespace seeds rows only.**  npm / debian / docker-images name
   files that stay in the operator's directory, so their seed carries no objects
-  and their rows have no ``storage_key``.
+  and their rows use the ``NO_STORAGE_KEY`` sentinel.
 * **It happens once.**  :class:`models.catalog.CatalogSeedState` records the
   installation, so an administrator who deletes the defaults keeps them deleted
   across restarts.  "The table is empty" alone would reinstall them on every
