@@ -12,6 +12,9 @@ WORKDIR /app
 
 # Optional mirror, e.g. --build-arg NPM_REGISTRY=https://registry.npmmirror.com
 ARG NPM_REGISTRY=
+# Optional build stamp shown in the sidebar, e.g. --build-arg BUILD_ID=$(git describe).
+# Empty keeps vite.config.ts's default: the moment the bundle was built.
+ARG BUILD_ID=
 
 # Dependency manifests first, for layer caching: this layer only rebuilds when
 # the lockfile changes.
@@ -23,8 +26,9 @@ RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi 
 # this cannot clobber the install above.
 COPY . .
 
-# Vite writes to frontend/dist (see vite.config.ts).
-RUN npm run build
+# Vite writes to frontend/dist (see vite.config.ts).  BUILD_ID is passed through
+# the build environment; vite.config.ts reads process.env.BUILD_ID.
+RUN BUILD_ID="$BUILD_ID" npm run build
 
 
 # ── Runtime: static file server ─────────────────────────────────────

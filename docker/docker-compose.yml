@@ -49,8 +49,22 @@ x-backend-env: &backend-env
   SERVER_NAME: cpypiserver
   HOST: 0.0.0.0
   PORT: "8080"
+  # 日志级别（DEBUG / INFO / WARNING / ERROR）；留空 = INFO。
+  LOG_LEVEL: ${LOG_LEVEL:-}
+  # 私有 CA 链，匿名发布在 GET /certs/ca_chain.pem 供内网客户端安装；
+  # 留空 = <backend>/certs/ca_chain.pem（容器内 /app/certs/ca_chain.pem，
+  # 见下面可选的那个 certs 只读挂载）。没有"关闭"开关：路径不存在就只是 404。
+  TLS_CA_FILE: ${TLS_CA_FILE:-}
+  # 管理端统计的后台刷新间隔（秒），留空 = 7200。
+  STATS_CACHE_SECONDS: ${STATS_CACHE_SECONDS:-}
   PACKAGES_DIR: ${PACKAGES_DIR:-/app/share/cpypiserver_public/packages}
   PYTHON_BUILDS_DIR: ${PYTHON_BUILDS_DIR:-/app/share/cpypiserver_public/cpython}
+  # ROUTE_PREFIX 与 FRONTEND_DIST_DIR 刻意不转发：
+  #   * ROUTE_PREFIX 一改，本拓扑的 nginx.conf（/api、/simple、/npm… 全是写死的
+  #     location）就不再匹配，服务等于不可达；
+  #   * FRONTEND_DIST_DIR 只在 Flask 自己托管 SPA 时有意义，这里 SPA 由 frontend
+  #     容器供应，代码路径永远走不到（routes/spa.py 自己也是这么写的）。
+  # 需要用它们，请连同 docker/nginx/nginx.conf 一起改，而不是只加一个环境变量。
   # 数据库：留空 = 使用 API_KEYS_FILE 指向的 SQLite 文件（默认，见下）。
   # 设为 PostgreSQL URL（postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/openfish）
   # 即把 API key / 用户 / 角色 / 统计整体切到 db 服务。改这里的同时请用
@@ -60,6 +74,16 @@ x-backend-env: &backend-env
   # 对本机可达的绝对基址；设备授权流程用它拼 verification_uri。
   # 走本 compose 的 nginx 时留空即可（从 X-Forwarded-* 推导）。
   PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+  # ── 设备授权流程（DSH 企业内网插件）─────────────────────
+  # 待授权请求的落盘位置；留空 = /app/data/device_codes.json（随数据卷持久化）。
+  DEVICE_CODES_FILE: ${DEVICE_CODES_FILE:-}
+  # 待授权请求的有效期（秒），留空 = 900。
+  DEVICE_CODE_TTL: ${DEVICE_CODE_TTL:-}
+  # ── 模型路由连通性探测 ──────────────────────────────────
+  # 一次探测的超时（秒），留空 = 5。
+  MODEL_PROBE_TIMEOUT: ${MODEL_PROBE_TIMEOUT:-}
+  # 允许探测的主机白名单，**JSON 数组**（如 ["api.deepseek.com"]）；留空 = 默认策略。
+  MODEL_PROBE_ALLOWED_HOSTS: ${MODEL_PROBE_ALLOWED_HOSTS:-}
   # ── 内网制品中心 ────────────────────────────────────────
   TOOLS_DIR: /app/tools
   NPM_DIR: /app/npm
@@ -83,6 +107,29 @@ x-backend-env: &backend-env
   S3_SECRET_KEY: ${S3_SECRET_KEY:-}
   S3_ADDRESS_STYLE: ${S3_ADDRESS_STYLE:-auto}
   S3_PREFIX: ${S3_PREFIX:-}
+  # ── 上传校验与首启种子 ──────────────────────────────────
+  # 空库首启是否写入 backend/config/seed/ 的默认内容；留空 = true。
+  SEED_CATALOGS: ${SEED_CATALOGS:-}
+  # watchdog 目录监听（index 内存缓存）；留空 = true。
+  WATCH_PACKAGES: ${WATCH_PACKAGES:-}
+  # 允许的上传扩展名，**JSON 数组**（如 ["whl","zip","tar.gz","tar"]）；留空 = 该默认值。
+  ALLOW_EXTENSIONS: ${ALLOW_EXTENSIONS:-}
+  # 是否允许覆盖已存在的同名包；留空 = false。
+  OVERWRITE: ${OVERWRITE:-}
+  # ── ClamAV / GuardDog 上传扫描 ──────────────────────────
+  # clamd 不在本 compose 里：CLAMAV_HOST 留空即禁用，填了才扫描。
+  CLAMAV_HOST: ${CLAMAV_HOST:-}
+  CLAMAV_PORT: ${CLAMAV_PORT:-}
+  CLAMAV_TIMEOUT: ${CLAMAV_TIMEOUT:-}
+  # true 时 ClamAV 不可用即拒绝上传（默认 false = 只告警）。
+  CLAMAV_REQUIRED: ${CLAMAV_REQUIRED:-}
+  # GuardDog 随镜像安装（非 Windows），默认 enabled；REQUIRED=true 时不可用即拒绝上传。
+  GUARDDOG_ENABLED: ${GUARDDOG_ENABLED:-}
+  GUARDDOG_REQUIRED: ${GUARDDOG_REQUIRED:-}
+  # 风险分达到此值即拒绝；留空 = 5.0（GuardDog 自己的 suspicious 档）。
+  GUARDDOG_MIN_RISK_SCORE: ${GUARDDOG_MIN_RISK_SCORE:-}
+  # GuardDog 的 top-packages 缓存目录；留空 = /app/data/guarddog（随数据卷持久化）。
+  GUARDDOG_CACHE_DIR: ${GUARDDOG_CACHE_DIR:-}
   # ── 只读穿透代理（回源地址留空则仅服务本地制品）──────────
   NPM_PROXY_ENABLED: ${NPM_PROXY_ENABLED:-true}
   NPM_UPSTREAM_TOKEN: ${NPM_UPSTREAM_TOKEN:-}
@@ -114,7 +161,11 @@ x-backend-env: &backend-env
   OAUTH2_AUTHORIZE_URL: ${OAUTH2_AUTHORIZE_URL:-}
   OAUTH2_INTROSPECT_URL: ${OAUTH2_INTROSPECT_URL:-}
   OAUTH2_CA_BUNDLE: ${OAUTH2_CA_BUNDLE:-}
+  OAUTH2_AUTH_PREFERENCE: ${OAUTH2_AUTH_PREFERENCE:-}
   IS_4A: ${IS_4A:-false}
+  # AUTH_ENABLED 刻意不转发：compose 拓扑永远开着认证（框架默认 true）。要关闭
+  # 认证不是"再设一个变量"——请改本文件（AUTH_ENABLED: "false"），并清楚这意味着
+  # 边缘 nginx 后面的整个管理面变成匿名可写。
   # ── 上传限制（需与 nginx client_max_body_size 保持一致）──
   MAX_CONTENT_LENGTH: "104857600"
   # ── Agent Hub：仓库面（decision D1 — Forgejo owns the git wire protocol）
@@ -131,6 +182,9 @@ x-backend-env: &backend-env
   # admin token 至少需要 `write:admin`（建用户 / 替用户铸票 / 删用户都在 /admin/*）。
   FORGEJO_ADMIN_TOKEN: ${FORGEJO_ADMIN_TOKEN:-}
   FORGEJO_WEBHOOK_SECRET: ${FORGEJO_WEBHOOK_SECRET:-}
+  # 从外部 GitHub / Gitee / GitLab 导入时用于 clone 的凭据（token，或 user:pass）；
+  # 留空 = 只能导入匿名可达的仓库。同样是密钥：只走环境变量。
+  IMPORT_SOURCE_TOKEN: ${IMPORT_SOURCE_TOKEN:-}
   # Fernet 主密钥：加密落库 git_identities 表里的 Forgejo token（§5.2 身份兑换）。
   # 缺失时 /git-credential 返回 503，**不回退明文**。
   GIT_IDENTITY_KEY: ${GIT_IDENTITY_KEY:-}
@@ -281,6 +335,8 @@ services:
       args:
         # 内网可换成镜像源，例如 https://registry.npmmirror.com
         NPM_REGISTRY: ${NPM_REGISTRY:-}
+        # SPA 侧边栏显示的构建标识；留空 = 构建时刻（vite.config.ts 的默认）。
+        BUILD_ID: ${BUILD_ID:-}
     image: openfish-frontend:latest
     container_name: openfish-frontend
     restart: unless-stopped
