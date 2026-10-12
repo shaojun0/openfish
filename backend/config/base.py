@@ -50,6 +50,16 @@ class EnvSettings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # The source-level half of "an empty variable means unset" (see the
+        # module docstring).  It has to live here, not only in
+        # ``_drop_blank_values``: for a complex field (``list[str]``,
+        # ``dict``) the environment source JSON-decodes the raw text while it
+        # is collecting values, so ``ALLOW_EXTENSIONS=`` raises a
+        # ``SettingsError`` *before* a model validator ever sees the data —
+        # and that error is what stops the container from booting.  A blank
+        # scalar reaches the model as ``""`` and is dropped by
+        # ``_drop_blank_values`` instead; keeping both covers the whole tree.
+        env_ignore_empty=True,
     )
 
     @model_validator(mode="before")

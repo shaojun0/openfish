@@ -21,3 +21,13 @@ checks:
     command: python .agent/checks/check_mirror_catalog.py
     timeout: 120
     validated: false
+  - id: blank-env-defaults
+    # A blank forwarded knob (`VAR=` in `docker/.env`) must mean "unset" for
+    # every field type, `list[str]` included: the two JSON-array variables the
+    # container used to crash on were `ALLOW_EXTENSIONS=` and
+    # `MODEL_PROBE_ALLOWED_HOSTS=`.  Walks the whole configuration tree, so a
+    # future `:-}` line cannot smuggle the same boot failure back in.  Same
+    # interpreter rule as above.
+    command: python .agent/checks/check_blank_env_defaults.py
+    timeout: 120
+    validated: false
