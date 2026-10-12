@@ -10,12 +10,18 @@
 
 ```bash
 cd docker
-cp .env.example .env                       # 必填 SECRET_KEY，否则 compose 直接中止
+./bootstrap-env.sh                         # 生成 .env + forgejo.env 的全部密钥（幂等，可重跑）
 docker compose up -d --build               # 缺失的 bind 源由 Docker 自动创建
 docker compose --profile db up -d          # + PostgreSQL（见 §6）
 docker compose --profile runner up -d      # + 智能体运行时（同一镜像的第二平面）
 docker compose --profile debug up -d       # + 只起 bash 的调试容器（20417）
 ```
+
+`bootstrap-env.sh` 只**补空值**，已有的 `.env` 永不覆盖、也不重置（没有 `--force`；要重来
+就自己删掉文件）。`--dry-run` 只打印将要做什么，`--host <域名或 IP>` 指定对外地址
+（默认取本机出口 IP，`OPENFISH_PUBLIC_HOST` 也可以）。手工路径仍然是
+`cp .env.example .env` 再自己填 `SECRET_KEY` —— 它为空时 compose 直接中止。
+Forgejo 的管理员 / runner 令牌只能在实例起来之后签发，脚本会在结尾把这两步打印出来（见 §3）。
 
 进入应用只有边缘 nginx 一个入口：`http://127.0.0.1:20416/`。
 
