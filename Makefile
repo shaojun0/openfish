@@ -32,7 +32,7 @@ gates-frontend:
 		echo "  Install it with: cd $(FRONTEND) && npm ci"; \
 	elif ! command -v npm > /dev/null 2>&1; then \
 		echo "⚠ npm is not on PATH — skipping the frontend smoke test."; \
-		echo "  Install Node (see .github/workflows/gates.yml, node 20) or put it on PATH."; \
+		echo "  Install Node 24 (see .github/workflows/gates.yml) or put it on PATH."; \
 	else \
 		echo ""; \
 		echo "── frontend npm run smoke ─────────────────────────────"; \
