@@ -2,13 +2,16 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import { fetchSession, type SessionInfo } from '@/api'
-import { setAuthEnabled } from '@/api/client'
+import { redirectToLogin, setAuthEnabled } from '@/api/client'
 
 /**
  * Current user + permissions, resolved from `/api/v1/session`.
  *
- * The backend answers this endpoint with 200 even when unauthenticated, so the
- * SPA can render a signed-out state without tripping the 401 interceptor.
+ * The backend answers this endpoint with 200 even when unauthenticated, so an
+ * anonymous caller gets a body to read instead of an error.  When that body
+ * says authentication is on, the store turns it into the login round trip: the
+ * shell is a static file in the split deployment, so this answer — not a failed
+ * API call — is the only thing that reliably says "nobody is signed in".
  */
 export const useSessionStore = defineStore('session', () => {
   const info = ref<SessionInfo | null>(null)
@@ -39,6 +42,10 @@ export const useSessionStore = defineStore('session', () => {
       const data = await fetchSession()
       info.value = data
       setAuthEnabled(data.auth_enabled)
+      // Order matters: `redirectToLogin()` reads the flag set on the line above.
+      if (data.auth_enabled && !data.authenticated) {
+        redirectToLogin()
+      }
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e)
     } finally {
