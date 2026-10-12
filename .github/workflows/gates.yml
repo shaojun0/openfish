@@ -31,7 +31,15 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # Must satisfy the engines the lockfile installs: `jsdom@30` declares
+          # `^22.22.2 || ^24.15.0 || >=26.0.0` and its `undici@8` needs
+          # `>=22.19.0`.  On node 20 the install still succeeds (npm only warns)
+          # and then `require('jsdom')` dies with
+          # `TypeError: webidl.util.markAsUncloneable is not a function`,
+          # because undici reads that helper from `node:worker_threads`, which
+          # only grew it in node 22.13.  Pinning 24 keeps CI on the same major
+          # the frontend is developed against.
+          node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
