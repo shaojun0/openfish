@@ -11,7 +11,10 @@
 #   3. docker/forgejo/forgejo.env missing -> copy the template, mode 600, fill
 #      its three instance keys, and point ROOT_URL/DOMAIN at the host address
 #      (--host, else auto-detected).
-#   4. Print exactly what still needs a human (tokens that only exist after the
+#   4. Walk the trees compose bind-mounts and warn about symlinks that will not
+#      resolve *inside* the container (a bind mount carries the directory, never
+#      the host's path space).
+#   5. Print exactly what still needs a human (tokens that only exist after the
 #      instance is up).
 #
 # There is deliberately no --force: an existing .env is never overwritten or
@@ -248,11 +251,54 @@ if [ -f "$FE" ]; then
   fi
 fi
 
-# ── 4. human checklist ──────────────────────────────────────────────────────
+# ── 4. mount links ──────────────────────────────────────────────────────────
+# A bind mount carries the directory, never the host's path space: a link
+# *inside* one of these trees is resolved by the container, where a host
+# absolute target does not exist.  Only the top-level source link
+# (`docker/npm` -> /srv/...) may be absolute — Docker resolves that one on the
+# host, which is why it is not scanned here.  `share/` matters most: it holds
+# `PACKAGES_DIR`, a directory the backend creates on boot, so a host-absolute
+# link there stops the container before it serves anything.
+#
+# The big mirrors (npm/, node-builds/, docker-images/, debian/) are deliberately
+# not walked — the backend only reads them, and a depth-3 scan of a full mirror
+# on a network disk is expensive.  The same rule still applies to links in them.
+LINK_WARNINGS=0
+for tree in share tools docs data; do
+  root="$(readlink -f "$tree" 2>/dev/null || true)"
+  [ -d "$root" ] || continue
+  while IFS= read -r link; do
+    target="$(readlink "$link")"
+    case "$target" in
+      /*)
+        warn "container cannot follow ${link} -> ${target} (use a relative target)"
+        LINK_WARNINGS=$((LINK_WARNINGS + 1))
+        ;;
+      *)
+        if [ ! -e "$link" ]; then
+          warn "broken link: ${link} -> ${target}"
+          LINK_WARNINGS=$((LINK_WARNINGS + 1))
+        fi
+        ;;
+    esac
+  done < <(find "$root" -maxdepth 3 -type l -print 2>/dev/null || true)
+done
+# `if`, not `[ ... ] && say`: the test is false on a clean tree, and its status
+# would become the script's under `set -e` if it were the last command.
+if [ "$LINK_WARNINGS" -eq 0 ]; then
+  say "mount links: nothing the container cannot follow"
+fi
+
+# ── 5. human checklist ──────────────────────────────────────────────────────
 echo
 if [ -n "$DRIFTED" ]; then
   warn "not in the file, so nothing was generated for: ${DRIFTED}"
   warn "either the .env predates that key, or the knob was renamed upstream"
+  echo
+fi
+if [ "$LINK_WARNINGS" -gt 0 ]; then
+  warn "${LINK_WARNINGS} mount link(s) will not resolve inside the container (see above)"
+  warn "a link inside a bind mount has to be relative; docker/README.md §4"
   echo
 fi
 echo "openfish — still needs a human:"
