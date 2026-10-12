@@ -118,7 +118,55 @@ app = OpenAPI(
 app.config.from_mapping(settings.model_dump())
 app.secret_key = settings.server.secret_key
 app.config["MAX_CONTENT_LENGTH"] = settings.storage.max_content_length
-os.makedirs(settings.storage.packages_dir, exist_ok=True)
+
+
+# ── Mount roots ─────────────────────────────────────────────────────
+# `PACKAGES_DIR` is a catalog root: a bind mount in compose, and docker/README
+# §4 re-points those with a symlink (`ln -sfn /srv/openfish-share/npm docker/npm`).
+# When such a link does not resolve — the disk was never mounted, or the tree was
+# copied from another host and its absolute links mean nothing inside the
+# container — `os.makedirs(..., exist_ok=True)` fails with a bare
+# `FileExistsError: [Errno 17]` on a path the operator cannot connect to
+# anything.  Following the link and creating its target is not an option: an
+# unmounted mountpoint would silently start collecting packages on the root
+# filesystem.  So say what is wrong and refuse to boot, the way compose refuses
+# on a blank `SECRET_KEY`.
+def _directory_problem(path: str) -> str | None:
+    """Why *path* cannot be used as a directory, or ``None`` when it can.
+
+    Walks up from *path*: the first segment that exists but is not a directory
+    is the obstacle (a dangling symlink, a symlink to a file, a regular file).
+    """
+    current = os.path.abspath(path)
+    while current != os.path.dirname(current):  # stop at the filesystem root
+        if os.path.islink(current) and not os.path.isdir(current):
+            target = os.path.realpath(current)
+            return (
+                f"the symlink {current!r} points at {target!r}, which is not a directory"
+            )
+        if os.path.exists(current):
+            return None if os.path.isdir(current) else f"{current!r} is not a directory"
+        current = os.path.dirname(current)
+    return None
+
+
+def _ensure_directory(path: str, variable: str) -> None:
+    """Create the configured mount root *path*, or say why it is unusable."""
+    problem = _directory_problem(path)
+    if problem is not None:
+        raise RuntimeError(
+            f"cannot use {variable}={path!r}: {problem}. Create that path, or "
+            "re-point the symlink at something that exists where the process runs "
+            "— a link written on the host with an absolute target is not there "
+            "after a bind mount; see `docker/README.md` §5."
+        )
+    os.makedirs(path, exist_ok=True)
+
+
+# The variable name is asked of the model, never re-typed (see `config.base`).
+_ensure_directory(
+    settings.storage.packages_dir, settings.storage.env_name("packages_dir")
+)
 
 # ── Logging ─────────────────────────────────────────────────────────
 # Installed *before* the extensions, because `ErrorHandlersExtension` redacts
