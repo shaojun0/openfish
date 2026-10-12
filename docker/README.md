@@ -106,6 +106,17 @@ docker compose build frontend
 ln -sfn /srv/openfish-mirror/npm docker/npm
 ```
 
+**链接目标必须在容器里也解析得到。** `docker/` 下作为 bind 源的链接由 Docker 在宿主机上解析，
+写绝对路径没问题；但**被挂载目录内部**的链接是在容器里解析的，宿主机的绝对路径在容器里根本不存在，
+于是它就是一个断链：
+
+```bash
+docker/share/python/packages_data -> /mnt/big-disk/packages   # ✗ 容器里没有 /mnt/big-disk
+docker/share/python/packages_data -> ../packages              # ✓ 相对链接，挂载后仍然成立
+```
+
+`PACKAGES_DIR`（以及它的父目录）的这种情况后端启动时就会报出来，见 §5。
+
 | 目录 | 内容 | 进数据库吗 |
 | --- | --- | --- |
 | `share/` `npm/` `node-builds/` `docker-images/` `debian/` | 制品字节 | npm / docker / debian 的 overlay 行在 `catalog_entries` 表里 |
@@ -134,6 +145,15 @@ docker compose logs --tail=100 backend forgejo
 
 常见症状：
 - `error while interpolating services.backend.environment.SECRET_KEY` → 忘了 `cp .env.example .env` 或没填。
+- 后端反复重启，日志里 `RuntimeError: cannot use PACKAGES_DIR=...: the symlink ... points at ..., which is
+  not a directory` → `PACKAGES_DIR`（或它的某一级父目录）是个断链。看这条链接：
+
+  ```bash
+  ls -l docker/share/python            # 例：packages_data -> /mnt/big-disk/packages
+  ```
+
+  宿主机上的绝对路径在容器里不存在，把目标改成**相对**路径（或指向容器里真实存在的目录），
+  再 `docker compose restart backend`。`PYTHON_BUILDS_DIR` 等其它挂载目录同理。
 - webhook 401 → `FORGEJO_WEBHOOK_SECRET` 与 forgejo 容器里的值不一致。
 - `/api/v1/repos/<slug>/git-credential` 503 → `GIT_IDENTITY_KEY` 为空。
 - 上传 `413` → 请求体超过边缘 nginx 的 `client_max_body_size`（100m，与
