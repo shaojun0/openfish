@@ -156,9 +156,15 @@ cd frontend && npm run smoke
 
 ```bash
 cd docker
-cp .env.example .env      # REQUIRED: set SECRET_KEY, otherwise compose aborts
+./bootstrap-env.sh        # writes .env + forgejo.env with every secret generated
 docker compose up -d --build   # 缺失的 bind 源由 Docker 自动创建；DB 直接用 backend/data
 ```
+
+`docker/bootstrap-env.sh` only fills blank secrets and never overwrites or resets an
+existing `.env` (there is no `--force`; `--dry-run` previews). The manual path stays
+`cp .env.example .env` plus setting `SECRET_KEY` yourself — compose aborts while it is
+empty. Forgejo's admin / runner tokens can only be minted once the instance is up, and
+the script prints those commands when it finishes.
 
 Every bind-mount source in `docker-compose.yml` is a path **inside `docker/`**,
 and Docker creates the missing ones when you `docker compose up` (empty,
