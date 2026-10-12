@@ -34,10 +34,12 @@ checks:
   - id: packages-dir-diagnostic
     # A broken symlink at `PACKAGES_DIR` (the `ln -s` mistake in docker/README
     # §4, where the host absolute path does not exist inside the container) must
-    # be reported by name — variable, link and target — instead of the bare
-    # `FileExistsError: [Errno 17] File exists` that stopped gunicorn's worker.
-    # Runs `import app` in a subprocess; every case fails before the extensions
-    # load, so it touches no database.  Same interpreter rule as above.
+    # be repaired when that is safe, and reported by name — variable, link and
+    # target — when it is not, instead of the bare `FileExistsError: [Errno 17]
+    # File exists` that stopped gunicorn's worker.  Runs `import app` in a
+    # subprocess; the refused cases fail before the extensions load, and the
+    # repaired one is pointed at a temp tree, so it touches no database.  Same
+    # interpreter rule as above.
     command: python .agent/checks/check_packages_dir_diagnostic.py
     timeout: 120
     validated: false

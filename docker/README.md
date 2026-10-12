@@ -115,7 +115,9 @@ docker/share/python/packages_data -> /mnt/big-disk/packages   # ✗ 容器里没
 docker/share/python/packages_data -> ../packages              # ✓ 相对链接，挂载后仍然成立
 ```
 
-`PACKAGES_DIR`（以及它的父目录）的这种情况后端启动时就会报出来，见 §5。
+相对链接的目标**只是还没建出来**时，后端启动会自己补上（目标必须和链接在同一文件系统上，
+即仍在挂载内）——这跟 `makedirs` 补一个缺失目录是一回事。绝对链接不会：它指向的东西在容器里
+不存在，替它建目录只会把包装进容器可写层，所以后端报出变量名、链接和目标后拒绝启动，见 §5。
 
 | 目录 | 内容 | 进数据库吗 |
 | --- | --- | --- |
@@ -153,7 +155,9 @@ docker compose logs --tail=100 backend forgejo
   ```
 
   宿主机上的绝对路径在容器里不存在，把目标改成**相对**路径（或指向容器里真实存在的目录），
-  再 `docker compose restart backend`。`PYTHON_BUILDS_DIR` 等其它挂载目录同理。
+  再 `docker compose restart backend`。相对链接的目标只是缺失时后端会自己建出来；
+  绝对链接、跨文件系统、路径被普通文件占住这三种都会报错拒绝启动。`PYTHON_BUILDS_DIR`
+  等其它挂载目录同理，`./bootstrap-env.sh` 在 `up` 之前也会把这类链接列出来。
 - webhook 401 → `FORGEJO_WEBHOOK_SECRET` 与 forgejo 容器里的值不一致。
 - `/api/v1/repos/<slug>/git-credential` 503 → `GIT_IDENTITY_KEY` 为空。
 - 上传 `413` → 请求体超过边缘 nginx 的 `client_max_body_size`（100m，与

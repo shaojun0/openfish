@@ -1,28 +1,34 @@
 #!/usr/bin/env python
-"""Gate: a broken `PACKAGES_DIR` mount is explained, not a bare Errno 17.
+"""Gate: a broken `PACKAGES_DIR` mount is repaired or explained, never Errno 17.
 
 `PACKAGES_DIR` is a bind-mounted catalog root, and `docker/README.md` §4
-re-points those with a symlink.  A link whose target is not there **inside the
-container** — the disk was never mounted, or the link was written on the host
-with an absolute target that does not survive the bind mount — used to stop the
-worker with::
+re-points those with a symlink.  The bind mount carries the *directory*, never
+the host's path space, so a link inside it is resolved by the container.  Used
+to stop the worker with::
 
     FileExistsError: [Errno 17] File exists: '/app/share/python/packages_data'
 
-a message that names neither the variable nor the cause.  `app.py` now walks
-the path and says which segment is the obstacle, before gunicorn loads the app.
+a message that names neither the variable nor the cause.  `app.py` now decides
+by where the link points, and this gate pins both halves.
 
-Three shapes have to be diagnosed, and this gate pins all three:
+**Repaired** — a relative target that is missing, on the link's own filesystem:
+creating it is what `makedirs` does for any other missing path, and the
+directory stays inside the mounted tree, so the app boots.
 
-1. the link is the last segment of `PACKAGES_DIR`;
-2. the link is an ancestor of it (the ordinary `ln -s` mistake, one level up);
-3. the path exists as a regular file.
+**Refused** — everything else, with the variable, the link and its target named:
 
-Each case runs `import app` in a subprocess with that `PACKAGES_DIR`; all three
-fail before the extensions are initialised, so the gate touches no database and
-no catalog.  The happy path needs no case here: every other start of the app
-(and the mirror-catalog gate, which imports it) would go red on a false
-positive.
+1. an absolute target (it names a host disk the container cannot see, so
+   creating it would put the packages in the container's writable layer);
+2. a relative target that climbs onto a different filesystem (not ours to
+   create);
+3. a regular file where the directory should be.
+
+Case 2 needs two devices, so the gate compares `/dev/shm` with the temp
+directory and skips it — saying why — when they share one.
+
+Every case runs `import app` in a subprocess; the refused ones fail before the
+extensions are initialised, and the repaired one is pointed at the temp tree, so
+the gate touches no database and no catalog.
 
 Run from the repository root::
 
@@ -34,6 +40,7 @@ Run from the repository root::
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,12 +50,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = REPO_ROOT / "backend"
 TIMEOUT_S = 120
 TARGET = "/nonexistent-openfish-target"
+OTHER_FS = Path("/dev/shm")
+OTHER_FS_PROBE = OTHER_FS / "openfish-packages-dir-probe"
 
 
-def _import_app(packages_dir: str) -> tuple[int, str]:
-    """Run `import app` with *packages_dir* configured; return (code, output)."""
+def _import_app(overrides: dict[str, str]) -> tuple[int, str]:
+    """Run `import app` with *overrides* in its environment; return (code, out)."""
     env = dict(os.environ)
-    env["PACKAGES_DIR"] = packages_dir
+    env.update(overrides)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     proc = subprocess.run(
         [sys.executable, "-c", "import app"],
@@ -61,36 +70,81 @@ def _import_app(packages_dir: str) -> tuple[int, str]:
     return proc.returncode, proc.stdout + proc.stderr
 
 
+def _state_env(root: Path) -> dict[str, str]:
+    """Keep the repaired run's writes inside *root* instead of the checkout."""
+    state, cache, data = root / "state", root / "cache", root / "data"
+    return {
+        "PYTHON_BUILDS_DIR": str(state / "python-builds"),
+        "NODE_BUILDS_DIR": str(state / "node-builds"),
+        "TOOLS_DIR": str(state / "tools"),
+        "DOCS_DIR": str(state / "docs"),
+        "NPM_DIR": str(state / "npm"),
+        "DOCKER_DIR": str(state / "docker-images"),
+        "DEBIAN_DIR": str(state / "debian"),
+        "NPM_CACHE_DIR": str(cache / "npm"),
+        "DOCKER_CACHE_DIR": str(cache / "docker"),
+        "DEBIAN_CACHE_DIR": str(cache / "debian"),
+        "API_KEYS_FILE": str(data / "cpypiserver.db"),
+        "DEVICE_CODES_FILE": str(data / "device_codes.json"),
+    }
+
+
 def main() -> int:
     failures: list[str] = []
+    checked = 0
     with tempfile.TemporaryDirectory(prefix="openfish-packages-dir-") as tmp:
         root = Path(tmp)
         (root / "python" / "real").mkdir(parents=True)
         (root / "afile").write_text("not a directory\n")
         os.symlink(TARGET, root / "python" / "packages_data")
         os.symlink(TARGET, root / "broken-parent")
+        os.symlink("../packages", root / "python" / "relative")
 
-        cases = {
-            "dangling last segment": root / "python" / "packages_data",
-            "dangling ancestor": root / "broken-parent" / "packages",
-            "regular file": root / "afile",
-        }
-        checked = 0
-        for name, path in cases.items():
+        # ── refused: name the variable, the link and where it points
+        refused: list[tuple[str, Path, list[str]]] = [
+            ("absolute target", root / "python" / "packages_data", [TARGET]),
+            ("dangling ancestor", root / "broken-parent" / "packages", [TARGET]),
+            ("regular file", root / "afile", []),
+        ]
+        if os.stat(root).st_dev != os.stat(OTHER_FS).st_dev:
+            OTHER_FS_PROBE.mkdir(exist_ok=True)
+            climbing = os.path.relpath(OTHER_FS_PROBE / "packages", root / "python")
+            os.symlink(climbing, root / "python" / "crossfs")
+            refused.append(
+                ("different filesystem", root / "python" / "crossfs", [str(OTHER_FS_PROBE / "packages")])
+            )
+        else:
+            print(
+                f"note: {OTHER_FS} shares a device with {root}; crossing-filesystem case skipped",
+                file=sys.stderr,
+            )
+
+        for name, path, fragments in refused:
             checked += 1
-            code, output = _import_app(str(path))
-            last_line = output.strip().splitlines()[-1] if output.strip() else "(no output)"
+            code, output = _import_app({"PACKAGES_DIR": str(path)})
+            tail = output.strip().splitlines()[-1] if output.strip() else "(no output)"
             if code == 0:
                 failures.append(f"{name}: the app started on a path that is not a directory")
                 continue
             if "cannot use PACKAGES_DIR" not in output:
-                failures.append(f"{name}: no PACKAGES_DIR diagnosis — {last_line}")
+                failures.append(f"{name}: no PACKAGES_DIR diagnosis — {tail}")
                 continue
-            if str(path) not in output:
-                failures.append(f"{name}: the message does not name the configured path")
-            if path.is_symlink() and TARGET not in output:
-                failures.append(f"{name}: the message does not name the link's target")
+            for fragment in [str(path), *fragments]:
+                if fragment not in output:
+                    failures.append(f"{name}: the message does not mention {fragment!r}")
 
+        # ── repaired: the relative target is created and the app runs on
+        checked += 1
+        link = root / "python" / "relative"
+        created = root / "packages"
+        code, output = _import_app({"PACKAGES_DIR": str(link), **_state_env(root)})
+        tail = output.strip().splitlines()[-1] if output.strip() else "(no output)"
+        if "cannot use PACKAGES_DIR" in output:
+            failures.append(f"relative target: still refused — {tail}")
+        if not created.is_dir():
+            failures.append(f"relative target: {created} was not created (exit {code}) — {tail}")
+
+    shutil.rmtree(OTHER_FS_PROBE, ignore_errors=True)
     for line in failures:
         print(f"FAIL {line}")
     print(

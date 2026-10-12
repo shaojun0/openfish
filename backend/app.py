@@ -123,27 +123,66 @@ app.config["MAX_CONTENT_LENGTH"] = settings.storage.max_content_length
 # ── Mount roots ─────────────────────────────────────────────────────
 # `PACKAGES_DIR` is a catalog root: a bind mount in compose, and docker/README
 # §4 re-points those with a symlink (`ln -sfn /srv/openfish-share/npm docker/npm`).
-# When such a link does not resolve — the disk was never mounted, or the tree was
-# copied from another host and its absolute links mean nothing inside the
-# container — `os.makedirs(..., exist_ok=True)` fails with a bare
-# `FileExistsError: [Errno 17]` on a path the operator cannot connect to
-# anything.  Following the link and creating its target is not an option: an
-# unmounted mountpoint would silently start collecting packages on the root
-# filesystem.  So say what is wrong and refuse to boot, the way compose refuses
-# on a blank `SECRET_KEY`.
+# The bind mount carries the *directory*, never the host's path space, so a link
+# inside it is resolved by the container: a host absolute target is not there.
+# `os.makedirs(..., exist_ok=True)` answers that with a bare
+# `FileExistsError: [Errno 17]` — the path does exist, as a link, it just is not
+# a directory — which names neither the variable nor the cause.
+#
+# Two outcomes instead, decided by where the link points:
+#   * a *relative* target that is not there yet, on the same filesystem as the
+#     link, is created.  That is what `makedirs` does for a path that is simply
+#     missing, and the directory stays inside the mounted tree;
+#   * everything else — an absolute target, another filesystem, a regular file in
+#     the way — refuses to boot with the variable, the link and its target named.
+#     Creating an absolute target would put the packages in the container's
+#     writable layer, where the next rebuild discards them.
+def _broken_link(path: str) -> str | None:
+    """The first symlink at or above *path* that does not resolve to a directory."""
+    current = os.path.abspath(path)
+    while current != os.path.dirname(current):  # stop at the filesystem root
+        if os.path.islink(current) and not os.path.isdir(current):
+            return current
+        if os.path.exists(current):
+            return None  # a real directory (or a file, reported separately) is above
+        current = os.path.dirname(current)
+    return None
+
+
+def _repairable_target(link: str) -> str | None:
+    """Where to create broken *link*'s target, or ``None`` when that is not safe.
+
+    A relative target is resolved inside whatever filesystem reads the link, so
+    creating it here is the same act as ``makedirs`` on a path that is missing —
+    but only when it stays on the link's own filesystem (i.e. inside the same
+    mount) and its parent already exists.  Only the leaf is ever created.
+    """
+    text = os.readlink(link)
+    if os.path.isabs(text):
+        return None
+    target = os.path.normpath(os.path.join(os.path.dirname(link), text))
+    parent = os.path.dirname(target)
+    if not os.path.isdir(parent):
+        return None
+    if os.stat(parent).st_dev != os.stat(os.path.dirname(link)).st_dev:
+        return None  # a different mount: not ours to create
+    return target
+
+
 def _directory_problem(path: str) -> str | None:
     """Why *path* cannot be used as a directory, or ``None`` when it can.
 
     Walks up from *path*: the first segment that exists but is not a directory
     is the obstacle (a dangling symlink, a symlink to a file, a regular file).
     """
+    link = _broken_link(path)
+    if link is not None:
+        return (
+            f"the symlink {link!r} points at {os.path.realpath(link)!r}, "
+            "which is not a directory"
+        )
     current = os.path.abspath(path)
-    while current != os.path.dirname(current):  # stop at the filesystem root
-        if os.path.islink(current) and not os.path.isdir(current):
-            target = os.path.realpath(current)
-            return (
-                f"the symlink {current!r} points at {target!r}, which is not a directory"
-            )
+    while current != os.path.dirname(current):
         if os.path.exists(current):
             return None if os.path.isdir(current) else f"{current!r} is not a directory"
         current = os.path.dirname(current)
@@ -152,6 +191,17 @@ def _directory_problem(path: str) -> str | None:
 
 def _ensure_directory(path: str, variable: str) -> None:
     """Create the configured mount root *path*, or say why it is unusable."""
+    link = _broken_link(path)
+    target = _repairable_target(link) if link is not None else None
+    if target is not None:
+        os.makedirs(target, exist_ok=True)
+        # Before `logging.basicConfig`, so this goes to stderr the way the
+        # RuntimeError below does; either way it lands in `docker compose logs`.
+        print(
+            f"openfish: {variable}: created {target!r}, "
+            f"the missing target of the symlink {link!r}",
+            file=sys.stderr,
+        )
     problem = _directory_problem(path)
     if problem is not None:
         raise RuntimeError(
