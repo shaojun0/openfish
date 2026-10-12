@@ -1204,12 +1204,15 @@ on a rebuilt frontend bundle. It is described in
 **Where the console's protection lives now.** In the split Docker deployment the
 SPA *shell and bundle* are static files served by the `frontend` container, so
 they are reachable without a session: an anonymous browser loads the app, its
-first `GET /api/v1/session` answers `401`, and `frontend/src/api/client.ts`
-redirects it to `/auth/login`. Nothing behind that shell is public — every data
-endpoint, every `/docs/*` page and the whole `/api/v1` surface keep their own
-guards, and `app:read` still gates the console whenever Flask is the one serving
-it. What changes is only *where the shell is served from*, never *what data is
-reachable*; the bundle contains no registry data.
+first `GET /api/v1/session` answers `200` with `authenticated: false` (never a
+`401` — the same reply has to carry `auth_enabled: false` for a deployment with
+no login flow at all), and `frontend/src/stores/session.ts` turns that answer
+into the `/auth/login` redirect through `frontend/src/api/client.ts`. Nothing
+behind that shell is public — every data endpoint, every `/docs/*` page and the
+whole `/api/v1` surface keep their own guards, and `app:read` still gates the
+console whenever Flask is the one serving it. What changes is only *where the
+shell is served from*, never *what data is reachable*; the bundle contains no
+registry data.
 
 > **Want the old behaviour back** (the shell itself refusing anonymous callers)?
 > Send `/` and `/static/dist/` to the `backend` upstream instead of the

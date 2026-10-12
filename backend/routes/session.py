@@ -2,7 +2,12 @@
 
 The SPA needs this *before* it can render anything, so ``/api/v1/session``
 answers with HTTP 200 even for an anonymous caller instead of raising 401.
-That keeps the client-side 401 interceptor reserved for real API calls.
+That keeps the client-side 401 interceptor reserved for real API calls, and the
+answer itself is what sends a signed-out browser to ``/auth/login`` (see
+``frontend/src/stores/session.ts``): the split deployment serves the shell as a
+static file, so no API call on the way in is guaranteed to fail.  Turning this
+into a 401 would also take the ``auth_enabled: false`` reply away from a
+deployment that has no login flow at all.
 """
 
 from __future__ import annotations

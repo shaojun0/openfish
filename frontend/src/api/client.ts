@@ -16,6 +16,32 @@ export function setAuthEnabled(value: boolean): void {
 }
 
 /**
+ * Send the browser to the login route — the one place that decides it.
+ *
+ * Two callers, and neither is redundant:
+ *
+ * * the 401 interceptor below, for an API call that failed while the console
+ *   was already open;
+ * * the session store, for the **entry** case.  In the split deployment `/` is
+ *   a static file served by the `frontend` container, and `/api/v1/session`
+ *   deliberately answers `200` (not `401`) to an anonymous caller so the
+ *   response can carry `auth_enabled: false` for a deployment that has no login
+ *   at all.  Nothing on the home page is therefore *required* to fail — the
+ *   session answer itself has to mean "log in", or the console renders its
+ *   signed-out skeleton forever.
+ *
+ * The two guards are what keep this from becoming a redirect loop: skipping
+ * when authentication is off is the same `AUTH_ENABLED=false` case the session
+ * endpoint advertises, and skipping under `/auth/*` keeps an already-failing
+ * login round trip from retrying itself.
+ */
+export function redirectToLogin(): void {
+  if (!flags.authEnabled) return
+  if (window.location.pathname.startsWith('/auth')) return
+  window.location.href = '/auth/login'
+}
+
+/**
  * The one axios instance every call in `./` goes through.
  *
  * It is deliberately **not** named `http`: a variable by that name reads like
@@ -41,13 +67,12 @@ export interface ApiErrorBody {
 apiClient.interceptors.response.use(
   (response) => response,
   (error: AxiosError<ApiErrorBody>) => {
-    const status = error.response?.status
-    if (status === 401 && flags.authEnabled && !window.location.pathname.startsWith('/auth')) {
+    if (error.response?.status === 401) {
       // The console's own deep links are not carried across as `?next=`: the
       // login route reduces that parameter to a closed set of landing keys (see
       // `routes/auth_routes.py`), so for an SPA path it selects nothing — and a
       // constant destination keeps this line a literal rather than a sink.
-      window.location.href = '/auth/login'
+      redirectToLogin()
     }
     return Promise.reject(error)
   },
