@@ -954,7 +954,7 @@ To check a bucket's wiring before pointing a deployment at it (it writes only
 under a `smoke/` prefix and removes what it created):
 
 ```bash
-cd backend && OBJECT_BACKEND=s3 S3_ENDPOINT=… S3_BUCKET_NAME=… python scripts/s3_smoke.py
+OBJECT_BACKEND=s3 S3_ENDPOINT=… S3_BUCKET_NAME=… python .agent/scripts/s3_smoke.py
 ```
 
 The offline gate suite covers the S3 backend through an in-memory double

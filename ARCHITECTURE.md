@@ -196,7 +196,7 @@ bind mount 注入容器，丢文件即生效、无需重建镜像；收在 `dock
 文件、"目录即目录"让它们白来，表化之后必须显式装一次——装过就记在
 `catalog_seed_state` 里，所以运维删掉默认内容后重启不会复活，
 `cli.py catalogs seed --force` 才是要回来的方式；`npm` / `debian` / `docker-images` / `packages` 仍按路径寻址（它们的
-路径就是协议索引）。前端/协议面完全不变；`backend/scripts/s3_smoke.py` 是对真实
+路径就是协议索引）。前端/协议面完全不变；`.agent/scripts/s3_smoke.py` 是对真实
 S3 兼容端点（MinIO / Ceph）的显式连通性自检。
 
 `tools/` 与 `docs/` 是**操作员在浏览器里写**的两个目录：它们不再提交（`.gitignore`），
