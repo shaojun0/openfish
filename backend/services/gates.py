@@ -210,7 +210,9 @@ class CheckCommand(BaseModel):
       the suite hash depend on where it was checked out);
     * ``timeout`` overrides :data:`DEFAULT_GATE_TIMEOUT` for this check;
     * ``validation`` is the hard invariant: only a ``validated`` check may gate
-      a PR, an ``unvalidated`` one reports but never unlocks a push.
+      a PR, an ``unvalidated`` one reports but never unlocks a push.  The
+      default is the fail-closed one: a construction that forgets to say so
+      reports, instead of silently acquiring a veto.
     """
 
     model_config = ConfigDict(strict=True)
@@ -219,7 +221,7 @@ class CheckCommand(BaseModel):
     argv: list[str]
     cwd: str = "."
     timeout: float | None = None
-    validation: str = VALIDATION_VALIDATED
+    validation: str = VALIDATION_UNVALIDATED
     source: str = SOURCE_EXPLICIT
 
     @model_validator(mode="after")

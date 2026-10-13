@@ -16,6 +16,13 @@ Providers, in priority order (first non-empty one wins):
 4. ``Cargo.toml`` — ``cargo check`` / ``cargo test``.
 5. ``Makefile`` — the ``test`` / ``check`` / ``lint`` targets, when defined.
 
+Losing a provider is never silent.  A repository that declares gates in more
+than one manifest gets the winner's commands *and* a reason naming what those
+commands displaced — "the ``check:`` target I added never ran" has to be
+answerable from the gate summary, not from a debugging session.  A manifest
+provider that raises is named there too, and :func:`discover_checks` takes
+``merge=True`` to run every recognised manifest instead of the first one.
+
 A provider is a plain callable ``(repo_root) -> list[CheckCommand]``, and
 :func:`discover_checks` takes the provider tuple as an argument, so a caller can
 inject a different set (or a fake manifest reader) without patching the module.
@@ -218,34 +225,74 @@ def discover_checks(
     repo_root: str | Path,
     *,
     providers: Sequence[Provider] | None = None,
+    merge: bool = False,
 ) -> CheckSuite:
-    """The first manifest provider that recognises *repo_root*, or an empty suite.
+    """The manifest providers that recognise *repo_root*, first one winning.
 
     An empty suite is a legitimate answer — it is what resolution turns into the
     explicit ``unverified`` state.  It is never an empty *pass*.
+
+    The priority order only decides which commands run; it never decides what is
+    *reported*.  Providers that also matched but lost, and providers that raised,
+    are named in :attr:`CheckSuite.reason` (which is excluded from the suite
+    fingerprint, so recording them cannot churn the frozen descriptor).  With
+    *merge*, every matched provider contributes instead, de-duplicated by
+    ``id`` and keeping the higher-priority copy of a shared id.
     """
     root = Path(repo_root)
-    for provider in providers if providers is not None else PROVIDERS:
+    resolved = tuple(providers) if providers is not None else PROVIDERS
+    matched: list[tuple[str, list[CheckCommand]]] = []
+    broken: list[str] = []
+    for provider in resolved:
         try:
             checks = list(provider(root))
-        except Exception as exc:  # a broken manifest must not break resolution
+        except Exception:  # a broken manifest must not break resolution
+            broken.append(provider.__name__)
             continue
         if checks:
-            # The suite-level source is taken from the winning provider's checks
-            # when they agree, so provenance stays accurate either way.
-            sources = {check.source for check in checks}
-            source = sources.pop() if len(sources) == 1 else SOURCE_DISCOVERY
-            return CheckSuite(
-                checks=checks,
-                source=source,
-                reason=f"auto-discovered by {provider.__name__}",
-            )
-    return CheckSuite(
-        checks=[],
-        source=SOURCE_DISCOVERY,
-        reason="没有可识别的 manifest（package.json / pyproject.toml / go.mod / "
-               "Cargo.toml / Makefile 都没有给出可用命令）",
-    )
+            matched.append((provider.__name__, checks))
+
+    # A provider that blew up is a warning attached to whatever does resolve, so
+    # "half my manifests were ignored" cannot hide behind a green suite.
+    broken_note = f"；{'、'.join(broken)} 解析失败，已跳过" if broken else ""
+
+    if not matched:
+        return CheckSuite(
+            checks=[],
+            source=SOURCE_DISCOVERY,
+            reason="没有可识别的 manifest（package.json / pyproject.toml / go.mod / "
+                   "Cargo.toml / Makefile 都没有给出可用命令）" + broken_note,
+        )
+
+    if merge:
+        merged: list[CheckCommand] = []
+        seen: set[str] = set()
+        for _, checks in matched:
+            for check in checks:
+                if check.id not in seen:
+                    seen.add(check.id)
+                    merged.append(check)
+        return CheckSuite(
+            checks=merged,
+            source=SOURCE_DISCOVERY,
+            reason="auto-discovered by "
+                   + " + ".join(name for name, _ in matched)
+                   + "（merge：命中的 manifest 一起跑）" + broken_note,
+        )
+
+    winner, checks = matched[0]
+    # The suite-level source is taken from the winning provider's checks
+    # when they agree, so provenance stays accurate either way.
+    sources = {check.source for check in checks}
+    source = sources.pop() if len(sources) == 1 else SOURCE_DISCOVERY
+    reason = f"auto-discovered by {winner}"
+    displaced = [name for name, _ in matched[1:]]
+    if displaced:
+        reason += (
+            "；" + "、".join(displaced) + " 也声明了命令，按优先级没有进套件"
+            "（要一起跑就传 merge=True，或用 .agent/review-policy.yml 的 checks: 显式声明）"
+        )
+    return CheckSuite(checks=checks, source=source, reason=reason + broken_note)
 
 
 __all__ = [

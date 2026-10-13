@@ -56,3 +56,18 @@ checks:
     command: python .agent/checks/check_catalog_store.py
     timeout: 120
     validated: false
+  - id: discovery
+    # Manifest auto-discovery, and the implicit gates hiding inside it.  A
+    # conventional `test` / `check` / `lint` Makefile target silently acquires
+    # veto power over a PR (`validated`), and the provider that lost the priority
+    # order used to be dropped without a word.  Asserts this repository enrolls
+    # no gate by accident, that the discovered set / order / argv / `validated`
+    # marking follow the manifest, that a displaced or raising provider is named
+    # in the suite reason, that `merge=True` runs every matched manifest, that a
+    # `CheckCommand` which omits `validation` is report-only and a suite with no
+    # gating check normalises to `unverified` rather than green, and that
+    # `fix_guard_violations` refuses a `Makefile`.  Offline and hermetic: temp
+    # trees and a recording executor.  Same interpreter rule as above.
+    command: python .agent/checks/check_discovery.py
+    timeout: 120
+    validated: false
