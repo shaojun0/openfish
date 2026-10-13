@@ -1,19 +1,24 @@
 #!/usr/bin/env python
 """Smoke-check an S3-compatible catalog backend against a real endpoint.
 
-Run from the backend directory (`backend/`)::
+Run it from the repository root; the script locates `backend/` from its own
+path, so the working directory does not matter::
 
     OBJECT_BACKEND=s3 S3_ENDPOINT=http://minio:9000 S3_BUCKET_NAME=openfish \
     S3_ACCESS_KEY=… S3_SECRET_KEY=… S3_ADDRESS_STYLE=path \
-    python scripts/s3_smoke.py
+    python .agent/scripts/s3_smoke.py
 
-Why this is not one of the `check_*.py` gates: the gate suite must run offline
-and must not require a bucket, so it drives ``S3Store`` through an in-memory
-double (`scripts/check_catalog_store.py`).  A double proves the mapping; it cannot
-prove that boto3 signs the requests the way this server wants, that the endpoint
-speaks path-style addressing, or that an ETag/Last-Modified actually arrives.
-Those are exactly the things that go wrong when an operator wires up MinIO or
-Ceph, so this script exists to be run once against the real thing.
+``.agent/scripts/`` is repository *tooling*, not the check suite: the suite the
+runner resolves and freezes is ``.agent/checks/**``, and a check that needs a
+live bucket would make every gate run flaky.  This file must never move there.
+
+Why this is not one of the gates: a gate must run offline and must not require a
+bucket, so the suite drives ``S3Store`` through an in-memory double instead.  A
+double proves the mapping; it cannot prove that boto3 signs the requests the way
+this server wants, that the endpoint speaks path-style addressing, or that an
+ETag/Last-Modified actually arrives.  Those are exactly the things that go wrong
+when an operator wires up MinIO or Ceph, so this script exists to be run once
+against the real thing.
 
 It writes only under the ``smoke/`` namespace of the configured bucket and
 removes everything it created before exiting, so it is safe to run against a
@@ -25,8 +30,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
+BACKEND_ROOT = Path(__file__).resolve().parents[2] / "backend"
+sys.path.insert(0, str(BACKEND_ROOT))
 
 from config import settings  # noqa: E402
 from services import objectstore  # noqa: E402
