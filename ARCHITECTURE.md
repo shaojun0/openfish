@@ -124,7 +124,7 @@ app.py                     创建 Flask 应用，禁用内置 static handler
 | `src/composables/` | `usePagination`（前端分页/排序） |
 | `nginx.conf` | 静态托管：`/static/dist/` 前缀重写、带哈希资源 `immutable` 缓存、history fallback、`/healthz` |
 | `Dockerfile` | `node:24-slim` 构建 → `nginx:1.27-alpine` 运行，Node 不进生产镜像 |
-| `.agent/scripts/frontend/smoke-render.ts` | jsdom 渲染全部路由的冒烟测试（在仓库工具位，由 `npm run smoke` 调用） |
+| `.agent/scripts/frontend/smoke-render.ts` | jsdom 渲染全部路由的冒烟测试（在仓库工具位，由 `make smoke-frontend` → `npm run smoke` 调用） |
 
 `vite.config.ts` 的 `outDir` 是 `dist`（不再写进后端目录），`base` 仍是
 `/static/dist/` —— 因此同一份产物既能被前端容器托管，也能通过
@@ -196,8 +196,8 @@ bind mount 注入容器，丢文件即生效、无需重建镜像；收在 `dock
 文件、"目录即目录"让它们白来，表化之后必须显式装一次——装过就记在
 `catalog_seed_state` 里，所以运维删掉默认内容后重启不会复活，
 `cli.py catalogs seed --force` 才是要回来的方式；`npm` / `debian` / `docker-images` / `packages` 仍按路径寻址（它们的
-路径就是协议索引）。前端/协议面完全不变；`.agent/scripts/s3_smoke.py` 是对真实
-S3 兼容端点（MinIO / Ceph）的显式连通性自检。
+路径就是协议索引）。前端/协议面完全不变；`.agent/scripts/backend/s3_smoke.py` 是对真实
+S3 兼容端点（MinIO / Ceph）的显式连通性自检，由 `make smoke-backend` 调用（需要真桶）。
 
 `tools/` 与 `docs/` 是**操作员在浏览器里写**的两个目录：它们不再提交（`.gitignore`），
 目录本身 gitignore、样例在 `docker/examples/`，因此一次上传不会弄脏工作区、
@@ -277,13 +277,20 @@ npm run dev                         # http://127.0.0.1:5173，代理到后端
 npm run build                       # → frontend/dist
 npm run smoke                       # jsdom 全路由冒烟
 
+# ── 冒烟入口（根目录 Makefile）─────────────────────────────────
+# make smoke-frontend  前端全路由渲染（= cd frontend && npm run smoke）
+# make smoke-backend   S3/MinIO 连通性自检（需要真桶；没桶就是 SKIPPED）
+# make smoke           两者依次跑；gates-frontend 是 smoke-frontend 的旧别名
+# 缺前置条件 = SKIPPED — NOT VERIFIED，并且目标以非 0 退出（ALLOW_SKIP=1 才放行）。
+
 # ── 校验套件 ───────────────────────────────────────────────────
 # 本仓库不再自带 backend/scripts/check_*.py。一次改动的校验套件按
 #   .agent/checks/ → .agent/review-policy.yml 的 checks: → manifest 自动发现
 #   （package.json scripts / pytest·ruff·mypy / go.mod / Cargo.toml / Makefile）
 # 的顺序解析，解析不到就是 unverified（不是绿）。执行与归一化在
 # services/gates.py（resolve_suite → run_suite → GateSummary）。
-# 根目录 Makefile 现在只有 make gates-frontend（前端 smoke）。
+# Makefile 的冒烟目标叫 smoke-*，不在自动发现的名字里（只认 test/check/lint），
+# 所以加它们不会改变套件解析。
 
 # ── 容器（需要 Docker Compose v2；仓库自带的 docker-compose 1.25 解析不了）──
 cd docker
@@ -306,7 +313,7 @@ docker run --rm -e OPENFISH_ROLE=runner  openfish      # 队列 worker --loop
 
 ## 验证证据
 
-* **前端冒烟**：`npm run smoke` 全路由渲染无 Vue 警告（`make gates-frontend`）。
+* **前端冒烟**：`npm run smoke` 全路由渲染无 Vue 警告（`make smoke-frontend`）。
 * **PostgreSQL 后端端到端验证**：用真实 `postgres:16-alpine`（16.15）实例，
   当时用 `check_database.py --url postgresql+psycopg://…` 与 `check_rbac.py`
   （`DATABASE_URL` 指向该实例）全部通过——建表、superuser 冷启动、用户 /

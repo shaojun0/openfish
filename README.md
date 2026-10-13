@@ -141,16 +141,22 @@ cd frontend && npm run dev     # terminal 2 — http://127.0.0.1:5173
 > still succeeds — but such volumes also waste ~1 MB per directory on NTFS, so
 > keep `node_modules/` on a native Linux filesystem.
 
-### Frontend smoke test
+### Smoke tests
 
 `npm run smoke` renders every route in jsdom — no browser required — and exits
 non-zero on any Vue warning, unresolved component or runtime error. It also
 asserts the `usePagination` slicing/sorting behaviour every table pager relies
-on:
+on. Run it through the root `Makefile` — `make help` lists the targets, and no
+caller has to know where either script lives:
 
 ```bash
-cd frontend && npm run smoke
+make smoke-frontend   # = cd frontend && npm run smoke, paths resolved from the repo root
+make smoke            # the frontend smoke, then the backend S3 smoke below
 ```
+
+A missing prerequisite (no `frontend/node_modules`, no `npm`, no bucket) is
+reported as `SKIPPED — NOT VERIFIED` and **fails** the target, so an unverified
+run cannot read as green; `make … ALLOW_SKIP=1` is how you accept one on purpose.
 
 ## Quick start (Docker)
 
@@ -954,14 +960,14 @@ To check a bucket's wiring before pointing a deployment at it (it writes only
 under a `smoke/` prefix and removes what it created):
 
 ```bash
-OBJECT_BACKEND=s3 S3_ENDPOINT=… S3_BUCKET_NAME=… python .agent/scripts/s3_smoke.py
+OBJECT_BACKEND=s3 S3_ENDPOINT=… S3_BUCKET_NAME=… make smoke-backend
 ```
 
 The offline suite covers the S3 backend through an in-memory double
 (`.agent/checks/check_catalog_store.py`, 88 checks over both catalogs), so no
 suite entry needs a bucket or a network; `.agent/scripts/backend/s3_smoke.py` is
 the part that needs the real thing. That entry is `unvalidated` like the others,
-and the `gates` workflow runs the frontend only — `make gates-frontend`; the
+and the `gates` workflow runs the frontend only — `make smoke-frontend`; the
 backend suite is what the reviewing agent runs, not CI.
 
 ### Static index elements
@@ -1284,9 +1290,32 @@ An agent-authored `.agent/checks/` entry is `unvalidated` until a validator show
 it can fail on a known-bad revision, and an `unvalidated` check reports without
 ever unlocking a PR.
 
-On the CI side, `.github/workflows/gates.yml` and the root `Makefile` now cover
-the frontend only (`make gates-frontend` → `npm run smoke`). The backend is
-**not** verified by CI.
+Manifest discovery (step 3) is worth reading twice, because the commands it finds
+are `validated` — they may block a PR:
+
+- **The names matter.** `test`, `check` and `lint` are doors: adding `check:` to
+  a root `Makefile` enrolls `make check` as a gate, and discovery is pure (it
+  never executes anything), so nothing warns you as you write it. Any other
+  target name is inert — which is why this repository's own targets are
+  `smoke-*`.
+- **Nothing is dropped in silence.** Only the first matching manifest supplies
+  the commands, but a displaced or broken provider is named in the suite reason
+  (it is excluded from the suite fingerprint, so reporting it cannot churn a
+  frozen suite). `discover_checks(..., merge=True)` runs every matched manifest.
+- **The defaults fail closed.** A `CheckCommand` that does not state its
+  `validation` is report-only, and `fix_guard_violations` refuses a `Makefile`,
+  so a fix cannot rewrite the declaration that judges it.
+
+`check_discovery` in `.agent/checks/` asserts all of the above (and that this
+repository enrolls no gate by accident); like every agent-authored entry it is
+`validated: false`, so it reports rather than gates.
+
+On the CI side, `.github/workflows/gates.yml` and the root `Makefile` cover the
+frontend only (`make smoke-frontend` → `npm run smoke`; CI calls it by its
+earlier name, `make gates-frontend`). `make smoke-backend` is the operator's
+half: it needs a reachable bucket, so it is not a gate — and with no bucket
+configured it reports `SKIPPED — NOT VERIFIED` instead of a green. The backend
+is **not** verified by CI.
 
 ### Keeping the database honest
 
@@ -1337,8 +1366,8 @@ unchanged while stopping `el-table` from rendering thousands of DOM rows.
 .agent/                         repository tooling the agent runtime reads
 ├── checks/checks.yml           the versioned check suite (see "What verifies a change")
 └── scripts/                    manual tools, one directory per side
-    ├── backend/s3_smoke.py     S3/MinIO connectivity self-check (needs a real bucket)
-    └── frontend/               smoke-render.ts — jsdom render smoke, run by `npm run smoke`
+    ├── backend/s3_smoke.py     S3/MinIO connectivity self-check (`make smoke-backend`; needs a real bucket)
+    └── frontend/               smoke-render.ts — jsdom render smoke (`make smoke-frontend` → `npm run smoke`)
 
 backend/                        the Flask application — one build unit
 ├── app.py                      entry point — wires extensions, then routes
