@@ -14,7 +14,7 @@ const buildId =
 // Flask (via FRONTEND_DIST_DIR) when developing without Docker.  `base` fixes
 // the asset URLs, so the output can be dropped behind any server that maps
 // that prefix onto the dist directory.
-export default defineConfig({
+export default defineConfig(({ isSsrBuild }) => ({
   plugins: [vue()],
 
   define: {
@@ -33,6 +33,22 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
     chunkSizeWarningLimit: 2000,
+
+    // `--ssr` is used only by `npm run smoke`, whose entry lives in
+    // `.agent/scripts/frontend/` — outside this package, where Vite's
+    // "package.json dependencies are external" heuristic stops applying and
+    // Rolldown tries (and fails) to resolve `jsdom` from the entry's own
+    // directory.  Externalising every bare specifier keeps `import … from
+    // 'jsdom'` in the emitted bundle, which Node then resolves from
+    // `frontend/node_modules` — that is why `--outDir .smoke` stays in here.
+    ...(isSsrBuild
+      ? {
+          rolldownOptions: {
+            external: (id: string) =>
+              !id.startsWith('.') && !id.startsWith('/') && !id.startsWith('@/'),
+          },
+        }
+      : {}),
   },
 
   base: '/static/dist/',
@@ -61,4 +77,4 @@ export default defineConfig({
       '/llms.txt': 'http://127.0.0.1:9090',
     },
   },
-})
+}))

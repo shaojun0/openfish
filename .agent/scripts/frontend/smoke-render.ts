@@ -5,10 +5,13 @@
  * template and `setup()` errors surface without a browser.  The API is stubbed
  * out — this checks that the UI *renders*, not that the backend answers.
  *
- * Usage (the .vue imports need Vite, and the bundle must stay under `frontend/`
- * so Node can resolve `jsdom` from node_modules):
+ * Usage (the .vue imports need Vite, and the bundle must still be emitted under
+ * `frontend/` — `--outDir .smoke` below — so Node resolves `jsdom` from
+ * `frontend/node_modules`):
  *
- *     node ./node_modules/vite/bin/vite.js build --ssr scripts/smoke-render.ts \
+ *     cd frontend
+ *     node ./node_modules/vite/bin/vite.js build \
+ *          --ssr ../.agent/scripts/frontend/smoke-render.ts \
  *          --outDir .smoke --emptyOutDir
  *     node .smoke/smoke-render.js
  */
@@ -94,10 +97,10 @@ const { renderToString } = await import('vue/server-renderer')
 const { createPinia, setActivePinia } = await import('pinia')
 const { default: ElementPlus } = await import('element-plus')
 const ElementPlusIcons = await import('@element-plus/icons-vue')
-const { default: App } = await import('../src/App.vue')
-const { default: router } = await import('../src/router')
-const { i18n } = await import('../src/locales')
-const { useSessionStore } = await import('../src/stores/session')
+const { default: App } = await import('@/App.vue')
+const { default: router } = await import('@/router')
+const { i18n } = await import('@/locales')
+const { useSessionStore } = await import('@/stores/session')
 
 /** Marker substrings that must appear in the rendered markup for each route. */
 const EXPECTED = {
@@ -208,7 +211,7 @@ for (const [path, markers] of Object.entries(EXPECTED)) {
 // `onMounted`).  Render the component directly for both mirrors so a template
 // error in that sub-element still fails this smoke run.
 const { h } = await import('vue')
-const { default: BuildCatalogView } = await import('../src/components/BuildCatalogView.vue')
+const { default: BuildCatalogView } = await import('@/components/BuildCatalogView.vue')
 for (const kind of ['python', 'node'] as const) {
   const subApp = createSSRApp({ render: () => h(BuildCatalogView, { kind }) })
   const subPinia = createPinia()
@@ -238,8 +241,8 @@ for (const kind of ['python', 'node'] as const) {
 // them directly with a fake document so a broken tooltip expression, an
 // unresolved icon or a missing i18n key fails this run instead of the user's
 // first click.
-const { default: DocEditor } = await import('../src/components/DocEditor.vue')
-const { default: DocAssetManager } = await import('../src/components/DocAssetManager.vue')
+const { default: DocEditor } = await import('@/components/DocEditor.vue')
+const { default: DocAssetManager } = await import('@/components/DocAssetManager.vue')
 const fakeAsset = {
   name: 'diagram.png',
   size: 2048,
@@ -305,7 +308,7 @@ const fakeDoc = {
 // with a *partial* job so the §8.2 big-repo warning is exercised, not just the
 // progress bar; this also runs the panel's dynamic `import.phase.*` and
 // `import.status.*` keys through i18n.
-const { default: ImportJobPanel } = await import('../src/components/ImportJobPanel.vue')
+const { default: ImportJobPanel } = await import('@/components/ImportJobPanel.vue')
 {
   const partialJob = {
     id: 'job-1',
@@ -368,7 +371,7 @@ for (const r of results) {
 // `renderToString` never runs `onMounted`, so the route renders above cannot
 // load data and exercise `usePagination`.  Assert the composable directly —
 // it is the piece every table now depends on for its slicing and sorting.
-const { usePagination } = await import('../src/composables/usePagination')
+const { usePagination } = await import('@/composables/usePagination')
 const { ref: vueRef, nextTick } = await import('vue')
 
 const pagerSource = vueRef(

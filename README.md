@@ -1332,6 +1332,12 @@ unchanged while stopping `el-table` from rendering thousands of DOM rows.
 ## Project layout
 
 ```
+.agent/                         repository tooling the agent runtime reads
+├── checks/checks.yml           the versioned check suite (see "What verifies a change")
+└── scripts/                    manual tools, one directory per side
+    ├── backend/s3_smoke.py     S3/MinIO connectivity self-check (needs a real bucket)
+    └── frontend/               smoke-render.ts — jsdom render smoke, run by `npm run smoke`
+
 backend/                        the Flask application — one build unit
 ├── app.py                      entry point — wires extensions, then routes
 ├── cli.py                      administrative CLI (roles, grants, superuser bootstrap)
@@ -1358,10 +1364,6 @@ backend/                        the Flask application — one build unit
 │                               (format.py, fileio.py, digest.py), stats,
 │                               validation
 ├── schemas.py                  request + response models (single source for /openapi.json)
-├── scripts/                    verification gates (check_openapi, check_contract,
-│                               check_auth_guards, check_rbac, check_database,
-│                               check_markdown, and one offline conformance gate
-│                               per proxy)
 ├── static/                     machine-facing Jinja templates grouped by ecosystem
 │                               (python/ node/ tools/ npm/ docker/ debian/ docs/).
 │                               Not a public directory — see Security notes.
@@ -1377,7 +1379,6 @@ frontend/                       the Vue 3 SPA — one build unit
 │                               router/ stores/ styles/ utils/ views/
 ├── index.html, vite.config.ts  Vite entry and config (outDir: dist/)
 ├── package.json, .npmrc        npm toolchain (build-time only)
-├── scripts/smoke-render.ts     jsdom smoke test for every route
 ├── nginx.conf                  static server for the built bundle
 ├── Dockerfile                  node build stage → nginx runtime
 └── dist/                       build output, git-ignored
