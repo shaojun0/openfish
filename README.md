@@ -157,7 +157,7 @@ cd frontend && npm run smoke
 ```bash
 cd docker
 ./bootstrap-env.sh        # writes .env + forgejo.env with every secret generated
-docker compose up -d --build   # 缺失的 bind 源由 Docker 自动创建；DB 直接用 backend/data
+docker compose up -d --build   # 缺失的 bind 源由 Docker 自动创建；DB 用 docker/data
 ```
 
 `docker/bootstrap-env.sh` only fills blank secrets and never overwrites or resets an
@@ -167,12 +167,15 @@ empty. Forgejo's admin / runner tokens can only be minted once the instance is u
 the script prints those commands when it finishes.
 
 Every bind-mount source in `docker-compose.yml` is a path **inside `docker/`**,
-and Docker creates the missing ones when you `docker compose up` (empty,
-root-owned) — there is no setup step. `docker/examples/` holds the sample
-artifacts if you want a populated catalog to look at. The database is mounted
-straight from `backend/data/`, so `cd backend && python app.py` and the
-containers share one SQLite file. Re-pointing a single mount later is just
-`ln -sfn /srv/data/npm docker/npm`; the Compose file never changes.
+`data/` included, and Docker creates the missing ones when you
+`docker compose up` (empty, root-owned) — there is no setup step.
+`docker/examples/` holds the sample artifacts if you want a populated catalog to
+look at. The database is `docker/data/`, the deployment's own copy, while
+`cd backend && python app.py` keeps `backend/data/`: the two start paths never
+depend on each other (a stack that used to share `backend/data` can point
+`docker/data` back at `../backend/data` — `docker/README.md` §4). Re-pointing a
+single mount later is just `ln -sfn /srv/data/npm docker/npm`; the Compose file
+never changes.
 
 The application side is one image: `openfish:latest`, built from
 `backend/Dockerfile`. The container's `OPENFISH_ROLE` selects which process it
@@ -234,9 +237,10 @@ docker compose --profile runner --scale runner=N up -d   # N queue workers
 > SQLite until `DATABASE_URL` points at PostgreSQL. Set
 > `DATABASE_URL=postgresql+psycopg://openfish:<password>@db:5432/openfish` in
 > `docker/.env` and the whole users / RBAC / API-key / statistics layer moves to
-> the server together. SQLite (the file at `API_KEYS_FILE`, default
-> `backend/data/cpypiserver.db`) stays the default, so an existing deployment is
-> unaffected. `docker/README.md` has the switch and data-migration walkthrough.
+> the server together. SQLite (in this topology `docker/data/cpypiserver.db`; the
+> application default `<backend>/data/cpypiserver.db` is what local development
+> uses) stays the default, so an existing deployment is unaffected.
+> `docker/README.md` has the switch and data-migration walkthrough.
 
 ## Configuration
 
@@ -264,7 +268,7 @@ Templates are provided at `backend/.env.example` (local development) and
 | `PYTHON_BUILDS_DIR`     | `<project>/docker/python-build-standalone` | Prebuilt CPython releases    |
 | `NODE_BUILDS_DIR`       | `<project>/docker/node-builds` | Prebuilt Node.js mirror (`nodejs.org/dist` layout) |
 | `DATABASE_URL`          | *(empty)* = SQLite at `API_KEYS_FILE` | SQLAlchemy URL for users / RBAC / API keys / statistics. Set to `postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host:5432/openfish` (password from the environment, never the file) to run on PostgreSQL. A bare `postgresql://` is upgraded to the bundled psycopg driver; an explicit `+psycopg2`/`+pg8000` is respected |
-| `API_KEYS_FILE`         | `<backend>/data/cpypiserver.db` | SQLite database for API keys and stats — used only while `DATABASE_URL` is empty |
+| `API_KEYS_FILE`         | `<backend>/data/cpypiserver.db` | SQLite database for API keys and stats — used only while `DATABASE_URL` is empty. The Compose topology overrides it to `/app/data/cpypiserver.db`, i.e. `docker/data/` |
 | `FRONTEND_DIST_DIR`     | *(empty)* = `<backend>/static/dist` | Directory holding the built SPA for Flask to serve. In the split Docker deployment the `frontend` container serves it instead, so this stays empty |
 | `STORAGE__OVERWRITE`    | `false`                | Allow re-uploading an existing filename            |
 | `MAX_CONTENT_LENGTH`    | `104857600` (100 MiB)  | Maximum upload size                                |
@@ -727,7 +731,8 @@ database the server uses:
 
 ```bash
 # SQLite (the default), from the repository root
-sqlite3 backend/data/cpypiserver.db < backend/config/model_routes.seed.sql
+sqlite3 backend/data/cpypiserver.db < backend/config/model_routes.seed.sql  # local dev
+sqlite3 docker/data/cpypiserver.db < backend/config/model_routes.seed.sql   # Compose stack
 # PostgreSQL
 psql "$DATABASE_URL" -f backend/config/model_routes.seed.sql
 ```
@@ -1390,8 +1395,9 @@ docker/                         orchestration — no application code
     ├── node-builds/            nodejs.org/dist-shaped Node.js mirror
     ├── docker-images/          image tarballs + compose/Dockerfile
     ├── debian/                 local .deb files + apt snippets
-    ├── data                    DB + proxy caches (→ backend/data); the
-    │                           model_routes route table lives in this DB
+    ├── data                    DB + proxy caches (this stack's own copy — the
+    │                           model_routes route table lives in this DB; local
+    │                           development uses backend/data)
     └── forgejo/                Forgejo repositories and instance secrets
 
 integrations/                   downstream *client* code, versioned here because it is
@@ -1413,7 +1419,11 @@ code, and keeping them in the Compose directory leaves the repository root a
 short list of build units. Compose bind-mounts them into the backend container,
 so dropping a file in one takes effect without rebuilding anything.
 
-`docker compose up` creates every missing bind source itself (empty, root-owned). The database is mounted straight from `backend/data/`, so the host CLI and the containers share one SQLite file, and `docker/` stays the place a deployment's operator data is re-pointed with `ln -sfn`.
+`docker compose up` creates every missing bind source itself (empty, root-owned),
+`data/` included — so the stack owns `docker/data/` while
+`cd backend && python app.py` owns `backend/data/`: neither start path depends on
+the other, and `docker/` stays the place a deployment's operator data is
+re-pointed with `ln -sfn`.
 
 ## Security notes
 

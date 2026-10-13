@@ -8,7 +8,10 @@
 全新部署要预置一组路由，用仓库里的种子脚本（幂等，`ON CONFLICT (name) DO NOTHING`）：
 
 ```bash
+# 本地开发（在仓库根目录执行）：库在 backend/data/
 sqlite3 backend/data/cpypiserver.db < backend/config/model_routes.seed.sql
+# Docker 部署：库在 docker/data/（容器内即 /app/data）
+sqlite3 docker/data/cpypiserver.db < backend/config/model_routes.seed.sql
 # 或：psql "$DATABASE_URL" -f backend/config/model_routes.seed.sql
 ```
 

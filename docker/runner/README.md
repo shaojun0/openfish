@@ -26,7 +26,7 @@ docker run --rm -p 8080:8080 -e SECRET_KEY=dev-only openfish
 docker run --rm \
   -e OPENFISH_ROLE=runner \
   -e API_KEYS_FILE=/app/data/cpypiserver.db \
-  -v "$PWD/backend/data:/app/data" \
+  -v "$PWD/docker/data:/app/data" \
   -v "$PWD/docker/agent-work:/work" \
   openfish
 ```
@@ -237,7 +237,7 @@ networks:
 | 容器路径 | 宿主来源 | 模式 | 说明 |
 | --- | --- | --- | --- |
 | `/work` | `docker/agent-work/` | rw | 每任务一个子目录；任务结束写 `.done`，**保留 24h** 再回收 |
-| `/app/data` | `backend/data/` | rw | 与 backend 共用同一 SQLite / 缓存目录（同一数据库，模型路由表也在其中） |
+| `/app/data` | `docker/data/` | rw | 与 backend 服务共用同一 SQLite / 缓存目录（同一份 `docker/data`，模型路由表也在其中） |
 
 24h 规则由 `services/agent_runner.py` 实现：
 
@@ -335,12 +335,13 @@ docker compose --profile runner --scale runner=N up -d  # N 副本（§2.1）
 ```bash
 # 智能体工作目录（§9.2）：每任务一个子目录，任务结束保留 24h 再回收。
 mkdir -p "$DOCKER_DIR/agent-work"
-link "$DOCKER_DIR/agent-work" "$PROJECT_DIR/backend/data/agent-work"
+link "$DOCKER_DIR/agent-work" "$DOCKER_DIR/data/agent-work"
 ```
 
 说明：本地开发（`cd backend && python app.py`）下 `AGENT_WORK_ROOT` 默认 `/work`，
 可设成 `backend/data/agent-work`；放到数据盘时同样用
-`link`（与 `data -> ../backend/data` 同一手法），换存储只需重指符号链接。
+`link`（与 `data` 同一手法：把 `docker/agent-work` 指到数据盘上的目录），
+换存储只需重指符号链接。
 
 ## 9. 安全清单（构建后自查）
 

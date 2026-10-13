@@ -205,7 +205,11 @@ S3 兼容端点（MinIO / Ceph）的显式连通性自检。
 `cli.py docs import/export` 的双向兼容桥）。
 
 **所有 bind mount 源都是 `docker/` 内的路径**（`./share` `./npm` `./data` …），
-`docker-compose.yml` 里既没有 `../backend/...` 也没有宿主机绝对路径。每个源都是
+`docker-compose.yml` 里既没有 `../backend/...` 也没有宿主机绝对路径。`./data` 因此是
+**部署自己的一份** SQLite 与回源缓存（容器内 `/app/data`），与本地开发用的
+`backend/data` 是两份：不管先用哪条路启动，都不会在对方的目录里留下 root 属主的
+目录，两边各自都能起来；老部署想继续共用同一个 SQLite 文件，把 `docker/data`
+指回 `../backend/data` 即可（同一个符号链接机制）。每个源都是
 **可插拔**的：它要么是真实目录（`docker compose up` 时自动创建），要么是指向数据盘的
 符号链接（`ln -sfn /media/…/openfish-mirror/npm docker/npm`），以后
 换存储只需 `ln -sfn` 重指一个链接，compose 一个字都不用改。原先的 `*_SRC` 环境
@@ -331,7 +335,8 @@ docker run --rm -e OPENFISH_ROLE=runner  openfish      # 队列 worker --loop
 ## 已知取舍与后续
 
 1. **两个数据库后端由 URL 选择。** 留空 `DATABASE_URL` 时仍是
-   `backend/data/cpypiserver.db`（SQLite，WAL）；设为 PostgreSQL URL 后，
+   `backend/data/cpypiserver.db`（SQLite，WAL；compose 拓扑里同一角色由
+   `docker/data/cpypiserver.db` 担任）；设为 PostgreSQL URL 后，
    users / roles / permissions / api_keys / api_key_stats 整体搬到服务端，
    没有"两张表在 SQLite、三张在 PostgreSQL"的混合模式（跨库删除无法回滚）。
    切换不搬运数据：新库首次启动建空表，账号与角色用 `cli.py` 重建，API key
