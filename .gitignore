@@ -76,9 +76,10 @@ backend/data/*.json
 # ── Docker deployment: pluggable bind-mount sources ─────────────────
 # Every Compose bind source is a path under docker/.  On a real deployment the
 # artifact/state directories there are symlinks to a data disk (docker/npm ->
-# /media/.../npm, …) and docker/data -> ../backend/data.  They are created per
-# None of them is committed; the committed sample catalogs live in
-# docker/examples/ and are copied in by that script on a fresh checkout.
+# /media/.../npm, …); docker/data is this deployment's own SQLite + cache copy,
+# kept apart from the local-development copy at backend/data.  Missing sources
+# are created empty by `docker compose up`.  None of them is committed; the
+# sample catalogs that ship with the repository live in docker/examples/.
 docker/.pre-symlink-backup/
 docker/share
 docker/npm

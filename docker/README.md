@@ -123,11 +123,46 @@ docker/share/python/packages_data -> ../packages              # ✓ 相对链接
 | --- | --- | --- |
 | `share/` `npm/` `node-builds/` `docker-images/` `debian/` | 制品字节 | npm / docker / debian 的 overlay 行在 `catalog_entries` 表里 |
 | `tools/` `docs/` | 对象字节（`objects/<uuid4>`） | **条目在数据库里**，目录只是存放处与 import/export 的桥 |
-| `data/`（= `backend/data`） | SQLite 库、回源缓存、模型路由表所在库 | 是 |
+| `data/` | SQLite 库、回源缓存、模型路由表所在库——本部署**自己的一份** | 是 |
 | `forgejo/` | Forgejo 的 `/data`（bare 仓库 + 实例配置） | 独立 |
 | `agent-work/` | runner 的 `/work` 任务沙箱 | 否 |
 
 因此：**换库会丢 `tools`/`docs` 的条目，但字节还在**——迁移时按 §6 的 import 步骤补回。
+
+### `docker/data` 与 `backend/data` 是两份
+
+compose 的每一个 bind 源都在 `docker/` 下，`docker/data` 也不例外，所以：
+
+| 你怎么起 | 数据库在哪 |
+| --- | --- |
+| `cd docker && docker compose up -d` | `docker/data/cpypiserver.db`（容器内 `/app/data`） |
+| `cd backend && python app.py`、宿主 `cli.py` | `backend/data/cpypiserver.db` |
+
+两条路互不依赖：跑过容器不会在 `backend/` 里留下 root 属主的目录，本地开发也不会
+因为容器跑过就写不进去（老版本的 compose 挂的是 `../backend/data`，正好会反过来卡住
+本地开发）。代价是同一个仓库里可能有两份库——**你在哪起服务，就动哪一份**。
+
+老部署（数据原本就在 `backend/data`）升级上来时，先把容器停掉（SQLite 是 WAL，
+别热拷贝），再按需要二选一：
+
+```bash
+cd docker && docker compose stop backend
+```
+
+```bash
+# A. 继续共用同一个文件（升级前的行为）
+ln -sfn ../backend/data data
+```
+
+```bash
+# B. 拆成独立的一份（docker/data 现在是符号链接时先摘掉它；
+#    rm 删的是链接本身，不是它指向的 ../backend/data）
+[ -L data ] && rm data
+cp -a ../backend/data data
+```
+
+改完 `docker compose up -d` 即可。`bootstrap-env.sh` 只检查链接能不能在容器里解析，
+不替运维搬家；只有 `data` 已经是**真实目录**时才不用管符号链接那一步。
 
 ## 5. 配置自检
 
@@ -229,7 +264,7 @@ docker compose exec backend python cli.py catalogs import --namespace npm \
 ```
 
 **回滚：** 从 `docker/.env` 删掉 `DATABASE_URL`（保留 POSTGRES_* 无妨），
-`docker compose up -d`。SQLite 文件一直在 `backend/data/cpypiserver.db`，没有被改动过。
+`docker compose up -d`。SQLite 文件一直在 `docker/data/cpypiserver.db`（§4），没有被改动过。
 
 **不迁移的东西（不要期待）：** 统计数据与历史、待办队列、agent 任务记录、
 `repo_runners` 配置、以及文档的**修订历史**（`docs export` 只写当前版本）。

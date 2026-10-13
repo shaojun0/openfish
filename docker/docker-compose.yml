@@ -265,7 +265,11 @@ x-runner-env: &runner-env
   PYTHONDONTWRITEBYTECODE: "1"
 
 # 制品库与运行态：**所有** bind-mount 源都在本文件所在的 docker/ 目录下
-# （一律写成 ./xxx），挂载拓扑里不含任何宿主机绝对路径，也就没有 ../backend/…。
+# （一律写成 ./xxx），挂载拓扑里不含任何宿主机绝对路径，也不伸进 ../backend/…。
+# 因此 docker/data 是本部署**自己的**一份库与缓存：compose 用 docker/data，
+# `cd backend && python app.py` 用 backend/data，两边各存各的、互不依赖
+# （要让老部署继续共用同一个 SQLite，把 docker/data 指回 ../backend/data 即可，
+#   见 docker/README.md §4）。
 # 大件数据放在数据盘上时，把 docker/ 下的同名目录换成指向数据盘的符号链接即可，
 # 换存储 = 重指一个符号链接，compose 文件一个字都不用改（见 docker/README.md）：
 #   docker/share                   -> /media/.../openfish-mirror
@@ -273,7 +277,7 @@ x-runner-env: &runner-env
 #   docker/node-builds             -> /media/.../openfish-mirror/node-builds
 #   docker/docker-images           -> /media/.../openfish-mirror/docker-images
 #   docker/debian                  -> /media/.../openfish-mirror/debian
-#   docker/data                    -> ../backend/data
+#   docker/data                    -> /media/.../openfish-data
 #   docker/forgejo                 -> /media/.../openfish-forgejo
 x-backend-volumes: &backend-volumes
   # /app/share：python 包与 python-build-standalone；容器内两个子路径分别由
@@ -298,8 +302,10 @@ x-backend-volumes: &backend-volumes
   - ./docs:/app/docs
   # 模型路由表在数据库里（model_routes），随 ./data 卷持久化；改完刷新页面即可。
   # 全新部署想预置一组路由，用 config/model_routes.seed.sql（见 docker/README.md）。
-  # SQLite 库与回源缓存，容器重建后不丢；backend/data 仍是本地开发的同一份
-  - ../backend/data:/app/data
+  # docker/data：本部署自己的 SQLite 库与回源缓存，容器重建后不丢。它与
+  # backend/data 是**两份**——`cd backend && python app.py` 用后者，两条路各起各的，
+  # 谁先起都不会给对方留下 root 属主的目录（要共用一份见 docker/README.md §4）。
+  - ./data:/app/data
   # 自备 TLS 证书（可选）：把 CA 链放到 docker/certs/ca_chain.pem 后取消注释。
   # 挂载点是 /app/certs（**不在** web 根目录）：服务端只匿名供应
   # GET /certs/ca_chain.pem 这一个文件，同目录下的私钥不会被暴露。
@@ -433,7 +439,10 @@ services:
       <<: *runner-env
     volumes:
       - ./agent-work:/work
-      - ../backend/data:/app/data
+      # 必须与 backend 服务同一份数据库（同一个 ./data），否则 worker 领不到
+      # backend 入队的任务；这里用 `*backend-volumes` 之外的显式一行，是因为
+      # runner 只要 /app/data 这一块，不要制品库那几个挂载。
+      - ./data:/app/data
     networks:
       - openfish
     depends_on:
@@ -469,7 +478,7 @@ services:
       retries: 3
 
   # ── 可选数据库（profile: db）────────────────────────────────────
-  # 应用**默认不连它**：授权/API key/统计仍存在 backend/data 下的 SQLite。
+  # 应用**默认不连它**：授权/API key/统计仍存在 ./data 的 SQLite（容器内 /app/data）。
   # 要让后端真正切到 PostgreSQL，除了启动本服务，还必须把 DATABASE_URL 指过来
   # （在 docker/.env 里设置，compose 会注入 backend 容器）：
   #   DATABASE_URL=postgresql+psycopg://openfish:<口令>@db:5432/openfish
