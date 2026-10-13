@@ -43,3 +43,16 @@ checks:
     command: python .agent/checks/check_packages_dir_diagnostic.py
     timeout: 120
     validated: false
+  - id: catalog-store
+    # The docs/tools catalogs are rows plus objects now, so this is where the
+    # storage port, revisioning and the folder bridges are checked: a key maps
+    # under its root and climbing out of it is refused, a save based on a stale
+    # revision is a 409 rather than a win, import/export reproduce a hand-written
+    # tree byte for byte, and every row's object exists with nothing unreferenced
+    # left behind in either store.  The S3 mapping is driven through an in-memory
+    # double, so it needs no bucket and no network; it turns the first-run seed
+    # off itself (`SEED_CATALOGS=0` — a suite manifest can only name a command).
+    # Same interpreter rule as above.
+    command: python .agent/checks/check_catalog_store.py
+    timeout: 120
+    validated: false

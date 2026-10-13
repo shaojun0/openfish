@@ -957,10 +957,12 @@ under a `smoke/` prefix and removes what it created):
 OBJECT_BACKEND=s3 S3_ENDPOINT=… S3_BUCKET_NAME=… python .agent/scripts/s3_smoke.py
 ```
 
-The offline gate suite covers the S3 backend through an in-memory double
-(`scripts/check_catalog_store.py`, 88 checks over both catalogs), so `make gates`
-needs no bucket and no network; `s3_smoke.py` is the part that needs the real
-thing.
+The offline suite covers the S3 backend through an in-memory double
+(`.agent/checks/check_catalog_store.py`, 88 checks over both catalogs), so no
+suite entry needs a bucket or a network; `.agent/scripts/backend/s3_smoke.py` is
+the part that needs the real thing. That entry is `unvalidated` like the others,
+and the `gates` workflow runs the frontend only — `make gates-frontend`; the
+backend suite is what the reviewing agent runs, not CI.
 
 ### Static index elements
 
