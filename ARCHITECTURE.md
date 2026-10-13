@@ -124,7 +124,7 @@ app.py                     创建 Flask 应用，禁用内置 static handler
 | `src/composables/` | `usePagination`（前端分页/排序） |
 | `nginx.conf` | 静态托管：`/static/dist/` 前缀重写、带哈希资源 `immutable` 缓存、history fallback、`/healthz` |
 | `Dockerfile` | `node:24-slim` 构建 → `nginx:1.27-alpine` 运行，Node 不进生产镜像 |
-| `scripts/smoke-render.ts` | jsdom 渲染全部路由的冒烟测试 |
+| `.agent/scripts/frontend/smoke-render.ts` | jsdom 渲染全部路由的冒烟测试（在仓库工具位，由 `npm run smoke` 调用） |
 
 `vite.config.ts` 的 `outDir` 是 `dist`（不再写进后端目录），`base` 仍是
 `/static/dist/` —— 因此同一份产物既能被前端容器托管，也能通过

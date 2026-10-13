@@ -8,7 +8,7 @@
     "dev": "node ./node_modules/vite/bin/vite.js",
     "build": "node ./node_modules/vite/bin/vite.js build",
     "preview": "node ./node_modules/vite/bin/vite.js preview",
-    "smoke": "node ./node_modules/vite/bin/vite.js build --ssr scripts/smoke-render.ts --outDir .smoke --emptyOutDir && node .smoke/smoke-render.js"
+    "smoke": "node ./node_modules/vite/bin/vite.js build --ssr ../.agent/scripts/frontend/smoke-render.ts --outDir .smoke --emptyOutDir && node .smoke/smoke-render.js"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

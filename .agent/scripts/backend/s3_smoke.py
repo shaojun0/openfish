@@ -6,11 +6,12 @@ path, so the working directory does not matter::
 
     OBJECT_BACKEND=s3 S3_ENDPOINT=http://minio:9000 S3_BUCKET_NAME=openfish \
     S3_ACCESS_KEY=… S3_SECRET_KEY=… S3_ADDRESS_STYLE=path \
-    python .agent/scripts/s3_smoke.py
+    python .agent/scripts/backend/s3_smoke.py
 
-``.agent/scripts/`` is repository *tooling*, not the check suite: the suite the
-runner resolves and freezes is ``.agent/checks/**``, and a check that needs a
-live bucket would make every gate run flaky.  This file must never move there.
+``.agent/scripts/`` is repository *tooling*, one directory per side
+(``backend/`` here, ``frontend/`` next to it), not the check suite: the suite
+the runner resolves and freezes is ``.agent/checks/**``, and a check that needs
+a live bucket would make every gate run flaky.  This file must never move there.
 
 Why this is not one of the gates: a gate must run offline and must not require a
 bucket, so the suite drives ``S3Store`` through an in-memory double instead.  A
@@ -30,7 +31,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-BACKEND_ROOT = Path(__file__).resolve().parents[2] / "backend"
+BACKEND_ROOT = Path(__file__).resolve().parents[3] / "backend"
 sys.path.insert(0, str(BACKEND_ROOT))
 
 from config import settings  # noqa: E402
