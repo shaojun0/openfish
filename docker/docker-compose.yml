@@ -341,7 +341,14 @@ services:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/health"]
       interval: 30s
       timeout: 5s
-      start_period: 10s
+      # 冷启动宽限：gunicorn 要先 import app（扫描三个索引目录）才 bind 端口。
+      # PACKAGES_DIR 很大（十万级以上 whl）或元数据在慢速/网络存储（NFS/CIFS、
+      # 冷缓存）上时，这段会明显长于默认值；宽限一旦耗尽容器被标成 unhealthy，
+      # 而边缘 nginx 的 depends_on 要求 backend healthy —— 于是 `up` 直接报
+      # `dependency failed to start: ... is unhealthy`，nginx 停在 Created。
+      # 目录确实很大就调大它（docker/.env 的 BACKEND_HEALTHCHECK_START_PERIOD，
+      # 例如 10m）。不要改成 service_started 绕过：那只是把 502 提前给用户。
+      start_period: ${BACKEND_HEALTHCHECK_START_PERIOD:-60s}
       retries: 3
 
   # ── 前端：Vue SPA 构建产物，由自己的 nginx 静态托管 ──────────────

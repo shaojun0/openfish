@@ -84,3 +84,17 @@ checks:
     command: python .agent/checks/check_external_prefix.py
     timeout: 120
     validated: false
+  - id: startup-nonblocking
+    # The first admin-stats computation must not run while `app` is imported.
+    # It `stat`s every package file (the index scan stores size=0), and it used
+    # to run inline during import — i.e. before gunicorn binds the port.  With a
+    # large PACKAGES_DIR (or network/cold storage) that outlived the backend
+    # healthcheck grace; the edge nginx depends on backend health, so
+    # `docker compose up -d` failed with "dependency failed to start: container
+    # openfish-backend is unhealthy" and nginx stayed in Created.  The check
+    # imports `app` in a subprocess with `services.stats.compute` patched to
+    # sleep: a synchronous first refresh makes the import slow and fails it.
+    # Temp dirs only; same interpreter rule as above.
+    command: python .agent/checks/check_startup_nonblocking.py
+    timeout: 120
+    validated: false

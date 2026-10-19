@@ -269,6 +269,34 @@ docker compose logs --tail=100 backend forgejo
   docker compose exec backend python cli.py docs import --from /app/docs
   ```
 
+- `docker compose up -d` 报 `dependency failed to start: container openfish-backend is
+  unhealthy`，并且 `docker compose ps` 里 nginx 一直是 `Created`（没起来）→ **不是 nginx
+  坏了**，是 backend 冷启动超过了健康检查宽限，而 nginx 的 `depends_on` 要求 backend
+  `healthy`。gunicorn 要先 `import app`，其间会扫描三个索引目录（`PACKAGES_DIR` 只列
+  文件名、不读内容），再初始化数据库/鉴权，然后才 bind 端口。`PACKAGES_DIR` 有十万级
+  以上 whl、或元数据在 NFS/CIFS/冷缓存上时，这段可能远超默认的 60s：
+
+  ```bash
+  docker inspect --format '{{json .State.Health}}' openfish-backend | python3 -m json.tool
+  docker compose logs --tail=20 backend                       # 看到 gunicorn "Booting worker" 才算 bind
+  docker compose exec backend sh -c 'time ls /app/share/python | wc -l'   # 冷缓存下量一下目录成本
+  ```
+
+  应急：先只起 backend，等它 `healthy` 再补其余服务：
+
+  ```bash
+  docker compose up -d backend
+  until [ "$(docker inspect --format '{{.State.Health.Status}}' openfish-backend)" = healthy ]; do sleep 10; done
+  docker compose up -d
+  ```
+
+  长期：在 `docker/.env` 把 `BACKEND_HEALTHCHECK_START_PERIOD` 调大（1.5T 级目录先设
+  `10m`，再按实测第一次启动的耗时收窄），见 `.env.example`。不要把 nginx 的依赖改成
+  `service_started` 绕过——那只是把 502 提前。另一个同类症状是内存而不是时间：后端
+  反复 `Restarting` 且 `docker inspect --format '{{.State.OOMKilled}}' openfish-backend`
+  为 `true`，说明索引条目（每个文件一条，全在内存里）把配额吃满了，要加内存或缩小
+  单个 `PACKAGES_DIR`，调宽限没用。
+
 ## 6. PostgreSQL：切换与数据迁移
 
 `db` 服务在 `profile: db` 下，**只起容器不会改变后端行为**；真正的开关是 `DATABASE_URL`。
