@@ -177,6 +177,46 @@ function callEndpoint(state, pathname, csrf, method = 'POST') {
   })
 }
 
+// ── 场景 0：平台能力元数据 → pi-ai 模型条目 ─────────────────────────────
+// 纯映射，不需要平台/DSH：声明了就映射过去，没声明就一个字段都不写。
+console.log('\n场景 0 — 能力元数据映射成 llm-pi-ai 模型条目')
+const mapped = mod.modelEntryFor({
+  name: 'deepseek-flash', provider: 'openai', model: 'deepseek-flash', description: '默认对话模型',
+  context_window: 1000000, max_tokens: 384000, modalities: ['text', 'image'],
+  reasoning: { format: 'deepseek', efforts: ['off', 'low', 'high', 'max'] },
+})
+check('上下文窗口映射为 contextWindow', mapped.contextWindow === 1000000, JSON.stringify(mapped))
+check('输出上限映射为 maxTokens', mapped.maxTokens === 384000, JSON.stringify(mapped))
+check('模态映射为 pi-ai 的 input', JSON.stringify(mapped.input) === JSON.stringify(['text', 'image']), JSON.stringify(mapped))
+check('方言映射为 compat.thinkingFormat', mapped.compat && mapped.compat.thinkingFormat === 'deepseek', JSON.stringify(mapped))
+check('档位映射为 reasoningEfforts（off→null，其余同名 wire 值）',
+  mapped.reasoningEfforts && mapped.reasoningEfforts.off === null &&
+  mapped.reasoningEfforts.low === 'low' && mapped.reasoningEfforts.high === 'high' &&
+  mapped.reasoningEfforts.max === 'max', JSON.stringify(mapped.reasoningEfforts))
+const undeclared = mod.modelEntryFor({ name: 'plain', provider: 'openai', model: 'plain' })
+check('未声明时一个元数据字段都不写（让 pi-ai 用自己的默认值）',
+  !('contextWindow' in undeclared) && !('maxTokens' in undeclared) &&
+  !('input' in undeclared) && !('reasoningEfforts' in undeclared) && !('compat' in undeclared),
+  JSON.stringify(undeclared))
+const anthropic = mod.modelEntryFor({
+  name: 'claude', provider: 'anthropic', model: 'claude',
+  modalities: ['text'], reasoning: { format: 'deepseek', efforts: ['low', 'high'] },
+})
+check('Anthropic 路由仍映射档位、但不写 thinkingFormat',
+  anthropic.reasoningEfforts && anthropic.reasoningEfforts.low === 'low' && !('compat' in anthropic),
+  JSON.stringify(anthropic))
+const audioOnly = mod.modelEntryFor({ name: 'asr', provider: 'openai', model: 'asr', modalities: ['audio'] })
+check('平台登记的 audio 模态不会写进 pi-ai 的 input（它只接受 text/image）',
+  !('input' in audioOnly), JSON.stringify(audioOnly))
+const bogus = mod.modelEntryFor({
+  name: 'x', provider: 'openai', model: 'x',
+  context_window: '64000', max_tokens: -1, modalities: ['video'],
+  reasoning: { format: 7, efforts: ['extreme'] },
+})
+check('畸形元数据被忽略，不会让整条 provider 不可服务',
+  !('contextWindow' in bogus) && !('maxTokens' in bogus) &&
+  !('input' in bogus) && !('reasoningEfforts' in bogus), JSON.stringify(bogus))
+
 // ── 场景 1：显式 /teardown（用户改过的文件必须保留） ────────────────────
 console.log('\n场景 1 — POST /teardown')
 seed({ modified: true, unmanaged: true })
@@ -250,6 +290,8 @@ const server = http.createServer((req, res) => {
       {
         name: 'deepseek-flash', provider: 'openai', kind: 'chat', base_url: 'http://example.invalid',
         model: 'deepseek-flash', aliases: ['default'], path: '/v1/chat/completions', enabled: true, api_key: 'sk-upstream',
+        context_window: 1000000, max_tokens: 384000, modalities: ['text', 'image'],
+        reasoning: { format: 'deepseek', efforts: ['off', 'low', 'high', 'max'] },
       },
       {
         name: 'deepseek-v4-pro', provider: 'openai', kind: 'chat', base_url: 'http://example.invalid',
@@ -277,6 +319,18 @@ check('git helper / gitconfig 照写', fs.existsSync(P.helper) && fs.existsSync(
 const manifest = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')).mirrorsWritten || {}
 check('清单里只有 git 两个文件', !(P.pip in manifest) && !(P.npmrc in manifest) && (P.helper in manifest) && (P.gitconfig in manifest), JSON.stringify(Object.keys(manifest)))
 check('镜像文件被 docker 等未涉及', !fs.existsSync(path.join(sys, 'etc/docker/daemon.json')))
+// registerProviders 必须把平台声明的能力元数据原样带进 llm-pi-ai 的模型条目 ——
+// 只写 id/name 会让 DSH 回落到 pi-ai 默认的 262144 / 32768 / text-only。
+const flashProviderOp = d.state.mutated
+  .flatMap(([, ops]) => ops)
+  .find((op) => op && op.op === 'set' && Array.isArray(op.path) && op.path[1] === 'intranet-deepseek-flash')
+const flashModel = flashProviderOp && flashProviderOp.value && flashProviderOp.value.models && flashProviderOp.value.models[0]
+check('注册的 provider 带上平台声明的模型能力元数据',
+  Boolean(flashModel) && flashModel.contextWindow === 1000000 && flashModel.maxTokens === 384000 &&
+  JSON.stringify(flashModel.input) === JSON.stringify(['text', 'image']) &&
+  flashModel.compat && flashModel.compat.thinkingFormat === 'deepseek' &&
+  flashModel.reasoningEfforts && flashModel.reasoningEfforts.low === 'low' && flashModel.reasoningEfforts.off === null,
+  JSON.stringify(flashModel))
 // ── 场景 6：写入校验拒绝一条路由时，逐条重试不让整批落空 ─────────────────
 console.log('\n场景 6 — assertServiceable 拒绝一条路由时不拖垮整批')
 for (const file of Object.values(P)) fs.rmSync(file, { force: true })

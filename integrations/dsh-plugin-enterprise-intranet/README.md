@@ -9,9 +9,27 @@ DSH（DeepSeek Harness）的**企业内网模式**插件。把 DSH 接到企业�
 |---|---|
 | 企业平台的 **api-key 是必选项**，没有就跑不起来 | 没有 key 时**不会**启用企业内网模式；面板把用户送到平台的设备授权页登录，登录成功后平台签发的 key **由插件自动收下**，无需复制粘贴 |
 | 模型路由表里哪条是默认模型 | 用 key 读 `GET /api/v1/models/resolved`，为每条启用的**对话 / 补全**路由（`kind` 为 `chat` / `completion`）注册一个 `llm-pi-ai` provider，并把 `agent-default-model` 指向 `aliases` 含 `default` 的那条；向量化 / OCR / 语音等路由只在面板里展示 |
+| 模型的上下文 / 视觉 / 思维链能力不可见 | 把平台声明的 `context_window` / `max_tokens` / `modalities` / `reasoning` 映射成 `models[]` 的 `contextWindow` / `maxTokens` / `input` / `reasoningEfforts` + `compat.thinkingFormat`，见下节 |
 | 内网包源要一个个手配 | 自动写 pip / npm / apt / docker / nvm 的镜像配置 |
 | git 仓库的 push 凭据 | 生成 git credential helper（`/usr/local/bin/openfish-git-credential`，`700`）+ `/etc/gitconfig`：clone/push 时用平台 key 向平台换一张**短期 Forgejo 票**（Forgejo 只认自己的 token，平台 key 本身推不上去） |
 | 工具与文档入口 | 面板列出平台的 `/api/v1/tools`、`/api/v1/docs` 与各生态页面 |
+
+### 模型能力元数据
+
+平台 `/api/v1/models/resolved` 的路由条目可以声明四项能力元数据，插件把它们映射进
+`llm-pi-ai` 的 `models[]`：
+
+| 平台字段 | pi-ai 字段 | 作用 |
+|---|---|---|
+| `context_window` | `contextWindow` | 上下文预算；缺省时 pi-ai 按 262144 算，32k/64k 模型会溢出或提前压缩 |
+| `max_tokens` | `maxTokens` | 输出能力 |
+| `modalities` | `input` | `text` / `image`；声明 `image` 才会让 VLM 的图片能力在 DSH 里可见（`audio` 只是平台登记项，pi-ai 模型不接受） |
+| `reasoning.format` | `compat.thinkingFormat` | 思维链方言（如 `deepseek`）；只写给 OpenAI 兼容路由，Anthropic 用原生 thinking 块 |
+| `reasoning.efforts` | `reasoningEfforts` | 可选的思维链档位；`off` 映射为 `null`（支持关闭、请求里不带 thinking 参数），其余档位原样作为 wire 值 |
+
+**未声明（`null`）的字段一个都不写**：pi-ai 保留自己的默认值，插件不猜数字。
+平台响应被视为外部输入，畸形的 token 数 / 未知档位会被忽略，而不是让整条 provider
+被 `assertServiceable` 判死。
 
 ## 安装
 
