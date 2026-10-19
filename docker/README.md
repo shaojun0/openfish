@@ -57,10 +57,44 @@ docker exec -it openfish-backend-debug bash
   换盘请改 `docker-compose.yml` 的 `x-backend-volumes`，见 §4。
 - **`AUTH_ENABLED`** —— 本拓扑永远开着认证（框架默认 `true`）。关闭它意味着边缘 nginx
   后面的整个管理面匿名可写；要关请改 `docker-compose.yml`，并清楚这是安全边界的改动。
-- **`ROUTE_PREFIX`** —— `docker/nginx/nginx.conf` 里的 `/api`、`/simple`、`/npm`、`/tools`
-  等全是写死的 `location`，改了前缀服务立即不可达。真要改就得连 nginx 一起改。
+- **`ROUTE_PREFIX`** —— 不是隐藏旋钮，写在 `.env` 里即可：它只被 **nginx 边缘容器**
+  读取（模板渲染成 `set $openfish_external_prefix`），用来剥掉外部前缀并传
+  `X-Forwarded-Prefix`；backend 不读它。典型值是 `/pypi`，配一级代理的
+  `location /pypi { proxy_pass http://<openfish>:20416; }`。见 §2 末尾。
 - **`FRONTEND_DIST_DIR`** —— 只在 Flask 自己托管 SPA 时有意义；这里 SPA 由 `frontend`
   容器供应，`backend/routes/spa.py` 这条路径永远走不到。
+
+### 外部路径前缀（`ROUTE_PREFIX`）
+
+一级代理按路径分流、把整个应用挂在 `/pypi` 这种前缀下时，**不用改 nginx，也不用在一级
+代理上加任何头**——一级代理原样转发即可：
+
+```nginx
+location /pypi {
+    proxy_pass http://<openfish-host>:20416;
+}
+```
+
+在 `docker/.env` 里设：
+
+```dotenv
+ROUTE_PREFIX=/pypi
+```
+
+`docker compose up -d --force-recreate nginx` 之后：
+
+* 边缘 nginx 的模板把它渲染成 `set $openfish_external_prefix`：请求进来先剥掉 `/pypi`
+  再做 location 匹配（根路径的 location 全部复用），并给 backend 传
+  `X-Forwarded-Prefix: /pypi`；
+* backend 的 `ProxyFix(x_prefix=1)` 把它变成 `SCRIPT_NAME`，`services/urlprefix.py`
+  统一据此生成 URL：PEP 691 文件链接、`/simple/` 与静态索引的链接、308 跳转、`Link`
+  头、npm `dist.tarball`、`/api/v1/*` catalog 的 `download_url`、device
+  `verification_uri` 都会带 `/pypi`；
+* 留空（默认）时行为与之前完全一致。
+
+`ROUTE_PREFIX` **只给 nginx 容器**，不要配到 backend：backend 若也挂前缀，就会和
+nginx 的剥离叠加成 `/pypi/pypi`。SPA 的浏览器路由基仍是 `/`（`createWebHistory('/')`），
+把 UI 也放到子路径下需要前端构建参数配合；pip / uv / npm / apt 这些协议面不需要。
 
 还有一类不是"部署配置"而是**进程间消息**的变量，由代码自己设置、不该出现在 `.env` 里：
 `OPENFISH_ROLE`（compose 设）、`OPENFISH_GIT_TOKEN` / `OPENFISH_GIT_HOST`、

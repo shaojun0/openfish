@@ -21,9 +21,9 @@ from typing import IO
 
 from flask import Response, request, send_file
 
-from config import settings
 from errors import BadRequestError
 from services.objectstore import ObjectInfo, etag_of
+from services.urlprefix import external_prefix
 
 
 def wants_json() -> bool:
@@ -40,8 +40,8 @@ def wants_json() -> bool:
 
 
 def spa_url(path: str) -> str:
-    """Absolute-ish path of an SPA page, honouring the global route prefix."""
-    return settings.server.route_prefix.rstrip("/") + path
+    """Absolute-ish path of an SPA page, honouring the client-visible prefix."""
+    return external_prefix() + path
 
 
 def body_ceiling(max_bytes: int, message: str):

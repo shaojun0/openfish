@@ -131,7 +131,7 @@ openfish 校验 `X-Forgejo-Signature`（`HMAC-SHA256(secret, 原始请求体)` �
 ## 7. nginx 片段
 
 同样在 `docs/agent-hub/integration/S1.md` 第 ② 节，给出插入
-`docker/nginx/nginx.conf` 的精确 `location` 片段（`/git/` 与 `/forgejo-api/`，
+`docker/nginx/templates/default.conf.template` 的精确 `location` 片段（`/git/` 与 `/forgejo-api/`，
 以及 `upstream openfish_forgejo`）。
 
 ---

@@ -15,7 +15,7 @@
 #     backend   Flask + gunicorn（API 与各生态协议）      ┐
 #     runner    智能体运行时队列 worker（profile: runner）├ 同一个镜像 openfish:latest
 #                                                       ┘ OPENFISH_ROLE 决定起哪个
-#     nginx     边缘网关：唯一对外入口，按路径分流          ← docker/nginx/nginx.conf
+#     nginx     边缘网关：唯一对外入口，按路径分流          ← docker/nginx/templates/default.conf.template
 #     db        PostgreSQL（profile: db，可选后端）
 #
 #   应用侧只有**一个**镜像（backend/Dockerfile）：容器里起服务端还是队列 worker，
@@ -62,12 +62,12 @@ x-backend-env: &backend-env
   # 仍在 docker/share 下。默认值与 docker/.env.example 保持一致。
   PACKAGES_DIR: ${PACKAGES_DIR:-/app/share/python}
   PYTHON_BUILDS_DIR: ${PYTHON_BUILDS_DIR:-/app/share/python-build-standalone}
-  # ROUTE_PREFIX 与 FRONTEND_DIST_DIR 刻意不转发：
-  #   * ROUTE_PREFIX 一改，本拓扑的 nginx.conf（/api、/simple、/npm… 全是写死的
-  #     location）就不再匹配，服务等于不可达；
-  #   * FRONTEND_DIST_DIR 只在 Flask 自己托管 SPA 时有意义，这里 SPA 由 frontend
-  #     容器供应，代码路径永远走不到（routes/spa.py 自己也是这么写的）。
-  # 需要用它们，请连同 docker/nginx/nginx.conf 一起改，而不是只加一个环境变量。
+  # FRONTEND_DIST_DIR 刻意不转发：它只在 Flask 自己托管 SPA 时有意义，这里 SPA
+  # 由 frontend 容器供应，代码路径永远走不到（routes/spa.py 自己也是这么写的）。
+  # ROUTE_PREFIX 也不进 backend：它是**边缘 nginx** 的外部路径前缀（见 nginx
+  # service）。nginx 剥掉它并传 X-Forwarded-Prefix，backend 的 ProxyFix 把后者
+  # 变成 SCRIPT_NAME，由 services/urlprefix.py 统一对外发 URL；若把它塞给
+  # backend，Flask 会把每条路由重新挂到该前缀下，和 nginx 的剥离重复一次。
   # 数据库：留空 = 使用 API_KEYS_FILE 指向的 SQLite 文件（默认，见下）。
   # 设为 PostgreSQL URL（postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/openfish）
   # 即把 API key / 用户 / 角色 / 统计整体切到 db 服务。改这里的同时请用
@@ -471,10 +471,16 @@ services:
         condition: service_started
     ports:
       - "${PYPISERVER_PORT:-20416}:80"
+    environment:
+      # 外部路径前缀（如 /pypi）：模板 nginx 用它剥前缀并传 X-Forwarded-Prefix，
+      # 见 docker/nginx/templates/default.conf.template。留空 = 根路径。
+      ROUTE_PREFIX: ${ROUTE_PREFIX:-}
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      # 可选 TLS：把证书放进 docker/certs/ 后取消注释，并在 nginx.conf 中
-      # 打开 443 监听块。
+      # 官方镜像入口脚本会用 envsubst 把 /etc/nginx/templates/*.template 渲染
+      # 到 /etc/nginx/conf.d/；只替换容器里已定义的环境变量（这里只有
+      # ROUTE_PREFIX），nginx 自身的 $http_host / $scheme 等不受影响。
+      - ./nginx/templates:/etc/nginx/templates:ro
+      # 可选 TLS：把证书放进 docker/certs/ 后取消注释，并在模板中打开 443 监听块。
       # - ./certs:/etc/nginx/certs:ro
     networks:
       - openfish

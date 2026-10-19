@@ -273,7 +273,7 @@ Templates are provided at `backend/.env.example` (local development) and
 | `DEBUG`                 | `false`                | Flask debug mode                                   |
 | `SECRET_KEY`            | *(empty)*              | Session signing key — **set this**                 |
 | `SERVER_NAME`           | `cpypiserver`          | Branding name                                      |
-| `ROUTE_PREFIX`          | *(empty)*              | Global URL prefix for every route                  |
+| `ROUTE_PREFIX`          | *(empty)*              | Client-visible path prefix (e.g. `/pypi`), rendered into the edge nginx: it strips the prefix and passes `X-Forwarded-Prefix`, so every generated URL keeps it. Not a backend variable. |
 | `PACKAGES_DIR`          | `<backend>/packages`   | Where uploaded packages live                       |
 | `PYTHON_BUILDS_DIR`     | `<project>/docker/python-build-standalone` | Prebuilt CPython releases    |
 | `NODE_BUILDS_DIR`       | `<project>/docker/node-builds` | Prebuilt Node.js mirror (`nodejs.org/dist` layout) |
@@ -1233,7 +1233,7 @@ registry data.
 
 > **Want the old behaviour back** (the shell itself refusing anonymous callers)?
 > Send `/` and `/static/dist/` to the `backend` upstream instead of the
-> `frontend` one in `docker/nginx/nginx.conf`, and give the backend the build
+> `frontend` one in `docker/nginx/templates/default.conf.template`, and give the backend the build
 > by setting `FRONTEND_DIST_DIR=/app/static/dist` with the bundle mounted in.
 > Flask's `app:read` guard then answers before any JavaScript runs.
 
@@ -1420,7 +1420,8 @@ frontend/                       the Vue 3 SPA — one build unit
 
 docker/                         orchestration — no application code
 ├── docker-compose.yml          backend + runner + frontend + nginx + db (profiles)
-├── nginx/nginx.conf            the edge gateway: path routing, upload size
+├── nginx/templates/default.conf.template   the edge gateway: path routing,
+│                                             upload size, external prefix
 ├── .env.example                Compose variable template (copied to docker/.env)
 ├── examples/                   committed sample catalogs, seeded into a fresh mount
 ├── certs/                      optional TLS material, git-ignored
@@ -1491,23 +1492,26 @@ that one is changed in `docker-compose.yml` rather than by a symlink.
 - **Only the edge is published.** `backend` and `frontend` are reachable solely
   on the Compose network (`expose:`, never `ports:`), so there is exactly one
   HTTP entry point to reason about. `client_max_body_size` in
-  `docker/nginx/nginx.conf` must stay ≥ `MAX_CONTENT_LENGTH`, or uploads are
+  `docker/nginx/templates/default.conf.template` must stay ≥ `MAX_CONTENT_LENGTH`, or uploads are
   rejected by nginx before Flask sees them.
 - **Forwarded headers decide every advertised URL.** The backend runs
   `ProxyFix(x_for, x_proto, x_host, x_prefix)`, so the npm `dist.tarball`
   (`services/npm_registry.py`), the device-flow `verification_uri` and the
   PEP 691 file URLs are built from `Host` / `X-Forwarded-Host` /
-  `X-Forwarded-Proto`. `docker/nginx/nginx.conf` therefore forwards
+  `X-Forwarded-Proto`. `docker/nginx/templates/default.conf.template` therefore forwards
   `Host $http_host` (port included) and *preserves* an upstream proxy's
   `X-Forwarded-*` values, falling back to its own only when none were sent.
   Overwriting them with `$host`/`$scheme` — the pre-2026-09 behaviour — made a
   deployment behind a TLS terminator advertise `http://host/…` and broke
   `npm install` of every mirrored package.
-- **`docker/nginx/nginx.conf` is a single-file bind mount.** Editing it in place
-  works, but a tool that replaces the file (temp file + `rename`, as most
-  editors and `sed -i` do) leaves the *old inode* mounted in the container, so
-  `nginx -s reload` keeps serving the old config. Recreate the service
-  (`docker compose up -d --force-recreate nginx`) after such an edit.
+- **`docker/nginx/templates/default.conf.template` is a templated bind mount.**
+  The stock nginx entrypoint renders it with `envsubst` (only `ROUTE_PREFIX` is
+  substituted) into `/etc/nginx/conf.d/default.conf` when the container starts.
+  Editing the template and running `nginx -s reload` does **not** re-render it;
+  recreate the service (`docker compose up -d --force-recreate nginx`) after an
+  edit. An upstream path prefix (`ROUTE_PREFIX=/pypi`) is a `.env` change: the
+  template strips it and forwards `X-Forwarded-Prefix`, and every URL the
+  backend generates keeps it.
 - Generate `SECRET_KEY` with:
   `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
 - **OAuth2 introspection verifies TLS.** Set `OAUTH2_CA_BUNDLE` when the

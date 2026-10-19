@@ -43,6 +43,7 @@ from services.device_auth import (
     AlreadyApprovedError, DeviceAuthStore, ExpiredUserCodeError,
     UnknownUserCodeError,
 )
+from services.urlprefix import external_base_url
 
 device_bp = Blueprint("device", __name__)
 
@@ -74,7 +75,7 @@ def _base_url() -> str:
     configured = (settings.server.public_base_url or "").strip()
     if configured:
         return configured.rstrip("/")
-    return request.url_root.rstrip("/")
+    return external_base_url()
 
 
 # ── Pages ────────────────────────────────────────────────────────────

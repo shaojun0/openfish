@@ -18,17 +18,18 @@ from __future__ import annotations
 
 import json
 
-from flask import Blueprint, Response, current_app, request
+from flask import Blueprint, Response, current_app
 
 from openapi.render import render_llms_txt, render_reference_html
 from openapi.spec import build_spec
+from services.urlprefix import external_base_url, external_prefix
 
 discovery_bp = Blueprint("discovery", __name__)
 
 
 def _base_url() -> str:
-    """Absolute server root, honouring ROUTE_PREFIX and X-Forwarded-*."""
-    return request.url_root.rstrip("/")
+    """Absolute client-visible server root, honouring prefix and X-Forwarded-*."""
+    return external_base_url()
 
 
 def _spec() -> dict:
@@ -38,7 +39,7 @@ def _spec() -> dict:
 @discovery_bp.after_app_request
 def _advertise(response: Response) -> Response:
     """Point every response at the machine-readable description."""
-    root = request.script_root.rstrip("/")
+    root = external_prefix()
     response.headers.setdefault(
         "Link",
         f'<{root}/openapi.json>; rel="service-desc"; type="application/json", '

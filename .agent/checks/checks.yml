@@ -71,3 +71,16 @@ checks:
     command: python .agent/checks/check_discovery.py
     timeout: 120
     validated: false
+  - id: external-prefix
+    # A deployment behind `location /pypi` keeps /pypi in every URL, in both
+    # supported styles: the edge nginx strips the prefix and sends
+    # `X-Forwarded-Prefix` (ProxyFix → SCRIPT_NAME), or `ROUTE_PREFIX` mounts
+    # the Flask routes under it.  Exercises the `Link` header, the OpenAPI
+    # `servers` entry and the catalog URL builders, and forbids a route module
+    # re-deriving the prefix from `settings.server.route_prefix` (the defect
+    # that made `/api/v1/*` documents emit links to a 404).  Runs `import app`
+    # in two subprocesses with temp dirs, so it touches no database or catalog.
+    # Same interpreter rule as above.
+    command: python .agent/checks/check_external_prefix.py
+    timeout: 120
+    validated: false

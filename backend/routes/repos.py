@@ -80,6 +80,7 @@ from schemas import (
     RunnerPatchRequest,
 )
 from services import git_identity, repo_import, repo_runner
+from services.urlprefix import external_base_url
 
 
 # `doc_ui=False` for the same reason `app.py` passes it: the request-binding half
@@ -1383,7 +1384,7 @@ def _clone_url(forgejo_repo: str) -> str:
     if base.startswith(("http://", "https://")):
         prefix = base.rstrip("/")
     else:
-        root = f"{request.scheme}://{request.host}{request.script_root}".rstrip("/")
+        root = external_base_url()
         prefix = f"{root}/{base.strip('/')}"
     return f"{prefix}/{forgejo_repo}.git"
 

@@ -58,6 +58,7 @@ from services.npm_publish import publish as publish_package
 from services.npm_registry import (
     ABBREVIATED_ACCEPT, SEARCH_MAX_SIZE, NpmRegistry, clamp_search_size,
 )
+from services.urlprefix import external_prefix
 
 
 class _PackageConverter(BaseConverter):
@@ -271,7 +272,7 @@ def _lookup_error(reason: str | None):
 
 
 def _npm_payload() -> dict:
-    prefix = settings.server.route_prefix.rstrip("/") + "/npm/files"
+    prefix = external_prefix() + "/npm/files"
     return hub.scan_npm(
         settings.hub.npm_dir,
         overlay=mirror_catalog.overlay(Session, namespaces.NPM),
