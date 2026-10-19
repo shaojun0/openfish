@@ -10,7 +10,7 @@ openfish/
 ├── docker/           ③ 编排、边缘网关与制品库 → 4 容器拓扑
 │   ├── tools/ npm/ node-builds/ docker-images/ debian/ docs/   ④ 制品库（操作员数据，不提交）
 │   ├── docker-compose.yml  .env.example
-│   └── nginx/nginx.conf
+│   └── nginx/templates/default.conf.template
 ├── integrations/     ⑤ 下游客户端代码（不进任何镜像）
 └── README.md  本文件
 ```
@@ -174,7 +174,7 @@ nginx 提前拒绝。
 SPA 壳与 bundle 现在由前端容器静态托管，因此**匿名可下载**（bundle 不含任何
 registry 数据）；所有数据端点、`/docs/*`、`/api/v1` 仍各自鉴权，匿名浏览器
 加载后被 401 拦截器送到 `/auth/login`。若要恢复"壳本身也要求 `app:read`"的
-旧行为，`docker/nginx/nginx.conf` 的注释里写了三步改法（把 `= /` 与
+旧行为，`docker/nginx/templates/default.conf.template` 的注释里写了三步改法（把 `= /` 与
 `/static/dist/` 指回 backend，并给后端挂载 dist + 设置 `FRONTEND_DIST_DIR`）。
 
 ---

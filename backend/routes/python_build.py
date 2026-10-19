@@ -31,6 +31,7 @@ from openapi import api_operation, binary, errors, ok
 from services import build_mirror
 from services.format import human_size
 from services.headers import attachment_disposition
+from services.urlprefix import external_prefix
 
 python_build_bp = Blueprint("python_build", __name__)
 
@@ -41,7 +42,7 @@ def _index():
 
 def _payload(idx) -> dict:
     """The build catalog the SPA's `/packages` page renders."""
-    prefix = settings.server.route_prefix.rstrip("/") + "/python-builds"
+    prefix = external_prefix() + "/python-builds"
     return build_mirror.python_catalog(
         idx,
         url_prefix=prefix,

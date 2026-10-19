@@ -69,6 +69,7 @@ from routes.hub_common import spa_url, wants_json
 from schemas import DockerTagsQuery, DockerUploadForm
 from services import docker_registry as registry
 from services import hub, hub_upload, mirror_catalog, namespaces, objectstore
+from services.urlprefix import external_prefix
 
 
 docker_bp = APIBlueprint("docker", __name__)
@@ -120,7 +121,7 @@ _TAGS_SCHEMA = {
 
 
 def _docker_payload() -> dict:
-    prefix = settings.server.route_prefix.rstrip("/") + "/docker/files"
+    prefix = external_prefix() + "/docker/files"
     return hub.scan_docker(
         settings.hub.docker_dir,
         overlay=mirror_catalog.overlay(Session, namespaces.DOCKER_IMAGES),

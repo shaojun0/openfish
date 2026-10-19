@@ -69,6 +69,7 @@ from models.docs import new_key
 from services import hub_upload, model_routes, objectstore, tool_catalog
 from services.objectstore import digest_of
 from services.sealing import SealingKeyMissing
+from services.urlprefix import external_prefix
 
 
 hub_bp = APIBlueprint("hub", __name__)
@@ -273,7 +274,7 @@ _ROUTE_RESULT_SCHEMA = {
 
 def _tools_prefix() -> str:
     """The browser-facing URL prefix of the tools downloads."""
-    return settings.server.route_prefix.rstrip("/") + "/tools"
+    return external_prefix() + "/tools"
 
 
 def _tools_payload() -> dict:

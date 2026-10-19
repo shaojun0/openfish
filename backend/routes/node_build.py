@@ -49,6 +49,7 @@ from routes.hub_common import wants_json
 from services import build_mirror
 from services.format import human_size
 from services.headers import attachment_disposition
+from services.urlprefix import external_prefix
 
 node_build_bp = Blueprint("node_build", __name__)
 
@@ -87,7 +88,7 @@ def _not_found(what: str):
 
 
 def _payload(idx) -> dict:
-    prefix = settings.server.route_prefix.rstrip("/") + "/node-builds"
+    prefix = external_prefix() + "/node-builds"
     return build_mirror.node_catalog(
         idx,
         url_prefix=prefix,
