@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ElMessage } from 'element-plus'
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 
@@ -76,27 +76,38 @@ const shortcuts = computed(() => [
 ])
 
 async function load(): Promise<void> {
+  // The route paints before `/api/v1/session` resolves (see router/index.ts);
+  // wait for the identity because it decides which endpoint fills the cards:
+  // admins read the cached overview, everyone else the package list (the only
+  // source of the three totals a non-admin may read).
+  if (!session.loaded) return
   loading.value = true
   try {
-    packages.value = await fetchPackages()
+    if (session.isAdmin) {
+      admin.value = await fetchAdminStats()
+    } else {
+      packages.value = await fetchPackages()
+    }
   } catch (e) {
     ElMessage.error(apiError(e) || t('home.loadFailed'))
+  } finally {
+    loading.value = false
   }
-  if (session.isAdmin) {
-    try {
-      admin.value = await fetchAdminStats()
-    } catch {
-      admin.value = null
-    }
-  }
-  loading.value = false
 }
 
-onMounted(load)
+// Never gate the page on the data: the skeleton cards stand in while the
+// package list (1 MB+, and slow to aggregate on a 100k-file registry) loads.
+watch(
+  () => session.loaded,
+  (ready) => {
+    if (ready) void load()
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
-  <div class="page" v-loading="loading">
+  <div class="page">
     <div class="page__header">
       <div class="page__heading">
         <h1 class="page__title">{{ t('home.title') }}</h1>
@@ -114,17 +125,20 @@ onMounted(load)
       <StatCard
         :label="t('stat.packages')"
         :value="overview?.package_count ?? localTotals.packages"
+        :loading="loading"
         icon="Box"
       />
       <StatCard
         :label="t('stat.files')"
         :value="overview?.file_count ?? localTotals.files"
+        :loading="loading"
         icon="Document"
         tone="info"
       />
       <StatCard
         :label="t('stat.storage')"
         :value="overview?.total_storage_human ?? localTotals.storage"
+        :loading="loading"
         icon="Coin"
         tone="warning"
       />

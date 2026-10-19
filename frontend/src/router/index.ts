@@ -152,10 +152,18 @@ const router = createRouter({
  * non-admins out of `/admin` and callers without the required permission out
  * of everything else.  The API enforces the same rules, so this is a UX guard
  * rather than a security boundary.
+ *
+ * Only routes that decide on the identity wait for it.  The overview (`/`,
+ * neither `requiresAdmin` nor `requiresPermission`) paints immediately, so a
+ * cold or busy backend does not leave the whole shell blank while
+ * `/api/v1/session` is in flight; `App.vue` loads the identity in the
+ * background and the API still rejects anything the anonymous shell asks for.
  */
 router.beforeEach(async (to) => {
   const session = useSessionStore()
-  if (!session.loaded) {
+  const needsIdentity =
+    to.meta.requiresAdmin === true || typeof to.meta.requiresPermission === 'string'
+  if (needsIdentity && !session.loaded) {
     await session.load()
   }
   if (to.meta.requiresAdmin && !session.isAdmin) {
