@@ -15,6 +15,7 @@ import {
   syncRepo,
 } from '@/api/agentHub'
 import { apiError } from '@/api/client'
+import { absoluteUrl } from '@/base'
 import CodeBlock from '@/components/CodeBlock.vue'
 import ImportJobPanel from '@/components/ImportJobPanel.vue'
 import TablePager from '@/components/TablePager.vue'
@@ -163,10 +164,7 @@ const repoGitPath = computed(() => {
     .join('/')
 })
 
-const cloneUrl = computed(() => {
-  const origin = typeof window !== 'undefined' ? window.location.origin : ''
-  return `${origin}/git/${repoGitPath.value}.git`
-})
+const cloneUrl = computed(() => absoluteUrl(`/git/${repoGitPath.value}.git`))
 
 const cloneCommand = computed(() => `git clone ${cloneUrl.value}`)
 
@@ -177,8 +175,8 @@ const cloneCommand = computed(() => `git clone ${cloneUrl.value}`)
  * `git-receive-pack`.  The real key is never pasted into this page.
  */
 const cloneAuthCommand = computed(() => {
-  const origin = typeof window !== 'undefined' ? window.location.origin : '<host>'
-  return `curl -fsS -H "Authorization: Bearer $OPENFISH_API_KEY" ${origin}/api/v1/repos/${repoGitPath.value}/git-credential`
+  const credential = absoluteUrl(`/api/v1/repos/${repoGitPath.value}/git-credential`)
+  return `curl -fsS -H "Authorization: Bearer $OPENFISH_API_KEY" ${credential}`
 })
 
 async function load(): Promise<void> {

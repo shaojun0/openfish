@@ -81,7 +81,7 @@ location /pypi {
 ROUTE_PREFIX=/pypi
 ```
 
-`docker compose up -d --force-recreate nginx` 之后：
+`docker compose build frontend && docker compose up -d --force-recreate frontend nginx` 之后：
 
 * 边缘 nginx 的模板把它渲染成 `set $openfish_external_prefix`：请求进来先剥掉 `/pypi`
   再做 location 匹配（根路径的 location 全部复用），并给 backend 传
@@ -90,11 +90,15 @@ ROUTE_PREFIX=/pypi
   统一据此生成 URL：PEP 691 文件链接、`/simple/` 与静态索引的链接、308 跳转、`Link`
   头、npm `dist.tarball`、`/api/v1/*` catalog 的 `download_url`、device
   `verification_uri` 都会带 `/pypi`；
+* 同一个值作为 build arg `VITE_BASE_PATH` 打进 SPA：vite 的资源 base 变成
+  `/pypi/static/dist/`，vue-router 的 history base 变成 `/pypi`，axios 的 baseURL
+  变成 `/pypi/api/v1`，界面里的机器面链接（`/simple/`、`/python-builds/` 等）
+  也由 `src/base.ts` 统一加上前缀；
 * 留空（默认）时行为与之前完全一致。
 
-`ROUTE_PREFIX` **只给 nginx 容器**，不要配到 backend：backend 若也挂前缀，就会和
-nginx 的剥离叠加成 `/pypi/pypi`。SPA 的浏览器路由基仍是 `/`（`createWebHistory('/')`），
-把 UI 也放到子路径下需要前端构建参数配合；pip / uv / npm / apt 这些协议面不需要。
+`ROUTE_PREFIX` **只给 nginx 与 frontend 构建**，不要配到 backend：backend 若也挂前缀，
+就会和 nginx 的剥离叠加成 `/pypi/pypi`。改这个值要**同时重建 frontend 镜像**
+（SPA 的 base 是构建期固化的）和重建 nginx（模板渲染），backend 不用重建。
 
 还有一类不是"部署配置"而是**进程间消息**的变量，由代码自己设置、不该出现在 `.env` 里：
 `OPENFISH_ROLE`（compose 设）、`OPENFISH_GIT_TOKEN` / `OPENFISH_GIT_HOST`、
@@ -102,11 +106,13 @@ nginx 的剥离叠加成 `/pypi/pypi`。SPA 的浏览器路由基仍是 `/`（`c
 
 ### 前端构建参数
 
-SPA 是构建期固化的，没有运行时环境变量；只有两个 build args（compose `frontend.build.args`）：
+SPA 是构建期固化的，没有运行时环境变量；只有三个 build args（compose `frontend.build.args`）：
 
 ```bash
 NPM_REGISTRY=https://registry.npmmirror.com   # 内网 npm 源；留空用默认
 BUILD_ID=$(git describe --always)             # 侧边栏显示的构建标识；留空 = 构建时刻
+# 外部路径前缀；compose 从 ROUTE_PREFIX 转发，一般不用手工传
+VITE_BASE_PATH=/pypi
 docker compose build frontend
 ```
 

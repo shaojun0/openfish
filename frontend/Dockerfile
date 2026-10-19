@@ -15,6 +15,10 @@ ARG NPM_REGISTRY=
 # Optional build stamp shown in the sidebar, e.g. --build-arg BUILD_ID=$(git describe).
 # Empty keeps vite.config.ts's default: the moment the bundle was built.
 ARG BUILD_ID=
+# Optional client-visible path prefix (e.g. /pypi). docker-compose passes
+# ROUTE_PREFIX to it; vite.config.ts turns it into the asset base, the router
+# history base and the API baseURL. Empty = served at the root.
+ARG VITE_BASE_PATH=
 
 # Dependency manifests first, for layer caching: this layer only rebuilds when
 # the lockfile changes.
@@ -26,9 +30,9 @@ RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi 
 # this cannot clobber the install above.
 COPY . .
 
-# Vite writes to frontend/dist (see vite.config.ts).  BUILD_ID is passed through
-# the build environment; vite.config.ts reads process.env.BUILD_ID.
-RUN BUILD_ID="$BUILD_ID" npm run build
+# Vite writes to frontend/dist (see vite.config.ts).  BUILD_ID and VITE_BASE_PATH
+# are passed through the build environment; vite.config.ts reads both.
+RUN BUILD_ID="$BUILD_ID" VITE_BASE_PATH="$VITE_BASE_PATH" npm run build
 
 
 # ── Runtime: static file server ─────────────────────────────────────

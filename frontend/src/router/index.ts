@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
+import { BASE_PATH } from '@/base'
 import DefaultLayout from '@/layouts/DefaultLayout.vue'
 import { useSessionStore } from '@/stores/session'
 
@@ -139,7 +140,9 @@ const routes: RouteRecordRaw[] = [
 ]
 
 const router = createRouter({
-  history: createWebHistory('/'),
+  // The deployment prefix (empty = root).  vue-router prepends this base to
+  // every `to`/`push`, so route definitions stay prefix-free.
+  history: createWebHistory(BASE_PATH || '/'),
   routes,
   scrollBehavior: () => ({ top: 0 }),
 })

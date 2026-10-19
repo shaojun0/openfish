@@ -14,6 +14,7 @@ import {
   type DocEntry,
 } from '@/api'
 import { apiError } from '@/api/client'
+import { appUrl } from '@/base'
 import DocEditor from '@/components/DocEditor.vue'
 import { useSessionStore } from '@/stores/session'
 import { formatDateOnly } from '@/utils/format'
@@ -52,7 +53,7 @@ const editorVisible = ref(false)
 const canUpload = computed(() => session.can('doc:upload'))
 const documents = computed<DocEntry[]>(() => catalog.value?.documents ?? [])
 const machineIndexUrl = computed(
-  () => `/docs/${encodeURIComponent(ecosystem.value)}/`,
+  () => appUrl(`/docs/${encodeURIComponent(ecosystem.value)}/`),
 )
 
 async function load(keepSelection = false): Promise<void> {

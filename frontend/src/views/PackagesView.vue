@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 
 import { fetchPackages, type PackageSummary } from '@/api'
 import { apiError } from '@/api/client'
+import { appUrl } from '@/base'
 import BuildCatalogView from '@/components/BuildCatalogView.vue'
 import TablePager from '@/components/TablePager.vue'
 import { usePagination } from '@/composables/usePagination'
@@ -57,11 +58,11 @@ async function load(): Promise<void> {
  * same HTML, so there is only one implementation to keep correct.
  */
 function indexUrl(name: string): string {
-  return `/simple/${encodeURIComponent(name)}/`
+  return appUrl(`/simple/${encodeURIComponent(name)}/`)
 }
 
 function jsonUrl(name: string): string {
-  return `/simple/${encodeURIComponent(name)}/?format=json`
+  return appUrl(`/simple/${encodeURIComponent(name)}/?format=json`)
 }
 
 onMounted(() => {
@@ -95,7 +96,7 @@ onMounted(() => {
             <span class="btn-label">{{ t('common.refresh') }}</span>
           </el-button>
         </template>
-        <el-link v-else href="/python-builds/" target="_blank" rel="noopener">
+        <el-link v-else :href="appUrl('/python-builds/')" target="_blank" rel="noopener">
           <el-icon><Link /></el-icon>
           <span class="btn-label">{{ t('build.staticIndex') }}</span>
         </el-link>

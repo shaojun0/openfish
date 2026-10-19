@@ -18,6 +18,7 @@ import {
   type FlatArtifact,
 } from '@/api'
 import { apiError } from '@/api/client'
+import { appUrl } from '@/base'
 import TablePager from '@/components/TablePager.vue'
 import { usePagination } from '@/composables/usePagination'
 import { useSessionStore } from '@/stores/session'
@@ -46,7 +47,7 @@ const artifacts = computed<FlatArtifact[]>(() => catalog.value?.artifacts ?? [])
 const { page, pageSize, pageSizes, total, rows } = usePagination(artifacts)
 
 /** The server-rendered index page — uncacheable and script-friendly. */
-const indexUrl = computed(() => `/${props.endpoint}/`)
+const indexUrl = computed(() => appUrl(`/${props.endpoint}/`))
 
 async function load(): Promise<void> {
   loading.value = true

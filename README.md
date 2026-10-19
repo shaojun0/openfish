@@ -273,7 +273,7 @@ Templates are provided at `backend/.env.example` (local development) and
 | `DEBUG`                 | `false`                | Flask debug mode                                   |
 | `SECRET_KEY`            | *(empty)*              | Session signing key — **set this**                 |
 | `SERVER_NAME`           | `cpypiserver`          | Branding name                                      |
-| `ROUTE_PREFIX`          | *(empty)*              | Client-visible path prefix (e.g. `/pypi`), rendered into the edge nginx: it strips the prefix and passes `X-Forwarded-Prefix`, so every generated URL keeps it. Not a backend variable. |
+| `ROUTE_PREFIX`          | *(empty)*              | Client-visible path prefix (e.g. `/pypi`). Rendered into the edge nginx (it strips the prefix and passes `X-Forwarded-Prefix`) **and** baked into the SPA build as `VITE_BASE_PATH` (asset base, router base, API baseURL). Changing it needs a frontend image rebuild. Not a backend variable. |
 | `PACKAGES_DIR`          | `<backend>/packages`   | Where uploaded packages live                       |
 | `PYTHON_BUILDS_DIR`     | `<project>/docker/python-build-standalone` | Prebuilt CPython releases    |
 | `NODE_BUILDS_DIR`       | `<project>/docker/node-builds` | Prebuilt Node.js mirror (`nodejs.org/dist` layout) |
