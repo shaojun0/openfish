@@ -162,8 +162,9 @@ run cannot read as green; `make … ALLOW_SKIP=1` is how you accept one on purpo
 
 ```bash
 cd docker
+mkdir -p /data/share/packages   # host directory for Python packages (absolute mount in compose)
 ./bootstrap-env.sh        # writes .env + forgejo.env with every secret generated
-docker compose up -d --build   # 缺失的 bind 源由 Docker 自动创建；DB 用 docker/data
+docker compose up -d --build   # docker/ sources are created by Docker; DB uses docker/data
 ```
 
 `docker/bootstrap-env.sh` only fills blank secrets and never overwrites or resets an
@@ -174,14 +175,17 @@ the script prints those commands when it finishes.
 
 Every bind-mount source in `docker-compose.yml` is a path **inside `docker/`**,
 `data/` included, and Docker creates the missing ones when you
-`docker compose up` (empty, root-owned) — there is no setup step.
-`docker/examples/` holds the sample artifacts if you want a populated catalog to
+`docker compose up` (empty, root-owned) — there is no setup step. The one
+exception is `packages`: its host directory is an absolute path written in the
+Compose file (`/data/share/packages` → `PACKAGES_DIR`), so changing disks means
+editing that line, not re-pointing a symlink. `docker/examples/` holds the sample
+artifacts if you want a populated catalog to
 look at. The database is `docker/data/`, the deployment's own copy, while
 `cd backend && python app.py` keeps `backend/data/`: the two start paths never
 depend on each other (a stack that used to share `backend/data` can point
-`docker/data` back at `../backend/data` — `docker/README.md` §4). Re-pointing a
-single mount later is just `ln -sfn /srv/data/npm docker/npm`; the Compose file
-never changes.
+`docker/data` back at `../backend/data` — `docker/README.md` §4). Re-pointing any
+*other* mount later is just `ln -sfn /srv/data/npm docker/npm`; the Compose file
+never changes for those.
 
 The application side is one image: `openfish:latest`, built from
 `backend/Dockerfile`. The container's `OPENFISH_ROLE` selects which process it
@@ -1455,7 +1459,9 @@ so dropping a file in one takes effect without rebuilding anything.
 `data/` included — so the stack owns `docker/data/` while
 `cd backend && python app.py` owns `backend/data/`: neither start path depends on
 the other, and `docker/` stays the place a deployment's operator data is
-re-pointed with `ln -sfn`.
+re-pointed with `ln -sfn`. Python packages are the one exception: their host
+directory is an absolute path in the Compose file (`/data/share/packages`), so
+that one is changed in `docker-compose.yml` rather than by a symlink.
 
 ## Security notes
 

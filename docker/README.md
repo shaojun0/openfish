@@ -10,8 +10,9 @@
 
 ```bash
 cd docker
+mkdir -p /data/share/packages              # packages 的宿主目录（compose 里的绝对挂载源）
 ./bootstrap-env.sh                         # 生成 .env + forgejo.env 的全部密钥（幂等，可重跑）
-docker compose up -d --build               # 缺失的 bind 源由 Docker 自动创建
+docker compose up -d --build               # docker/ 下缺失的 bind 源由 Docker 自动创建
 docker compose --profile db up -d          # + PostgreSQL（见 §6）
 docker compose --profile runner up -d      # + 智能体运行时（同一镜像的第二平面）
 docker compose --profile debug up -d       # + 只起 bash 的调试容器（20417）
@@ -51,6 +52,9 @@ docker exec -it openfish-backend-debug bash
 
 ### 「不在 .env 里的旋钮」
 
+- **`PACKAGES_DIR` 的宿主路径** —— 固定为 compose 里的 `/data/share/packages`（挂到容器
+  `PACKAGES_DIR`，默认 `/app/share/python`）。packages 不走 `docker/share` 符号链接，
+  换盘请改 `docker-compose.yml` 的 `x-backend-volumes`，见 §4。
 - **`AUTH_ENABLED`** —— 本拓扑永远开着认证（框架默认 `true`）。关闭它意味着边缘 nginx
   后面的整个管理面匿名可写；要关请改 `docker-compose.yml`，并清楚这是安全边界的改动。
 - **`ROUTE_PREFIX`** —— `docker/nginx/nginx.conf` 里的 `/api`、`/simple`、`/npm`、`/tools`
@@ -100,7 +104,18 @@ docker compose build frontend
 
 ## 4. 存储布局
 
-每个 bind 源都是 `docker/` 下的相对路径，换盘 = 重指同名符号链接，compose 一个字不改：
+**`packages` 是唯一例外**：它的宿主机来源直接写在 compose 里，不经过符号链接：
+
+```yaml
+# docker/docker-compose.yml 的 x-backend-volumes
+- /data/share/packages:/app/share/python   # 宿主目录 → 容器 PACKAGES_DIR
+```
+
+换盘 = 改这一行（启动前先 `mkdir -p` 新目录），再 `docker compose up -d`。容器内
+`PACKAGES_DIR` 默认 `/app/share/python`，与 `docker/.env.example` 一致；要改容器内
+路径，同时改 `.env` 的 `PACKAGES_DIR` 和这条挂载的目标侧。
+
+**其余** bind 源都是 `docker/` 下的相对路径，换盘 = 重指同名符号链接，compose 一个字不改：
 
 ```bash
 ln -sfn /srv/openfish-mirror/npm docker/npm
@@ -111,8 +126,8 @@ ln -sfn /srv/openfish-mirror/npm docker/npm
 于是它就是一个断链：
 
 ```bash
-docker/share/python/packages_data -> /mnt/big-disk/packages   # ✗ 容器里没有 /mnt/big-disk
-docker/share/python/packages_data -> ../packages              # ✓ 相对链接，挂载后仍然成立
+docker/share/python-build-standalone/cpython -> /mnt/big-disk/cpython   # ✗ 容器里没有 /mnt/big-disk
+docker/share/python-build-standalone/cpython -> ../cpython              # ✓ 相对链接，挂载后仍然成立
 ```
 
 相对链接的目标**只是还没建出来**时，后端启动会自己补上（目标必须和链接在同一文件系统上，
@@ -121,6 +136,7 @@ docker/share/python/packages_data -> ../packages              # ✓ 相对链接
 
 | 目录 | 内容 | 进数据库吗 |
 | --- | --- | --- |
+| `/data/share/packages`（compose 挂载，容器内是 `PACKAGES_DIR`） | Python 包字节 | 否——文件名即身份，索引由 `PACKAGES_DIR` 扫描得到 |
 | `share/` `npm/` `node-builds/` `docker-images/` `debian/` | 制品字节 | npm / docker / debian 的 overlay 行在 `catalog_entries` 表里 |
 | `tools/` `docs/` | 对象字节（`objects/<uuid4>`） | **条目在数据库里**，目录只是存放处与 import/export 的桥 |
 | `data/` | SQLite 库、回源缓存、模型路由表所在库——本部署**自己的一份** | 是 |
@@ -131,7 +147,7 @@ docker/share/python/packages_data -> ../packages              # ✓ 相对链接
 
 ### `docker/data` 与 `backend/data` 是两份
 
-compose 的每一个 bind 源都在 `docker/` 下，`docker/data` 也不例外，所以：
+除 packages 外，compose 的每一个 bind 源都在 `docker/` 下，`docker/data` 也不例外，所以：
 
 | 你怎么起 | 数据库在哪 |
 | --- | --- |
@@ -182,17 +198,20 @@ docker compose logs --tail=100 backend forgejo
 
 常见症状：
 - `error while interpolating services.backend.environment.SECRET_KEY` → 忘了 `cp .env.example .env` 或没填。
-- 后端反复重启，日志里 `RuntimeError: cannot use PACKAGES_DIR=...: the symlink ... points at ..., which is
-  not a directory` → `PACKAGES_DIR`（或它的某一级父目录）是个断链。看这条链接：
+- `docker compose up` 失败并报 `error while creating mount source path '/data/share/packages'` →
+  宿主 packages 目录不存在，或它是个断链。compose 的挂载源由 Docker 在**宿主机**解析，
+  先 `sudo mkdir -p /data/share/packages`（或改 compose 里的那一行）。注意
+  `docker compose config --quiet` 只校验语法与插值，不校验 mount 源，这类错误只有 `up` 才暴露。
+- 后端反复重启，日志里 `RuntimeError: cannot use PACKAGES_DIR=...`（或 `PYTHON_BUILDS_DIR=...`）
+  → 容器内那个路径不是目录。先确认 compose 的挂载目标与 `.env` 的容器内路径一致：
 
   ```bash
-  ls -l docker/share/python            # 例：packages_data -> /mnt/big-disk/packages
+  docker compose config | grep -A2 'PACKAGES_DIR'   # 或直接看 x-backend-volumes
   ```
 
-  宿主机上的绝对路径在容器里不存在，把目标改成**相对**路径（或指向容器里真实存在的目录），
-  再 `docker compose restart backend`。相对链接的目标只是缺失时后端会自己建出来；
-  绝对链接、跨文件系统、路径被普通文件占住这三种都会报错拒绝启动。`PYTHON_BUILDS_DIR`
-  等其它挂载目录同理，`./bootstrap-env.sh` 在 `up` 之前也会把这类链接列出来。
+  `docker/share` 内部的链接是**容器里**解析的，宿主绝对目标会断链，要改成相对路径；
+  相对链接的目标只是缺失时后端会自己建出来。绝对链接、跨文件系统、路径被普通文件占住
+  这三种都会报错拒绝启动。`./bootstrap-env.sh` 在 `up` 之前也会把这类链接列出来。
 - webhook 401 → `FORGEJO_WEBHOOK_SECRET` 与 forgejo 容器里的值不一致。
 - `/api/v1/repos/<slug>/git-credential` 503 → `GIT_IDENTITY_KEY` 为空。
 - 上传 `413` → 请求体超过边缘 nginx 的 `client_max_body_size`（100m，与
