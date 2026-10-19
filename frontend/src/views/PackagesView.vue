@@ -3,7 +3,7 @@ import { ElMessage } from 'element-plus'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
-import { fetchPackages, type PackageSummary } from '@/api'
+import { fetchPackages, fetchStatsOverview, type PackageSummary, type StatsOverview } from '@/api'
 import { apiError } from '@/api/client'
 import { appUrl } from '@/base'
 import BuildCatalogView from '@/components/BuildCatalogView.vue'
@@ -23,6 +23,14 @@ const infoType = ref<'package' | 'build'>('package')
 const packages = ref<PackageSummary[]>([])
 const loading = ref(true)
 const query = ref('')
+const loadError = ref('')
+/**
+ * Sizes come from the server's cached statistics snapshot. When the background
+ * refresh has not finished its first `stat` walk yet, `total_size` is 0 for
+ * every row; `sizes_ready` tells the page to say so instead of pretending the
+ * registry is empty.
+ */
+const sizesReady = ref(true)
 
 const filtered = computed(() => {
   const needle = query.value.trim().toLowerCase()
@@ -43,10 +51,22 @@ watch(query, reset)
 
 async function load(): Promise<void> {
   loading.value = true
+  loadError.value = ''
   try {
-    packages.value = await fetchPackages()
+    // The package list is cache-first on the server, so this answers even while
+    // the background statistics pass is still running; the overview tells us
+    // whether the sizes in that answer are final.
+    const [list, overview] = await Promise.all([
+      fetchPackages(),
+      fetchStatsOverview().catch((): StatsOverview | null => null),
+    ])
+    packages.value = list
+    sizesReady.value = overview?.sizes_ready ?? true
   } catch (e) {
-    ElMessage.error(apiError(e) || t('packages.loadFailed'))
+    // Distinguish "request failed" from "the registry is empty": the empty
+    // table used to read as "no packages" when the real problem was a timeout.
+    loadError.value = apiError(e) || t('packages.loadFailed')
+    ElMessage.error(loadError.value)
   } finally {
     loading.value = false
   }
@@ -102,6 +122,25 @@ onMounted(() => {
         </el-link>
       </div>
     </div>
+
+    <el-alert
+      v-if="loadError"
+      class="page__alert"
+      type="error"
+      :closable="false"
+      show-icon
+      :title="loadError"
+    >
+      <el-button size="small" @click="load">{{ t('common.retry') }}</el-button>
+    </el-alert>
+    <el-alert
+      v-else-if="infoType === 'package' && !sizesReady"
+      class="page__alert"
+      type="info"
+      :closable="false"
+      show-icon
+      :title="t('packages.sizesWarming')"
+    />
 
     <BuildCatalogView v-if="infoType === 'build'" kind="python" />
 
@@ -183,6 +222,10 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.page__alert {
+  margin-bottom: 12px;
+}
+
 .toolbar__type {
   width: 160px;
 }

@@ -9,8 +9,9 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 
-from flask import Response, jsonify
+from flask import Response, g, jsonify, request
 from flask_openapi3 import OpenAPI
 from pydantic import ValidationError
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -23,6 +24,18 @@ from extensions.index_ext import IndexExtension
 from extensions.error_handlers import ErrorHandlersExtension
 from extensions.stats_refresh import StatsRefreshExtension
 from services import logsafe
+
+logger = logging.getLogger("cpypiserver.http")
+
+#: Import time is invisible in the access log (the worker accepts the first
+#: request only after this module finishes), so it is measured here and logged
+#: once at the end.  On a 100k-file catalog the index scan is the phase that
+#: matters; see `extensions/__init__.py` for the per-extension breakdown.
+_startup_started = time.perf_counter()
+
+# Anything at or above this is logged with the path, so a slow endpoint is
+# one grep away instead of a Network-tab story.
+SLOW_REQUEST_MS = 1000.0
 
 
 # ── Request-binding error envelope ──────────────────────────────────
@@ -237,6 +250,31 @@ logsafe.install()
 # ── Trust reverse-proxy headers (X-Forwarded-Proto, etc.) ──────────
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
+
+# ── Request timing ──────────────────────────────────────────────────
+# ``Server-Timing: app;dur=…`` shows up in the browser's Network panel next to
+# the total time.  The two differ when the delay is *not* in the handler — a
+# worker still importing the app accepts the connection late — which is exactly
+# the "every request took 16 s right after `docker compose up -d`" report.
+@app.before_request
+def _request_timing_start() -> None:
+    g.openfish_request_started = time.perf_counter()
+
+
+@app.after_request
+def _request_timing_finish(response: Response) -> Response:
+    started = getattr(g, "openfish_request_started", None)
+    if started is None:
+        return response
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.1f}"
+    if elapsed_ms >= SLOW_REQUEST_MS:
+        logger.warning(
+            "slow request %s %s -> %s in %.0f ms",
+            request.method, request.path, response.status_code, elapsed_ms,
+        )
+    return response
+
 # ── Plug in extensions (topological order auto-resolved) ────────────
 registry = ExtensionRegistry([
     ErrorHandlersExtension(),
@@ -248,8 +286,10 @@ registry = ExtensionRegistry([
 registry.init_all(app)
 
 # ── Register routes ─────────────────────────────────────────────────
+_routes_started = time.perf_counter()
 from routes import register_all
 register_all(app)
+logger.info("routes registered in %.1f ms", (time.perf_counter() - _routes_started) * 1000.0)
 
 # ── Seed authorization ──────────────────────────────────────────────
 # Must run after the blueprints are imported: the guards in those modules are
@@ -261,7 +301,14 @@ from services.authz import bootstrap as bootstrap_authz
 # explicitly with `python cli.py create-admin <identity>`, and nothing in the
 # environment can grant the server to whoever can set a variable.
 # for everything afterwards.
+_authz_started = time.perf_counter()
 _authz_summary = bootstrap_authz(app.extensions["authz"])
+logger.info(
+    "authorization seeded in %.1f ms", (time.perf_counter() - _authz_started) * 1000.0
+)
+logger.info(
+    "openfish backend ready in %.1f ms", (time.perf_counter() - _startup_started) * 1000.0
+)
 
 # ── Run ─────────────────────────────────────────────────────────────
 

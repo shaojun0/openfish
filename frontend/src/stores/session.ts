@@ -18,6 +18,14 @@ export const useSessionStore = defineStore('session', () => {
   const loading = ref(false)
   const error = ref<string | null>(null)
 
+  // The SPA is a static shell: the first `/api/v1/session` call can reach the
+  // edge proxy while the backend worker is still importing (that is what a 16 s
+  // first load looks like in the Network panel — the handler itself is fast).
+  // Retry a few times so the header does not stay anonymous until a reload.
+  const RETRY_DELAY_MS = 3000
+  const MAX_RETRIES = 5
+  let retries = 0
+
   const loaded = computed(() => info.value !== null)
   const authenticated = computed(() => info.value?.authenticated ?? false)
   const user = computed(() => info.value?.user ?? null)
@@ -41,6 +49,7 @@ export const useSessionStore = defineStore('session', () => {
     try {
       const data = await fetchSession()
       info.value = data
+      retries = 0
       setAuthEnabled(data.auth_enabled)
       // Order matters: `redirectToLogin()` reads the flag set on the line above.
       if (data.auth_enabled && !data.authenticated) {
@@ -48,6 +57,12 @@ export const useSessionStore = defineStore('session', () => {
       }
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e)
+      if (info.value === null && retries < MAX_RETRIES) {
+        retries += 1
+        setTimeout(() => {
+          void load()
+        }, RETRY_DELAY_MS)
+      }
     } finally {
       loading.value = false
     }

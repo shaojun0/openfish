@@ -61,12 +61,21 @@ case "$(role)" in
         # immediate rather than eventually-consistent across workers (README.md).
         # Threads give concurrency without that cache skew.  Raise --workers only
         # if you accept the AuthzService.CACHE_TTL_SECONDS (30s) propagation delay.
+        #
+        # The access log ends with `%(L)s` — the seconds gunicorn spent handling
+        # the request — so "which endpoint is slow?" is a `docker logs` question.
+        # The default fields are spelled out because setting the format
+        # replaces gunicorn's default.  Together with the `Server-Timing` header
+        # (`app;dur=…`) it also tells a slow handler apart from a worker that was
+        # still importing the app: the log line is then fast while the browser
+        # waited, which points at boot time, not at the endpoint.
         exec gunicorn \
             --bind "${HOST:-0.0.0.0}:${PORT:-8080}" \
             --workers 1 \
             --threads 8 \
             --timeout 300 \
             --access-logfile - \
+            --access-logformat '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s" %(L)s' \
             --error-logfile - \
             app:app
         ;;

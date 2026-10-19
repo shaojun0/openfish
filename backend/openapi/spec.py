@@ -43,6 +43,7 @@ _CONVERTER_RE = re.compile(r"<(?:(\w+):)?(\w+)>")
 TAGS: list[dict[str, str]] = [
     {"name": "Session", "description": "Who am I, and what may I do?"},
     {"name": "Packages", "description": "Browse and download Python packages."},
+    {"name": "Statistics", "description": "Cached registry counters for the SPA overview page."},
     {"name": "API keys", "description": "Issue and revoke the tokens clients authenticate with."},
     {"name": "Administration", "description": "Server-wide aggregates. Requires the admin role."},
     {"name": "Python builds", "description": "Prebuilt CPython mirror consumed by `uv python install`."},

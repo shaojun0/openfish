@@ -50,6 +50,17 @@ class ServerConfig(EnvSettings):
         ge=60,
         description="Admin stats background refresh interval in seconds",
     )
+    stats_sizing_workers: int = Field(
+        default=8,
+        ge=1,
+        le=32,
+        description=(
+            "Threads used to `stat` package files while the background stats "
+            "refresh fills in sizes. One syscall per file over a 100k-file "
+            "catalog is latency-bound, so a small pool shrinks the first pass "
+            "roughly by the worker count; 1 makes it serial."
+        ),
+    )
     frontend_dist_dir: str = Field(
         default="",
         description=(

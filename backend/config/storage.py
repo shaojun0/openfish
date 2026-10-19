@@ -76,6 +76,16 @@ class StorageConfig(EnvSettings):
             "the lightweight ALTERs in extensions/database.py."
         ),
     )
+    stats_snapshot_file: str = Field(
+        default=backend_path("data", "stats_snapshot.json"),
+        description=(
+            "Where the last successful statistics computation is persisted, so "
+            "a restart answers the overview page from the previous result "
+            "instead of recomputing it behind the first request. The container "
+            "default lives next to the database on the data volume "
+            "(/app/data/stats_snapshot.json)."
+        ),
+    )
 
     # ── Catalog medium ───────────────────────────────────────────────
     seed_catalogs: bool = Field(

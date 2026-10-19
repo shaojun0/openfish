@@ -78,6 +78,15 @@ onMounted(load)
       </el-button>
     </div>
 
+    <el-alert
+      v-if="stats && !stats.sizes_ready"
+      class="page__alert"
+      type="info"
+      :closable="false"
+      show-icon
+      :title="t('admin.sizesWarming')"
+    />
+
     <div class="stat-grid">
       <StatCard
         :label="t('stat.packages')"
@@ -178,6 +187,10 @@ onMounted(load)
 </template>
 
 <style scoped>
+.page__alert {
+  margin-bottom: 12px;
+}
+
 .pkg-link {
   color: var(--el-color-primary);
   text-decoration: none;

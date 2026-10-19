@@ -21,8 +21,12 @@ No other file needs to change.
 
 from __future__ import annotations
 
+import logging
+import time
 from abc import ABC, abstractmethod
 from collections import deque
+
+logger = logging.getLogger("cpypiserver.startup")
 
 
 class Extension(ABC):
@@ -52,8 +56,22 @@ class ExtensionRegistry:
         self._order = _topological_sort(extensions)
 
     def init_all(self, app) -> None:
+        # Startup time is the one number an operator cannot get from the HTTP
+        # logs: imports finish before gunicorn binds the port, so a slow index
+        # scan shows up only as "every request took 16 s" on the first page
+        # load.  Logging each extension's cost makes that visible in
+        # ``docker logs openfish-backend``.
+        started = time.perf_counter()
         for ext in self._order:
+            ext_started = time.perf_counter()
             ext.init_app(app)
+            logger.info(
+                "extension %-14s ready in %6.1f ms",
+                ext.name, (time.perf_counter() - ext_started) * 1000.0,
+            )
+        logger.info(
+            "all extensions ready in %.1f ms", (time.perf_counter() - started) * 1000.0
+        )
 
     def teardown_all(self, app) -> None:
         for ext in reversed(self._order):
