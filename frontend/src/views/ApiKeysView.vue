@@ -14,6 +14,7 @@ import {
   type KeyStats,
 } from '@/api'
 import { apiError } from '@/api/client'
+import { absoluteUrl } from '@/base'
 import CodeBlock from '@/components/CodeBlock.vue'
 import TablePager from '@/components/TablePager.vue'
 import { usePagination } from '@/composables/usePagination'
@@ -78,12 +79,12 @@ const expiryOptions = computed<Array<{ value: ExpiryChoice; label: string }>>(()
 
 const newKeySnippets = computed(() => {
   if (!newKey.value) return { netrc: '', twine: '' }
-  const base = window.location.origin
+  const base = absoluteUrl('/')
   const host = window.location.host
   return {
     netrc: `machine ${host}\n  login __token__\n  password ${newKey.value.key}`,
     twine:
-      `twine upload --repository-url ${base}/ \\\n` +
+      `twine upload --repository-url ${base} \\\n` +
       `  --username __token__ --password ${newKey.value.key} dist/*`,
   }
 })

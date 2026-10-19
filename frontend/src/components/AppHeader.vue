@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
+import { appUrl } from '@/base'
 import type { AppLocale } from '@/locales'
 import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
@@ -34,7 +35,7 @@ function switchLocale(locale: AppLocale): void {
 
 function handleCommand(command: string): void {
   if (command === 'logout') {
-    window.location.href = '/auth/logout'
+    window.location.href = appUrl('/auth/logout')
   } else if (command === 'refresh') {
     void session.load(true)
     router.go(0)

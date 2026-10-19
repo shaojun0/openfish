@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 
 import { fetchNpmCatalog, type NpmCatalog, type NpmPackage } from '@/api'
 import { apiError } from '@/api/client'
+import { appUrl } from '@/base'
 import BuildCatalogView from '@/components/BuildCatalogView.vue'
 import TablePager from '@/components/TablePager.vue'
 import { usePagination } from '@/composables/usePagination'
@@ -60,7 +61,7 @@ onMounted(() => {
           <el-option value="build" :label="t('npm.infoBuilds')" />
         </el-select>
         <template v-if="infoType === 'package'">
-          <el-link href="/npm/" target="_blank" rel="noopener">
+          <el-link :href="appUrl('/npm/')" target="_blank" rel="noopener">
             <el-icon><Link /></el-icon>
             <span class="btn-label">{{ t('npm.staticIndex') }}</span>
           </el-link>
@@ -69,7 +70,7 @@ onMounted(() => {
             <span class="btn-label">{{ t('common.refresh') }}</span>
           </el-button>
         </template>
-        <el-link v-else href="/node-builds/" target="_blank" rel="noopener">
+        <el-link v-else :href="appUrl('/node-builds/')" target="_blank" rel="noopener">
           <el-icon><Link /></el-icon>
           <span class="btn-label">{{ t('build.staticIndex') }}</span>
         </el-link>

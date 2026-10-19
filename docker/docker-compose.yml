@@ -351,6 +351,10 @@ services:
         NPM_REGISTRY: ${NPM_REGISTRY:-}
         # SPA 侧边栏显示的构建标识；留空 = 构建时刻（vite.config.ts 的默认）。
         BUILD_ID: ${BUILD_ID:-}
+        # 外部路径前缀（如 /pypi）：打进 SPA 的 vite base、router base 和
+        # /api/v1 baseURL，与边缘 nginx 的 ROUTE_PREFIX 是同一个值。
+        # 改了它必须重建 frontend 镜像，否则页面仍按旧前缀/根路径渲染。
+        VITE_BASE_PATH: ${ROUTE_PREFIX:-}
     image: openfish-frontend:latest
     container_name: openfish-frontend
     restart: unless-stopped

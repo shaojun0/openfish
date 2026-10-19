@@ -4,6 +4,8 @@ import axios, {
   type AxiosResponse,
 } from 'axios'
 
+import { API_BASE_URL, appUrl } from '@/base'
+
 /**
  * Whether the deployment has authentication switched on.  The session store
  * updates this once `/api/v1/session` has been fetched, so a 401 only triggers
@@ -37,8 +39,8 @@ export function setAuthEnabled(value: boolean): void {
  */
 export function redirectToLogin(): void {
   if (!flags.authEnabled) return
-  if (window.location.pathname.startsWith('/auth')) return
-  window.location.href = '/auth/login'
+  if (window.location.pathname.startsWith(appUrl('/auth'))) return
+  window.location.href = appUrl('/auth/login')
 }
 
 /**
@@ -52,7 +54,7 @@ export function redirectToLogin(): void {
  * re-introduces those false positives.
  */
 export const apiClient = axios.create({
-  baseURL: '/api/v1',
+  baseURL: API_BASE_URL,
   withCredentials: true,
   timeout: 30_000,
 })

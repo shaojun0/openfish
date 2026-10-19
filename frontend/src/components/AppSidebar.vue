@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
+import { appUrl } from '@/base'
 import { useAppStore } from '@/stores/app'
 import { useSessionStore } from '@/stores/session'
 
@@ -282,7 +283,7 @@ function onSelect(index: string): void {
           <a
             v-if="item.href"
             class="sidebar__external-link"
-            :href="item.href"
+            :href="item.href ? appUrl(item.href) : undefined"
             target="_blank"
             rel="noopener"
           >
@@ -293,7 +294,7 @@ function onSelect(index: string): void {
             <a
               v-if="item.href"
               class="sidebar__external-link"
-              :href="item.href"
+              :href="item.href ? appUrl(item.href) : undefined"
               target="_blank"
               rel="noopener"
             >

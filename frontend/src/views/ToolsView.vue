@@ -11,6 +11,7 @@ import {
   type ToolEntry,
 } from '@/api'
 import { apiError } from '@/api/client'
+import { appUrl } from '@/base'
 import ToolsCategoryTable from '@/components/ToolsCategoryTable.vue'
 import { useSessionStore } from '@/stores/session'
 
@@ -114,7 +115,7 @@ onMounted(load)
           <el-icon><Upload /></el-icon>
           <span class="btn-label">{{ t('tools.upload') }}</span>
         </el-button>
-        <el-link href="/tools/" target="_blank" rel="noopener">
+        <el-link :href="appUrl('/tools/')" target="_blank" rel="noopener">
           <el-icon><Link /></el-icon>
           <span class="btn-label">{{ t('tools.staticIndex') }}</span>
         </el-link>

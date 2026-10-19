@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 
 import { fetchAdminStats, refreshAdminStats, type AdminStats, type PackageSummary } from '@/api'
 import { apiError } from '@/api/client'
+import { appUrl } from '@/base'
 import StatCard from '@/components/StatCard.vue'
 import TablePager from '@/components/TablePager.vue'
 import { usePagination } from '@/composables/usePagination'
@@ -120,7 +121,7 @@ onMounted(load)
         <el-table-column type="index" :label="t('admin.rank')" width="70" />
         <el-table-column prop="name" :label="t('packages.name')" min-width="220" sortable="custom">
           <template #default="{ row }">
-            <a class="pkg-link mono" :href="`/simple/${encodeURIComponent(row.name)}/`" target="_blank" rel="noopener">
+            <a class="pkg-link mono" :href="appUrl(`/simple/${encodeURIComponent(row.name)}/`)" target="_blank" rel="noopener">
               {{ row.name }}
             </a>
           </template>

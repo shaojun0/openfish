@@ -9,7 +9,36 @@ import { defineConfig } from 'vite'
 const buildId =
   process.env.BUILD_ID || `${new Date().toISOString().replace('T', ' ').slice(0, 16)}Z`
 
-// The built bundle is served under the /static/dist/ URL prefix by whichever
+/**
+ * The client-visible path prefix this bundle is built for (e.g. `/pypi`),
+ * taken from `VITE_BASE_PATH` (docker-compose passes `ROUTE_PREFIX` to it).
+ * Normalised once here and injected as `__BASE_PATH__`, so `src/base.ts` is
+ * the only module that ever reads it.  Empty = served at the root.
+ */
+function normaliseBasePath(raw: string | undefined): string {
+  const trimmed = (raw ?? '').trim().replace(/^\/+|\/+$/g, '')
+  return trimmed ? `/${trimmed}` : ''
+}
+
+const basePath = normaliseBasePath(process.env.VITE_BASE_PATH)
+
+// `npm run dev` proxies the backend on one origin.  Under a prefix the browser
+// requests `${basePath}/api/...`, so the keys carry it and the rewrite strips it
+// back before Flask sees the path — the same contract the edge nginx has.
+const backend = 'http://127.0.0.1:9090'
+const backendRoutes = [
+  '/api', '/auth', '/health', '/simple', '/packages', '/python-builds',
+  '/node-builds', '/tools', '/npm', '/docker', '/debian', '/docs', '/certs',
+  '/device', '/openapi.json', '/llms.txt',
+]
+const proxy = Object.fromEntries(
+  backendRoutes.map((path) => [
+    `${basePath}${path}`,
+    { target: backend, rewrite: (url: string) => url.slice(basePath.length) },
+  ]),
+)
+
+// The built bundle is served under `${basePath}/static/dist/` by whichever
 // process owns it — the frontend nginx container in the split deployment, or
 // Flask (via FRONTEND_DIST_DIR) when developing without Docker.  `base` fixes
 // the asset URLs, so the output can be dropped behind any server that maps
@@ -19,6 +48,7 @@ export default defineConfig(({ isSsrBuild }) => ({
 
   define: {
     __BUILD_ID__: JSON.stringify(buildId),
+    __BASE_PATH__: JSON.stringify(basePath),
   },
 
   resolve: {
@@ -51,30 +81,14 @@ export default defineConfig(({ isSsrBuild }) => ({
       : {}),
   },
 
-  base: '/static/dist/',
+  base: `${basePath}/static/dist/`,
 
   server: {
     port: 5173,
     // `npm run dev` proxies API and machine-facing endpoints to Flask so the
     // whole app can be developed with HMR on a single origin.  Start the
-    // backend with `cd backend && python app.py` (port 9090).
-    proxy: {
-      '/api': 'http://127.0.0.1:9090',
-      '/auth': 'http://127.0.0.1:9090',
-      '/health': 'http://127.0.0.1:9090',
-      '/simple': 'http://127.0.0.1:9090',
-      '/packages': 'http://127.0.0.1:9090',
-      '/python-builds': 'http://127.0.0.1:9090',
-      '/node-builds': 'http://127.0.0.1:9090',
-      '/tools': 'http://127.0.0.1:9090',
-      '/npm': 'http://127.0.0.1:9090',
-      '/docker': 'http://127.0.0.1:9090',
-      '/debian': 'http://127.0.0.1:9090',
-      '/docs': 'http://127.0.0.1:9090',
-      '/certs': 'http://127.0.0.1:9090',
-      '/device': 'http://127.0.0.1:9090',
-      '/openapi.json': 'http://127.0.0.1:9090',
-      '/llms.txt': 'http://127.0.0.1:9090',
-    },
+    // backend with `cd backend && python app.py` (port 9090).  `proxy` above
+    // already carries the prefix and strips it before forwarding.
+    proxy,
   },
 }))
