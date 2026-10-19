@@ -10,7 +10,7 @@
 
 ```bash
 cd docker
-mkdir -p /data/share/packages              # packages 的宿主目录（compose 里的绝对挂载源）
+mkdir -p /data/share/packages /data/share/python-build-standalone   # compose 里的两个绝对挂载源
 ./bootstrap-env.sh                         # 生成 .env + forgejo.env 的全部密钥（幂等，可重跑）
 docker compose up -d --build               # docker/ 下缺失的 bind 源由 Docker 自动创建
 docker compose --profile db up -d          # + PostgreSQL（见 §6）
@@ -52,9 +52,10 @@ docker exec -it openfish-backend-debug bash
 
 ### 「不在 .env 里的旋钮」
 
-- **`PACKAGES_DIR` 的宿主路径** —— 固定为 compose 里的 `/data/share/packages`（挂到容器
-  `PACKAGES_DIR`，默认 `/app/share/python`）。packages 不走 `docker/share` 符号链接，
-  换盘请改 `docker-compose.yml` 的 `x-backend-volumes`，见 §4。
+- **`PACKAGES_DIR` / `PYTHON_BUILDS_DIR` 的宿主路径** —— 固定为 compose 里的
+  `/data/share/packages` 与 `/data/share/python-build-standalone`（分别挂到容器
+  `/app/share/python`、`/app/share/python-build-standalone`）。这两个目录不走
+  `docker/share` 符号链接，换盘请改 `docker-compose.yml` 的 `x-backend-volumes`，见 §4。
 - **`AUTH_ENABLED`** —— 本拓扑永远开着认证（框架默认 `true`）。关闭它意味着边缘 nginx
   后面的整个管理面匿名可写；要关请改 `docker-compose.yml`，并清楚这是安全边界的改动。
 - **`ROUTE_PREFIX`** —— 不是隐藏旋钮，写在 `.env` 里即可：它只被 **nginx 边缘容器**
@@ -144,16 +145,19 @@ docker compose build frontend
 
 ## 4. 存储布局
 
-**`packages` 是唯一例外**：它的宿主机来源直接写在 compose 里，不经过符号链接：
+**`packages` 与 `python-build-standalone` 是两个例外**：它们的宿主机来源直接写在
+compose 里，不经过符号链接：
 
 ```yaml
 # docker/docker-compose.yml 的 x-backend-volumes
-- /data/share/packages:/app/share/python   # 宿主目录 → 容器 PACKAGES_DIR
+- /data/share/packages:/app/share/python                                 # → PACKAGES_DIR
+- /data/share/python-build-standalone:/app/share/python-build-standalone # → PYTHON_BUILDS_DIR
 ```
 
-换盘 = 改这一行（启动前先 `mkdir -p` 新目录），再 `docker compose up -d`。容器内
-`PACKAGES_DIR` 默认 `/app/share/python`，与 `docker/.env.example` 一致；要改容器内
-路径，同时改 `.env` 的 `PACKAGES_DIR` 和这条挂载的目标侧。
+换盘 = 改对应那一行（启动前先 `mkdir -p` 新目录），再 `docker compose up -d`。容器内
+`PACKAGES_DIR` / `PYTHON_BUILDS_DIR` 默认 `/app/share/python` 与
+`/app/share/python-build-standalone`，与 `docker/.env.example` 一致；要改容器内路径，
+同时改 `.env` 的同名变量和对应挂载的目标侧。
 
 **其余** bind 源都是 `docker/` 下的相对路径，换盘 = 重指同名符号链接，compose 一个字不改：
 
@@ -166,8 +170,8 @@ ln -sfn /srv/openfish-mirror/npm docker/npm
 于是它就是一个断链：
 
 ```bash
-docker/share/python-build-standalone/cpython -> /mnt/big-disk/cpython   # ✗ 容器里没有 /mnt/big-disk
-docker/share/python-build-standalone/cpython -> ../cpython              # ✓ 相对链接，挂载后仍然成立
+docker/share/legacy-releases/20241016 -> /mnt/big-disk/releases   # ✗ 容器里没有 /mnt/big-disk
+docker/share/legacy-releases/20241016 -> ../releases              # ✓ 相对链接，挂载后仍然成立
 ```
 
 相对链接的目标**只是还没建出来**时，后端启动会自己补上（目标必须和链接在同一文件系统上，
@@ -177,6 +181,7 @@ docker/share/python-build-standalone/cpython -> ../cpython              # ✓ �
 | 目录 | 内容 | 进数据库吗 |
 | --- | --- | --- |
 | `/data/share/packages`（compose 挂载，容器内是 `PACKAGES_DIR`） | Python 包字节 | 否——文件名即身份，索引由 `PACKAGES_DIR` 扫描得到 |
+| `/data/share/python-build-standalone`（compose 挂载，容器内是 `PYTHON_BUILDS_DIR`） | CPython 构建字节 | 否——目录名是 release tag，索引扫描得到 |
 | `share/` `npm/` `node-builds/` `docker-images/` `debian/` | 制品字节 | npm / docker / debian 的 overlay 行在 `catalog_entries` 表里 |
 | `tools/` `docs/` | 对象字节（`objects/<uuid4>`） | **条目在数据库里**，目录只是存放处与 import/export 的桥 |
 | `data/` | SQLite 库、回源缓存、模型路由表所在库——本部署**自己的一份** | 是 |
@@ -238,9 +243,10 @@ docker compose logs --tail=100 backend forgejo
 
 常见症状：
 - `error while interpolating services.backend.environment.SECRET_KEY` → 忘了 `cp .env.example .env` 或没填。
-- `docker compose up` 失败并报 `error while creating mount source path '/data/share/packages'` →
-  宿主 packages 目录不存在，或它是个断链。compose 的挂载源由 Docker 在**宿主机**解析，
-  先 `sudo mkdir -p /data/share/packages`（或改 compose 里的那一行）。注意
+- `docker compose up` 失败并报 `error while creating mount source path '/data/share/...'` →
+  宿主 packages / python-build-standalone 目录不存在，或它是断链。compose 的挂载源由
+  Docker 在**宿主机**解析，先 `sudo mkdir -p /data/share/packages
+  /data/share/python-build-standalone`（或改 compose 里对应那一行）。注意
   `docker compose config --quiet` 只校验语法与插值，不校验 mount 源，这类错误只有 `up` 才暴露。
 - 后端反复重启，日志里 `RuntimeError: cannot use PACKAGES_DIR=...`（或 `PYTHON_BUILDS_DIR=...`）
   → 容器内那个路径不是目录。先确认 compose 的挂载目标与 `.env` 的容器内路径一致：
