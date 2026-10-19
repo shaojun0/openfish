@@ -77,6 +77,40 @@ python -c "import secrets; print(secrets.token_hex(32))"       # FORGEJO_WEBHOOK
 `ROOT_URL` 必须以 `/git/` 结尾，Forgejo 用它生成 clone URL 与 webhook 回调地址；
 写成 `https://<host>:20416/git` 会导致 `/git//…` 与错误的 webhook 地址。
 
+### 数据目录权限（root 部署最容易踩）
+
+Forgejo 镜像以非 root 的 `git` 用户运行（**uid/gid 1000**），而 `docker/forgejo/`
+是被挂成它 `/data` 的宿主机目录。如果仓库是以 root 克隆/解压的，这个目录就是
+`root:root 0755`，容器会反复重启并报：
+
+```
+ORM engine initialization attempt #N/10 failed. Error: failed to connect to
+database: ... failed to create directories: mkdir /data/forgejo: permission denied
+```
+
+修复（在 `docker/` 目录下）：
+
+```bash
+docker compose stop forgejo
+chown -R 1000:1000 forgejo          # 非 root 用户加 sudo
+chmod -R u+rwX forgejo
+docker compose up -d forgejo
+```
+
+`bootstrap-env.sh` 以 root 运行时会自动做这一步；以普通用户运行时会打印要执行的
+命令。`docker/forgejo/forgejo.env` 的 600 权限不受影响，compose 由 root 读取它。
+
+CentOS / RHEL 等 **SELinux Enforcing** 主机上，`chown` 之后如果仍然报 permission
+denied，是标签问题，任选其一：
+
+```bash
+chcon -Rt container_file_t docker/forgejo
+# 或者把 compose 里的 `- ./forgejo:/data` 改成 `- ./forgejo:/data:Z`（会递归重打标签）
+```
+
+同样的报错也可能出现在 `docker/forgejo/forgejo.db` / `log` 已存在但属于 root 的
+升级场景，`chown -R` 一并解决。
+
 ---
 
 ## 4. 生成 admin token（migration 与 API 都要它）

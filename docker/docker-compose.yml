@@ -407,6 +407,11 @@ services:
     expose:
       - "3000"
     volumes:
+      # 镜像以非 root 的 git(uid/gid 1000) 运行，这个目录必须对它可写；root 克隆/
+      # 复制出来的 root:root 0755 会在启动时报 `mkdir /data/forgejo: permission
+      # denied` 并反复重启。`bootstrap-env.sh` 在 root 下会自动 chown，手工部署见
+      # docker/forgejo/README.md 的「数据目录权限」。SELinux Enforcing 的主机还要
+      # 加 :Z（或 chcon -Rt container_file_t docker/forgejo）。
       - ./forgejo:/data
     networks:
       - openfish
