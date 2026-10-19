@@ -46,7 +46,9 @@ x-backend-env: &backend-env
   # 这个选择（见 backend/docker-entrypoint.sh）。
   OPENFISH_ROLE: backend
   # ── 服务器 ──────────────────────────────────────────────
-  SERVER_NAME: cpypiserver
+  # 品牌名：SPA 的侧边栏/标签页、/health 的 server 字段都显示它。
+  # 用 .env 覆盖（docker/.env 的 SERVER_NAME），留空 = cpypiserver。
+  SERVER_NAME: ${SERVER_NAME:-cpypiserver}
   HOST: 0.0.0.0
   PORT: "8080"
   # 日志级别（DEBUG / INFO / WARNING / ERROR）；留空 = INFO。
@@ -370,6 +372,12 @@ services:
     restart: unless-stopped
     expose:
       - "80"
+    volumes:
+      # 自定义品牌 logo（可选）：把 logo-light/dark.svg|png 放进 docker/branding/，
+      # frontend 的 nginx 直接按文件提供（见 frontend/nginx.conf），SPA 探测不到
+      # 就回退到内置图标 + SERVER_NAME。替换文件不需要重建镜像；目录不存在时
+      # Docker 会在宿主机建一个空目录（属主 root），只跟踪 docker/branding/README.md。
+      - ./branding:/usr/share/nginx/html/branding:ro
     networks:
       - openfish
     healthcheck:
