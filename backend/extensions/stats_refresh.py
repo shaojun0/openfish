@@ -30,14 +30,24 @@ class StatsRefreshExtension(Extension):
             except Exception:
                 pass
 
-        def _schedule():
-            t = threading.Timer(interval, _tick)
+        def _schedule(delay: float) -> None:
+            t = threading.Timer(delay, _tick)
             t.daemon = True
+            t.name = "openfish-stats-refresh"
             t.start()
 
         def _tick():
             _refresh()
-            _schedule()
+            _schedule(interval)
 
-        _refresh()
-        _schedule()
+        # The first computation is deliberately scheduled, not run inline: it
+        # ``stat``s every package file (the index scan stores ``size=0``), and
+        # this extension is initialised while ``app.py`` is still importing —
+        # i.e. before gunicorn binds the port.  On a cold start over a large or
+        # network-mounted ``PACKAGES_DIR`` that walk outlived the healthcheck
+        # grace, so compose marked the backend unhealthy and the edge nginx
+        # (``depends_on: backend: condition: service_healthy``) was never
+        # started.  The admin page computes on demand while the cache is still
+        # empty (``routes/admin.py``), so moving the first tick off the import
+        # path costs nothing.
+        _schedule(0)
