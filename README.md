@@ -162,7 +162,7 @@ run cannot read as green; `make … ALLOW_SKIP=1` is how you accept one on purpo
 
 ```bash
 cd docker
-mkdir -p /data/share/packages   # host directory for Python packages (absolute mount in compose)
+mkdir -p /data/share/packages /data/share/python-build-standalone   # host dirs for the two absolute mounts in compose
 ./bootstrap-env.sh        # writes .env + forgejo.env with every secret generated
 docker compose up -d --build   # docker/ sources are created by Docker; DB uses docker/data
 ```
@@ -1427,7 +1427,7 @@ docker/                         orchestration — no application code
 ├── certs/                      optional TLS material, git-ignored
 ├── tools/, docs/               small versioned catalogs (real directories)
 └── pluggable mount sources      operator data — real dir or symlink, never committed
-    ├── share                   python + python-build-standalone
+    ├── share                   remaining artifact bytes (packages/builds are absolute mounts)
     ├── npm/                    local npm tarballs
     ├── node-builds/            nodejs.org/dist-shaped Node.js mirror
     ├── docker-images/          image tarballs + compose/Dockerfile
@@ -1460,9 +1460,10 @@ so dropping a file in one takes effect without rebuilding anything.
 `data/` included — so the stack owns `docker/data/` while
 `cd backend && python app.py` owns `backend/data/`: neither start path depends on
 the other, and `docker/` stays the place a deployment's operator data is
-re-pointed with `ln -sfn`. Python packages are the one exception: their host
-directory is an absolute path in the Compose file (`/data/share/packages`), so
-that one is changed in `docker-compose.yml` rather than by a symlink.
+re-pointed with `ln -sfn`. Python packages and the CPython build mirror are the
+two exceptions: their host directories are absolute paths in the Compose file
+(`/data/share/packages`, `/data/share/python-build-standalone`), so those are
+changed in `docker-compose.yml` rather than by a symlink.
 
 ## Security notes
 
