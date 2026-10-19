@@ -12,13 +12,18 @@ deployment that has no login flow at all.
 
 from __future__ import annotations
 
-from flask import Blueprint, current_app, g, jsonify
+import logging
+import time
+
+from flask import Blueprint, current_app, g, jsonify, request
 
 from auth.decorators import require_permission
 from auth.guards import AUTH_METHODS
 from auth.permissions import ADMIN_VIEW, PACKAGE_READ
 from config import settings
 from openapi import api_operation, array_of, errors, ok
+
+logger = logging.getLogger("cpypiserver.auth")
 
 session_bp = Blueprint("session", __name__)
 
@@ -31,15 +36,30 @@ def identify() -> tuple[dict | None, str | None]:
     """Try every credential in turn; return the identity or ``(None, None)``.
 
     Unlike :func:`auth.decorators.require_auth` this never raises.
+
+    The duration is recorded for ``Server-Timing: auth;dur=…`` (see ``app.py``):
+    this is the unguarded entry point the SPA calls first, so it is where an
+    identity-provider round trip shows up as a slow page load.
     """
-    for method in _IDENTITY_ORDER:
-        fn = AUTH_METHODS.get(method)
-        if fn is None or not fn():
-            continue
-        user = getattr(g, "auth_user", None)
-        if isinstance(user, dict):
-            return user, method
-    return None, None
+    started = time.perf_counter()
+    try:
+        for method in _IDENTITY_ORDER:
+            fn = AUTH_METHODS.get(method)
+            if fn is None or not fn():
+                continue
+            user = getattr(g, "auth_user", None)
+            if isinstance(user, dict):
+                return user, method
+        return None, None
+    finally:
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        g.openfish_auth_ms = elapsed_ms
+        if elapsed_ms >= 1000.0:
+            logger.warning(
+                "slow authentication in %.0f ms (method=%s, path=%s)",
+                elapsed_ms, getattr(g, "auth_method", None) or "none",
+                request.path,
+            )
 
 
 @session_bp.route("/session")

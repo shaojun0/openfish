@@ -166,7 +166,19 @@ def try_session() -> bool:
     token = (session.get("auth_token") or "").strip()
     if not token:
         return False
-    return _identify_oauth_token(token, method="introspect")
+    if not _identify_oauth_token(token, method="introspect"):
+        return False
+    # Remember *who* the token resolved to, so the next request authenticates
+    # from the database instead of introspecting the access token again.  The
+    # intranet 4A introspection endpoint takes ~16 s per call here, and this
+    # path used to run on *every* request of a logged-in browser: the whole SPA
+    # was usable but each page load paid it once (sometimes twice).  The signed
+    # session cookie is the login state — exactly as it already is for the
+    # Basic-auth and legacy admin sessions above.
+    principal = getattr(g, "auth_user", None)
+    if isinstance(principal, dict) and principal.get("user_id"):
+        session["uid"] = principal["user_id"]
+    return True
 
 
 # ── Internals ────────────────────────────────────────────────────────

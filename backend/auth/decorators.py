@@ -32,13 +32,17 @@ Both work in two positions:
 
 from __future__ import annotations
 
+import logging
+import time
 from functools import wraps
-from flask import current_app, g
+from flask import current_app, g, request
 
 from auth.permissions import ADMIN_VIEW, PACKAGE_READ, PACKAGE_WRITE, declare
 from auth.guards import AUTH_METHODS
 from config import settings
 from errors import ForbiddenError, UnauthorizedError
+
+logger = logging.getLogger("cpypiserver.auth")
 
 
 # ── Principal accessors ──────────────────────────────────────────────
@@ -93,13 +97,27 @@ def _authenticate(allowed: list[str]) -> bool:
     """
     if getattr(g, "auth_user", None) is not None:
         return True
+    started = time.perf_counter()
+    authenticated = False
     for method in allowed:
         fn = AUTH_METHODS.get(method)
         if fn and fn():
-            return True
+            authenticated = True
+            break
     # No credential worked.  With the master switch off that is not an error:
     # the request stays anonymous and the guard decides from anonymous grants.
-    return not settings.auth.auth_enabled
+    ok = authenticated or not settings.auth.auth_enabled
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    # ``Server-Timing: auth;dur=…`` (see app.py) shows this in the browser, which
+    # is how a per-request OAuth2 introspection round trip (seconds per call on a
+    # slow 4A endpoint) is told apart from a slow handler.
+    g.openfish_auth_ms = elapsed_ms
+    if elapsed_ms >= 1000.0:
+        logger.warning(
+            "slow authentication in %.0f ms (method=%s, path=%s)",
+            elapsed_ms, getattr(g, "auth_method", None) or "none", request.path,
+        )
+    return ok
 
 
 def _unauthorized(allowed: list[str]) -> UnauthorizedError:
