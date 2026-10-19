@@ -251,6 +251,37 @@ if [ -f "$FE" ]; then
   fi
 fi
 
+# ── 3b. docker/forgejo/ ownership ───────────────────────────────────────────
+# The Forgejo image runs as the non-root `git` user (uid/gid 1000), and
+# docker/forgejo is bind-mounted as its /data.  A checkout or copy made by root
+# is root:root 0755, so Forgejo cannot create /data/forgejo (SQLite + logs) and
+# restart-loops with:
+#   ORM engine initialization ... failed. Error: ... mkdir /data/forgejo:
+#   permission denied
+# Every other bind mount is served by a root process, so this is the only one
+# that needs the ownership step.  Fix it when this script runs as root;
+# otherwise print the exact command instead of failing silently.
+FORGEJO_UID=1000
+if [ -d forgejo ]; then
+  current_owner="$(stat -c '%u:%g' forgejo 2>/dev/null || true)"
+  if [ "$current_owner" != "${FORGEJO_UID}:${FORGEJO_UID}" ]; then
+    if [ "$DRY" -eq 1 ]; then
+      say "would chown -R ${FORGEJO_UID}:${FORGEJO_UID} forgejo"
+    elif [ "$(id -u)" -eq 0 ]; then
+      chown -R "${FORGEJO_UID}:${FORGEJO_UID}" forgejo
+      say "chown -R ${FORGEJO_UID}:${FORGEJO_UID} forgejo (Forgejo runs as the non-root git user)"
+    else
+      warn "forgejo/ is owned by ${current_owner}; Forgejo runs as ${FORGEJO_UID} and cannot write there."
+      warn "  fix with: sudo chown -R ${FORGEJO_UID}:${FORGEJO_UID} docker/forgejo"
+    fi
+  fi
+  if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null || true)" = "Enforcing" ]; then
+    warn "SELinux is Enforcing: if Forgejo still reports permission denied after the chown,"
+    warn "  relabel the data dir: sudo chcon -Rt container_file_t docker/forgejo"
+    warn "  (or append :Z to the forgejo volume in docker-compose.yml)"
+  fi
+fi
+
 # ── 4. mount links ──────────────────────────────────────────────────────────
 # A bind mount carries the directory, never the host's path space: a link
 # *inside* one of these trees is resolved by the container, where a host

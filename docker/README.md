@@ -280,6 +280,20 @@ docker compose logs --tail=100 backend forgejo
   `docker/share` 内部的链接是**容器里**解析的，宿主绝对目标会断链，要改成相对路径；
   相对链接的目标只是缺失时后端会自己建出来。绝对链接、跨文件系统、路径被普通文件占住
   这三种都会报错拒绝启动。`./bootstrap-env.sh` 在 `up` 之前也会把这类链接列出来。
+- `openfish-forgejo` 反复重启，日志里 `failed to create directories: mkdir
+  /data/forgejo: permission denied` → Forgejo 镜像以非 root 的 `git`（uid/gid 1000）
+  运行，而 `docker/forgejo/` 是 root 克隆/解压出来的 root:root 目录，写不进去。在
+  `docker/` 下执行：
+
+  ```bash
+  docker compose stop forgejo
+  sudo chown -R 1000:1000 forgejo && sudo chmod -R u+rwX forgejo
+  docker compose up -d forgejo
+  ```
+
+  SELinux Enforcing 的主机还要 `sudo chcon -Rt container_file_t docker/forgejo`
+  （或给 compose 的 `./forgejo:/data` 加 `:Z`）。`./bootstrap-env.sh` 在 root 下会
+  自动 chown，详见 `docker/forgejo/README.md` 的「数据目录权限」。
 - webhook 401 → `FORGEJO_WEBHOOK_SECRET` 与 forgejo 容器里的值不一致。
 - `/api/v1/repos/<slug>/git-credential` 503 → `GIT_IDENTITY_KEY` 为空。
 - 上传 `413` → 请求体超过边缘 nginx 的 `client_max_body_size`（100m，与
