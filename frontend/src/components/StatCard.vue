@@ -4,6 +4,12 @@ defineProps<{
   value: string | number
   icon: string
   tone?: 'primary' | 'success' | 'warning' | 'info' | 'danger'
+  /**
+   * Render a skeleton instead of the value.  The overview page paints before
+   * the numbers it reads are available, so the card must not blank the page
+   * while a slow package list / stats aggregation is in flight.
+   */
+  loading?: boolean
 }>()
 </script>
 
@@ -12,7 +18,14 @@ defineProps<{
     <div class="stat__row">
       <div class="stat__text">
         <div class="stat__label">{{ label }}</div>
-        <div class="stat__value">{{ value }}</div>
+        <div class="stat__value">
+          <el-skeleton v-if="loading" animated>
+            <template #template>
+              <el-skeleton-item variant="text" style="width: 72px; height: 29px" />
+            </template>
+          </el-skeleton>
+          <template v-else>{{ value }}</template>
+        </div>
       </div>
       <el-icon class="stat__icon" :class="`stat__icon--${tone ?? 'primary'}`" :size="26">
         <component :is="icon" />
