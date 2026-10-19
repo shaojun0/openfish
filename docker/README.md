@@ -359,6 +359,22 @@ docker compose logs --tail=100 backend forgejo
   最后一段（请求耗时）也很小 → 时间花在**后端 import**（worker 还没 bind 端口），
   不是接口本身。看 `openfish backend ready in … ms` 和上面那条冷启动症状，别去查
   `/session` 的代码。
+- 页面能用但**每个 API 都要 ~16s**（`/api/v1/session` 慢，紧接着的每个请求也慢），
+  静态资源、`/health` 却很快 → 先别怀疑 SQLite：这通常是 **每次请求都在回源 4A 做
+  OAuth2 token introspection**。登录回调只把 access token 写进 session，如果身份解析
+  留在每个请求里做，内网 4A 一次 introspection 十几秒，就会变成“每次点击都等 16s”。
+  本版本在第一次解析成功后把账号 id 写进 session cookie（`session["uid"]`），之后请求
+  只查数据库；升级前登录的旧 cookie 会在下一次请求时自动升级，重新登录一次也可以。
+
+  怎么确认是它而不是数据库：浏览器 DevTools 看响应头
+  `Server-Timing: app;dur=…, auth;dur=…`——`auth;dur` 接近总时长就是认证段在等 4A；
+  后端日志会打 `slow authentication in … ms (method=introspect, path=…)`。而
+  `/api/v1/session` 的 access log 末尾耗时（`%(L)s`）也大时，基本可以排除“请求在
+  排队”，就是这段网络调用。
+
+  如果**登录本身**（`/auth?code=…`）也要 16s，那是 `OAUTH2_TOKEN_URL` 到 4A 的
+  兑换请求慢，属于网络/4A 侧，不是本服务或数据库；本版本给这个请求加了
+  `timeout=(5, 60)`，避免 4A 挂死时无限占住 worker 线程。
 
 ## 6. PostgreSQL：切换与数据迁移
 

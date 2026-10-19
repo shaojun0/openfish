@@ -104,12 +104,15 @@ def exchange_code(code: str) -> dict | None:
             {"Content-Type": "application/x-www-form-urlencoded"},
             context="oauth2 code exchange",
         )
+        # A generous read timeout, not the default (none): the intranet 4A
+        # token endpoint can take ~17 s to answer here.  Without *some* timeout a
+        # hung identity provider would pin a gunicorn worker thread forever.
         resp = requests.post(
             token_url, data=payload, headers=headers,
             auth=HTTPBasicAuth(
                 settings.auth.oauth2_client_id, settings.auth.oauth2_client_secret
             ),
-            verify=_verify(),
+            verify=_verify(), timeout=(5, 60),
         )
         if resp.status_code == 200:
             return resp.json()

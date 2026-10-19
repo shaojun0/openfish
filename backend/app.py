@@ -267,7 +267,15 @@ def _request_timing_finish(response: Response) -> Response:
     if started is None:
         return response
     elapsed_ms = (time.perf_counter() - started) * 1000.0
-    response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.1f}"
+    # `auth` is the time spent resolving the caller (OAuth2 introspection, API
+    # key lookup, session cookie); it is the part that can dominate a request on
+    # an intranet with a slow identity provider.  Reported separately so the
+    # browser's Network panel answers "16 s — but which 16 s?".
+    auth_ms = getattr(g, "openfish_auth_ms", None)
+    timing = f"app;dur={elapsed_ms:.1f}"
+    if auth_ms is not None:
+        timing += f", auth;dur={auth_ms:.1f}"
+    response.headers["Server-Timing"] = timing
     if elapsed_ms >= SLOW_REQUEST_MS:
         logger.warning(
             "slow request %s %s -> %s in %.0f ms",

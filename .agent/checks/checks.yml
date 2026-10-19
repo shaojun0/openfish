@@ -114,3 +114,16 @@ checks:
     command: python .agent/checks/check_stats_request_path.py
     timeout: 120
     validated: false
+  - id: session-identity-cache
+    # A logged-in browser must not introspect its OAuth2 access token on every
+    # request.  The login callback stores only the token, so `try_session` used
+    # to resolve identity against the identity provider per request; on the
+    # intranet that is ~16 s each, which presented as "every API is slow"
+    # (suspected SQLite) while the handlers were fast.  The check runs a
+    # counting fake introspection server: the first request may call it, the
+    # second request and a permission-guarded API call must not, and the
+    # session cookie must carry `uid`.  Temp dirs only; same interpreter rule
+    # as above.
+    command: python .agent/checks/check_session_identity_cache.py
+    timeout: 120
+    validated: false
