@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -12,6 +12,54 @@ const route = useRoute()
 const router = useRouter()
 const appStore = useAppStore()
 const session = useSessionStore()
+
+/**
+ * Optional custom brand logo.
+ *
+ * `docker/branding/` is bind-mounted into the frontend container at
+ * `/usr/share/nginx/html/branding/` (see docker-compose.yml), so a deployment
+ * can drop `logo-dark.svg` / `logo-light.svg` (or their `.png` twins, or a
+ * single theme-neutral `logo.svg` / `logo.png`) there — no image rebuild.
+ * There is no manifest endpoint to ask, so the candidates are probed in order
+ * and the first 404 falls through to the next one; once the list is exhausted
+ * the built-in icon + `SERVER_NAME` render again.  Theme-specific names come
+ * first so a light-background logo is never shown on the dark sidebar.
+ */
+function logoCandidates(isDark: boolean): string[] {
+  const theme = isDark ? 'dark' : 'light'
+  return [
+    appUrl(`/branding/logo-${theme}.svg`),
+    appUrl(`/branding/logo-${theme}.png`),
+    appUrl('/branding/logo.svg'),
+    appUrl('/branding/logo.png'),
+  ]
+}
+
+const logoSources = computed(() => logoCandidates(appStore.isDark))
+const logoIndex = ref(0)
+const logoLoaded = ref(false)
+const logoSrc = computed(() => logoSources.value[logoIndex.value])
+
+watch(
+  () => appStore.isDark,
+  () => {
+    // A different file per theme: restart the probe instead of reusing the
+    // previous theme's result.
+    logoIndex.value = 0
+    logoLoaded.value = false
+  },
+)
+
+function onLogoLoad(): void {
+  logoLoaded.value = true
+}
+
+function onLogoError(): void {
+  // 404 / decode failure: try the next candidate; past the list `logoSrc`
+  // becomes undefined and the built-in brand renders again.
+  logoLoaded.value = false
+  logoIndex.value += 1
+}
 
 interface NavItem {
   /** Unique menu index: an SPA path, or the href for an external link. */
@@ -250,12 +298,26 @@ function onSelect(index: string): void {
 <template>
   <div class="sidebar">
     <div class="sidebar__brand">
-      <el-icon class="sidebar__logo" :size="22"><FolderOpened /></el-icon>
-      <transition name="fade">
-        <span v-if="!appStore.sidebarCollapsed" class="sidebar__name">
-          {{ session.serverName }}
-        </span>
-      </transition>
+      <img
+        v-if="logoSrc"
+        v-show="logoLoaded && !appStore.sidebarCollapsed"
+        class="sidebar__brand-logo"
+        :src="logoSrc"
+        :alt="session.serverName"
+        @load="onLogoLoad"
+        @error="onLogoError"
+      />
+      <!-- Until a custom logo proves it loads (and whenever the sidebar is
+           collapsed, where a wide lockup would be unreadable), keep the
+           built-in mark + brand name. -->
+      <template v-if="!logoLoaded || appStore.sidebarCollapsed">
+        <el-icon class="sidebar__logo" :size="22"><FolderOpened /></el-icon>
+        <transition name="fade">
+          <span v-if="!appStore.sidebarCollapsed" class="sidebar__name">
+            {{ session.serverName }}
+          </span>
+        </transition>
+      </template>
     </div>
 
     <el-menu
@@ -336,6 +398,17 @@ function onSelect(index: string): void {
 .sidebar__logo {
   color: var(--el-color-primary);
   flex-shrink: 0;
+}
+
+/* The custom lockup replaces the icon + name, so it may use the full content
+   width (220px sidebar - 2×20px padding); `object-fit` keeps a wide image from
+   distorting. 30px tall keeps it inside the 56px brand row. */
+.sidebar__brand-logo {
+  display: block;
+  height: 30px;
+  max-width: 100%;
+  object-fit: contain;
+  object-position: left center;
 }
 
 .sidebar__name {

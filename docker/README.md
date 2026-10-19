@@ -105,6 +105,28 @@ ROUTE_PREFIX=/pypi
 `OPENFISH_ROLE`（compose 设）、`OPENFISH_GIT_TOKEN` / `OPENFISH_GIT_HOST`、
 `OPENFISH_MODEL_*`、`OPENFISH_TASK_KIND`、`GUARDDOG_TOP_PACKAGES_CACHE_LOCATION`。
 
+### 自定义 logo 与品牌名
+
+**logo：改文件即生效，不重建镜像。** compose 把 `docker/branding/` 只读挂到 frontend
+容器的 `/usr/share/nginx/html/branding/`，该容器的 nginx 直接按文件提供（见
+`frontend/nginx.conf` 的 `location /branding/`），SPA 按主题探测
+`logo-dark.svg` → `logo-dark.png` → `logo.svg` → `logo.png`（浅色主题同理用
+`logo-light.*`），都没有就回退到内置图标 + 品牌名。
+
+```bash
+cp ~/agent-ecosystem-logo-dark.png  docker/branding/logo-dark.png
+cp ~/agent-ecosystem-logo-light.png docker/branding/logo-light.png
+docker compose up -d frontend     # 第一次把目录挂进容器；之后替换文件只需刷新页面
+```
+
+尺寸建议：侧边栏展示区约 180×30，PNG 用 2×（如 800×130），透明背景；深色版用浅色
+文字。`/branding/` 带 `Cache-Control: no-cache`，替换后普通刷新即可看到。侧边栏折叠
+（64px）时会回退到内置图标。完整说明见 `docker/branding/README.md`。
+
+**品牌名：`docker/.env` 的 `SERVER_NAME`**，留空 = `cpypiserver`。它出现在浏览器标签页、
+`/health` 的 `server` 字段和回退品牌文字里；只给 backend，不参与前端构建，改完
+`docker compose up -d backend` 即可。
+
 ### 前端构建参数
 
 SPA 是构建期固化的，没有运行时环境变量；只有三个 build args（compose `frontend.build.args`）：

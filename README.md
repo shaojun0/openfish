@@ -272,7 +272,7 @@ Templates are provided at `backend/.env.example` (local development) and
 | `HOST` / `PORT`         | `0.0.0.0` / `9090`     | Bind address and port                              |
 | `DEBUG`                 | `false`                | Flask debug mode                                   |
 | `SECRET_KEY`            | *(empty)*              | Session signing key — **set this**                 |
-| `SERVER_NAME`           | `cpypiserver`          | Branding name                                      |
+| `SERVER_NAME`           | `cpypiserver`          | Branding name: browser tab title, `/health`'s `server` field and the sidebar fallback. Compose forwards it from `docker/.env`, so a Docker deployment can rename the UI without a rebuild. A custom logo is a file drop — see `docker/branding/README.md`. |
 | `ROUTE_PREFIX`          | *(empty)*              | Client-visible path prefix (e.g. `/pypi`). Rendered into the edge nginx (it strips the prefix and passes `X-Forwarded-Prefix`) **and** baked into the SPA build as `VITE_BASE_PATH` (asset base, router base, API baseURL). Changing it needs a frontend image rebuild. Not a backend variable. |
 | `PACKAGES_DIR`          | `<backend>/packages`   | Where uploaded packages live                       |
 | `PYTHON_BUILDS_DIR`     | `<project>/docker/python-build-standalone` | Prebuilt CPython releases    |
