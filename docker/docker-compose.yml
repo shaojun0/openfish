@@ -57,8 +57,11 @@ x-backend-env: &backend-env
   TLS_CA_FILE: ${TLS_CA_FILE:-}
   # 管理端统计的后台刷新间隔（秒），留空 = 7200。
   STATS_CACHE_SECONDS: ${STATS_CACHE_SECONDS:-}
-  PACKAGES_DIR: ${PACKAGES_DIR:-/app/share/cpypiserver_public/packages}
-  PYTHON_BUILDS_DIR: ${PYTHON_BUILDS_DIR:-/app/share/cpypiserver_public/cpython}
+  # 两个都是**容器内**路径。PACKAGES_DIR 的宿主机来源是下面 x-backend-volumes
+  # 里的 /data/share/packages 挂载（不经过 docker/share）；PYTHON_BUILDS_DIR
+  # 仍在 docker/share 下。默认值与 docker/.env.example 保持一致。
+  PACKAGES_DIR: ${PACKAGES_DIR:-/app/share/python}
+  PYTHON_BUILDS_DIR: ${PYTHON_BUILDS_DIR:-/app/share/python-build-standalone}
   # ROUTE_PREFIX 与 FRONTEND_DIST_DIR 刻意不转发：
   #   * ROUTE_PREFIX 一改，本拓扑的 nginx.conf（/api、/simple、/npm… 全是写死的
   #     location）就不再匹配，服务等于不可达；
@@ -264,8 +267,9 @@ x-runner-env: &runner-env
   GIT_TERMINAL_PROMPT: "0"
   PYTHONDONTWRITEBYTECODE: "1"
 
-# 制品库与运行态：**所有** bind-mount 源都在本文件所在的 docker/ 目录下
-# （一律写成 ./xxx），挂载拓扑里不含任何宿主机绝对路径，也不伸进 ../backend/…。
+# 制品库与运行态：**除 packages 以外**的 bind-mount 源都在本文件所在的 docker/
+# 目录下（一律写成 ./xxx），不伸进 ../backend/…。packages 例外：它的宿主路径
+# 直接写在本文件里（见下面 x-backend-volumes），换盘改那一行。
 # 因此 docker/data 是本部署**自己的**一份库与缓存：compose 用 docker/data，
 # `cd backend && python app.py` 用 backend/data，两边各存各的、互不依赖
 # （要让老部署继续共用同一个 SQLite，把 docker/data 指回 ../backend/data 即可，
@@ -280,9 +284,13 @@ x-runner-env: &runner-env
 #   docker/data                    -> /media/.../openfish-data
 #   docker/forgejo                 -> /media/.../openfish-forgejo
 x-backend-volumes: &backend-volumes
-  # /app/share：python 包与 python-build-standalone；容器内两个子路径分别由
-  # PACKAGES_DIR / PYTHON_BUILDS_DIR 指向。
+  # /app/share：python-build-standalone 与其余制品；容器内路径由
+  # PYTHON_BUILDS_DIR 指向（packages 已单独挂载，见下）。
   - ./share:/app/share
+  # packages：宿主机绝对路径 → 容器 PACKAGES_DIR（默认 /app/share/python）。
+  # 挂载目标比 /app/share 深，Docker 按挂载点深度排序后由它覆盖父目录里的
+  # 同名子树，所以两行同时存在也不会互相遮蔽。换盘改这一行即可。
+  - /data/share/packages:/app/share/python
   # ── 内网制品中心 ────────────────────────────────────────
   # 每个源由 Docker 在 `up` 时按需创建（空目录、root 属主）；放到另一块盘就
   # `ln -sfn /srv/data/npm docker/npm`（符号链接照常跟随）。样例文件在
