@@ -98,7 +98,12 @@ def whoami():
     description=(
         "Every package in the registry with its file count, total size and "
         "per-package download/upload counters. Sorted by activity, most active "
-        "first. Use the trailing `/simple/` endpoints to enumerate the actual "
+        "first. Served from the cached statistics snapshot, so the answer can "
+        "lag by up to `STATS_CACHE_SECONDS`; while that snapshot is still being "
+        "built (a cold boot) the entries come from the in-memory index with "
+        "`total_size: 0` instead of waiting for a `stat` of every package file. "
+        "`GET /api/v1/stats/overview` reports `sizes_ready`, which tells the two "
+        "apart. Use the trailing `/simple/` endpoints to enumerate the actual "
         "files of one package."
     ),
     tags=["Packages"],
@@ -110,11 +115,18 @@ def whoami():
 def packages():
     """Aggregated package view for the SPA's package browser.
 
-    Reuses the same computation the admin dashboard relies on so the two
-    views can never disagree on counts or sizes.
+    Reuses the dictionary the admin dashboard and the background refresh share,
+    so the two views can never disagree on counts or sizes.  Cache-first on
+    purpose: the full computation `stat`s every package file, which on a
+    100k-file catalog is far too slow for a request thread (and used to make
+    this endpoint outlive the SPA's 30 s client timeout).
     """
-    from services.stats import compute
+    from services.stats import STATS_CACHE_KEY, compute
+
+    cache = current_app.extensions.get("caching")
+    data = cache.get(STATS_CACHE_KEY) if cache is not None else None
+    if isinstance(data, dict) and isinstance(data.get("packages"), list):
+        return jsonify(data["packages"])
 
     pkg_index = current_app.extensions.get("pypi_index")
-    key_mgr = current_app.extensions.get("api_key_manager")
-    return jsonify(compute(pkg_index, key_mgr)["packages"])
+    return jsonify(compute(pkg_index, None, sizes=False, counters=False)["packages"])

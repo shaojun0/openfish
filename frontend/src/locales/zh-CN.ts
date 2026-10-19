@@ -116,6 +116,7 @@ export default {
     nodeDesc: '把 NVM_NODEJS_ORG_MIRROR 或 FNM_NODE_DIST_MIRROR 指向本仓库以下载预编译 Node.js。',
     copy: '复制',
     loadFailed: '加载概览数据失败',
+    warming: '后台正在统计文件大小，存储占用稍后就绪（其余计数已是最新）。',
   },
 
   stat: {
@@ -126,6 +127,7 @@ export default {
     activeKeys: '有效密钥',
     downloads: '下载次数',
     uploads: '上传次数',
+    calculating: '计算中…',
   },
 
   packages: {
@@ -144,6 +146,7 @@ export default {
     empty: '仓库中还没有任何包。使用 twine 上传第一个包吧。',
     emptyFiltered: '没有匹配“{query}”的包。',
     loadFailed: '加载包列表失败',
+    sizesWarming: '文件大小仍在后台统计，部分大小暂显示为 0 B；稍后点“刷新”即可。',
   },
 
   keys: {
@@ -205,6 +208,7 @@ export default {
     refreshed: '统计已刷新',
     refreshFailed: '刷新统计失败',
     loadFailed: '加载统计失败',
+    sizesWarming: '后台正在统计文件大小，存储占用稍后就绪；也可点右上角“刷新统计”立即重算。',
     overview: '总览',
     packagesTitle: '包排行',
     keysTitle: '密钥使用情况',

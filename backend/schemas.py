@@ -1144,6 +1144,31 @@ class PackageSummary(BaseModel):
     upload_count: int
 
 
+class StatsOverview(BaseModel):
+    """Result of `GET /api/v1/stats/overview`.
+
+    The three counters the SPA overview page needs, projected from the cached
+    statistics snapshot (see `services/stats.py`).
+    """
+
+    package_count: int
+    file_count: int
+    total_storage: int = Field(
+        description="Bytes; 0 while `sizes_ready` is false",
+    )
+    total_storage_human: str = Field(description="Pre-formatted, e.g. '1.4 TB'")
+    sizes_ready: bool = Field(
+        description=(
+            "False while the background refresh is still `stat`-ing the package "
+            "files; the counts are final already, the storage figure is not"
+        ),
+    )
+    generated_at: str | None = Field(
+        default=None,
+        description="When the cached snapshot was computed (ISO 8601), null if never",
+    )
+
+
 class AdminOverview(BaseModel):
     """Aggregate counters across the whole server."""
 
@@ -1155,6 +1180,16 @@ class AdminOverview(BaseModel):
     active_keys: int
     total_downloads: int
     total_uploads: int
+    sizes_ready: bool = Field(
+        default=True,
+        description=(
+            "False on the cold-cache fallback: the counts are final, the "
+            "storage figure is still being computed in the background"
+        ),
+    )
+    generated_at: str | None = Field(
+        default=None, description="When the numbers were computed (ISO 8601)"
+    )
 
 
 class AdminKeyEntry(BaseModel):
@@ -1179,6 +1214,13 @@ class AdminStats(BaseModel):
     overview: AdminOverview
     packages: list[PackageSummary]
     keys: list[AdminKeyEntry]
+    sizes_ready: bool = Field(
+        default=True,
+        description="Mirrors `overview.sizes_ready`; false while sizes are pending",
+    )
+    generated_at: str | None = Field(
+        default=None, description="When the numbers were computed (ISO 8601)"
+    )
 
 
 class DatabaseInfo(BaseModel):

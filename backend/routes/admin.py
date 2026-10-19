@@ -13,7 +13,7 @@ from flask import Blueprint, current_app, jsonify
 from auth.decorators import require_admin, require_permission
 from auth.permissions import ADMIN_REFRESH
 from openapi import api_operation, errors, ok
-from services.stats import compute as compute_stats
+from services.stats import compute as compute_stats, save_snapshot
 
 admin_bp = Blueprint("admin", __name__)
 
@@ -37,7 +37,11 @@ def stats():
         data = cache.get("admin_stats")
         if data is not None:
             return jsonify(data)
-    return jsonify(_compute())
+    # Cold cache (first boot before the background refresh finished): answer
+    # with the cheap index-only projection instead of `stat`-ing every package
+    # file on the request thread. The counts are final; the size columns fill in
+    # when the refresh lands, and `POST /admin/refresh-stats` forces it.
+    return jsonify(_compute(full=False))
 
 
 @admin_bp.route("/refresh-stats", methods=["POST"])
@@ -55,11 +59,15 @@ def refresh_stats():
     cache = current_app.extensions.get("caching")
     if cache is None:
         return jsonify({"refreshed": False, "error": "cache not available"}), 503
-    cache.set("admin_stats", _compute(), timeout=0)
+    data = _compute()
+    cache.set("admin_stats", data, timeout=0)
+    # Keep the persisted snapshot in step with the forced refresh, so a restart
+    # right after this does not fall back to the pre-refresh numbers.
+    save_snapshot(data)
     return jsonify({"refreshed": True})
 
 
-def _compute() -> dict:
+def _compute(*, full: bool = True) -> dict:
     pkg_index = current_app.extensions.get("pypi_index")
     key_mgr = current_app.extensions.get("api_key_manager")
-    return compute_stats(pkg_index, key_mgr)
+    return compute_stats(pkg_index, key_mgr, sizes=full, counters=full)

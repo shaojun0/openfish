@@ -59,6 +59,12 @@ x-backend-env: &backend-env
   TLS_CA_FILE: ${TLS_CA_FILE:-}
   # 管理端统计的后台刷新间隔（秒），留空 = 7200。
   STATS_CACHE_SECONDS: ${STATS_CACHE_SECONDS:-}
+  # 统计快照的落盘位置，留空 = /app/data/stats_snapshot.json（随数据卷持久化）：
+  # 重启后概览页先用上一次的结果作答，而不是让第一个请求等一遍全量 stat。
+  STATS_SNAPSHOT_FILE: ${STATS_SNAPSHOT_FILE:-}
+  # 首次统计时并行 stat 包文件的线程数，留空 = 8；1 = 串行。
+  # 1.5T / 16 万文件的目录上，这一趟的瓶颈是单次 stat 的延迟而不是 CPU。
+  STATS_SIZING_WORKERS: ${STATS_SIZING_WORKERS:-}
   # 两个都是**容器内**路径。它们的宿主机来源都在下面 x-backend-volumes 的绝对
   # 挂载里（/data/share/packages、/data/share/python-build-standalone），不经过
   # docker/share。默认值与 docker/.env.example 保持一致。

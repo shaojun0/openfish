@@ -206,7 +206,7 @@ docker/share/legacy-releases/20241016 -> ../releases              # ✓ 相对�
 | `/data/share/python-build-standalone`（compose 挂载，容器内是 `PYTHON_BUILDS_DIR`） | CPython 构建字节 | 否——目录名是 release tag，索引扫描得到 |
 | `share/` `npm/` `node-builds/` `docker-images/` `debian/` | 制品字节 | npm / docker / debian 的 overlay 行在 `catalog_entries` 表里 |
 | `tools/` `docs/` | 对象字节（`objects/<uuid4>`） | **条目在数据库里**，目录只是存放处与 import/export 的桥 |
-| `data/` | SQLite 库、回源缓存、模型路由表所在库——本部署**自己的一份** | 是 |
+| `data/` | SQLite 库、回源缓存、模型路由表所在库、统计快照（`stats_snapshot.json`）——本部署**自己的一份** | 是 |
 | `forgejo/` | Forgejo 的 `/data`（bare 仓库 + 实例配置） | 独立 |
 | `agent-work/` | runner 的 `/work` 任务沙箱 | 否 |
 
@@ -332,6 +332,33 @@ docker compose logs --tail=100 backend forgejo
   反复 `Restarting` 且 `docker inspect --format '{{.State.OOMKilled}}' openfish-backend`
   为 `true`，说明索引条目（每个文件一条，全在内存里）把配额吃满了，要加内存或缩小
   单个 `PACKAGES_DIR`，调宽限没用。
+- 概览页一直转圈、点进包管理显示「仓库中还没有任何包」、Network 面板里
+  `/api/v1/packages` 请求 30 秒后超时（或变成 `504`）→ **不是包丢了**，是统计接口在
+  请求线程里等全量 `stat`。1.5T / 16 万文件的目录上，这一趟会超过 30s（SPA 的 axios
+  超时就是 30s，`frontend/src/api/client.ts`；一级代理通常也有同样的上限），前端拿到
+  失败响应就把表格渲染成空。现在的实现是**缓存优先**：后台线程算完写进
+  内存缓存和 `data/stats_snapshot.json`，`/api/v1/stats/overview`（概览页）和
+  `/api/v1/packages`（包列表）只读缓存；缓存为空时用索引里的计数立即作答，并把
+  `sizes_ready` 标成 `false`。排查：
+
+  ```bash
+  docker compose logs --tail=80 backend | grep -E 'stats (restored|refreshed)|slow request'
+  docker compose exec backend ls -l /app/data/stats_snapshot.json
+  curl -fsS http://127.0.0.1:20416/api/v1/stats/overview   # 需要带上登录凭据
+  ```
+
+  升级后第一次启动会先看到 `restored stats snapshot …`（老快照），再看到
+  `stats refreshed in …s`；在后者出现之前，概览页的「存储占用」显示“计算中…”，
+  其余两个计数已经是最新的，包列表也能正常打开（大小暂显示 0 B）。想缩短这一趟：
+  在 `docker/.env` 把 `STATS_SIZING_WORKERS` 调大（默认 8，串行设 1）——瓶颈是
+  每个文件一次 `stat` 的**延迟**，不是 CPU。日志里 `stats refreshed` 之前若还有
+  `slow request … /api/v1/stats/overview` 且耗时很大，把那条日志贴出来即可定位。
+
+  另一种容易误判的现象：浏览器 Network 里请求等了 16s，但响应头
+  `Server-Timing: app;dur=…` 只有几十毫秒，`docker logs` 里 gunicorn 的 access log
+  最后一段（请求耗时）也很小 → 时间花在**后端 import**（worker 还没 bind 端口），
+  不是接口本身。看 `openfish backend ready in … ms` 和上面那条冷启动症状，别去查
+  `/session` 的代码。
 
 ## 6. PostgreSQL：切换与数据迁移
 

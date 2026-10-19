@@ -116,6 +116,7 @@ export default {
     nodeDesc: 'Point NVM_NODEJS_ORG_MIRROR or FNM_NODE_DIST_MIRROR here to download prebuilt Node.js.',
     copy: 'Copy',
     loadFailed: 'Failed to load the overview',
+    warming: 'File sizes are being computed in the background; storage usage will follow shortly (the other counters are final).',
   },
 
   stat: {
@@ -126,6 +127,7 @@ export default {
     activeKeys: 'Active keys',
     downloads: 'Downloads',
     uploads: 'Uploads',
+    calculating: 'Calculating…',
   },
 
   packages: {
@@ -144,6 +146,7 @@ export default {
     empty: 'No packages yet. Upload your first one with twine.',
     emptyFiltered: 'No package matches “{query}”.',
     loadFailed: 'Failed to load packages',
+    sizesWarming: 'File sizes are still being computed; some sizes show 0 B for now — press Refresh in a moment.',
   },
 
   keys: {
@@ -207,6 +210,7 @@ export default {
     refreshed: 'Statistics refreshed',
     refreshFailed: 'Failed to refresh statistics',
     loadFailed: 'Failed to load statistics',
+    sizesWarming: 'File sizes are being computed in the background; storage usage will follow. Use Refresh statistics to recompute now.',
     overview: 'Overview',
     packagesTitle: 'Top packages',
     keysTitle: 'Key usage',

@@ -37,6 +37,7 @@ from auth.permissions import (
     AGENT_RUN,
     APP_READ,
     FINDING_READ,
+    PACKAGE_READ,
     REPO_READ,
 )
 
@@ -51,6 +52,7 @@ def register_all(app):
     from routes.python_build import python_build_bp
     from routes.node_build import node_build_bp
     from routes.session import session_bp
+    from routes.stats import stats_bp
     from routes.discovery import discovery_bp
     from routes.spa import spa_bp
     from routes.access import access_bp
@@ -128,7 +130,12 @@ def register_all(app):
     app.register_blueprint(discovery_bp, url_prefix=prefix)
 
     # ── JSON API consumed by the SPA ────────────────────────────────
+    # The overview counters are cached (the background refresh owns the
+    # expensive `stat` walk), so their one route needs nothing beyond the same
+    # `package:read` the package list already requires.
+    stats_bp.before_request(require_permission(PACKAGE_READ))
     app.register_blueprint(session_bp, url_prefix=api)
+    app.register_blueprint(stats_bp, url_prefix=api)
     # `api_keys_bp` and `access_bp` bind request bodies as view parameters
     # (`body: CreateKeyRequest`, `body: CreateRoleRequest`, …), so they go
     # through `register_api` like `pypi_bp`.  Their read-only routes stay plain

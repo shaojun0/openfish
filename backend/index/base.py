@@ -9,11 +9,15 @@ import site for everything they need.
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
 from services.digest import compute_sha256, invalidate_digest_cache, store_digest
+
+logger = logging.getLogger("cpypiserver.index")
 
 
 class WatchdogIndex(ABC):
@@ -50,7 +54,17 @@ class WatchdogIndex(ABC):
     # ── Lifecycle ───────────────────────────────────────────────────
 
     def start(self) -> None:
+        # Startup time is invisible in the HTTP access log: gunicorn binds the
+        # port only after this module finished importing, so on a 100k-entry
+        # catalog the full scan is the difference between "ready" and "the first
+        # request waited 16 s".  Log it per index.
+        started = time.perf_counter()
         self._full_scan()
+        logger.info(
+            "index %s: scanned %s in %.0f ms",
+            type(self).__name__, self._dir,
+            (time.perf_counter() - started) * 1000.0,
+        )
         from config import settings
         if settings.storage.watch_packages and Path(self._dir).is_dir():
             self._start_observer()

@@ -98,3 +98,19 @@ checks:
     command: python .agent/checks/check_startup_nonblocking.py
     timeout: 120
     validated: false
+  - id: stats-request-path
+    # The statistics endpoints must be cache-first.  `/api/v1/packages` used to
+    # compute the whole aggregated dictionary per request (including a `stat`
+    # of every package file, because the index stores size=0); on a 1.5 TB /
+    # 160k-file catalog that outlived the 30 s reverse proxy, so the SPA got a
+    # failure instead of a list and rendered it as "the registry has no
+    # packages".  The overview page called the same endpoint for three
+    # counters.  The check boots a real app in two subprocesses with temp dirs:
+    # cold cache must answer from the index with `sizes_ready: false` and no
+    # `Path.stat` at all, a warm cache must answer without calling
+    # `services.stats.compute`, and a restart must serve the persisted
+    # `stats_snapshot.json` without recomputing.  Same interpreter rule as
+    # above.
+    command: python .agent/checks/check_stats_request_path.py
+    timeout: 120
+    validated: false

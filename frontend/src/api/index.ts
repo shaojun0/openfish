@@ -113,6 +113,26 @@ export interface PackageSummary {
   upload_count: number
 }
 
+/**
+ * Result of `GET /api/v1/stats/overview` — the three counters the overview page
+ * shows, projected from the server's cached statistics snapshot.
+ *
+ * Deliberately separate from `AdminStats`: a non-admin may read these totals
+ * (they have `package:read`) but not the admin dashboard, and the endpoint is
+ * cache-first so the page never waits for a full `stat` walk of the registry.
+ */
+export interface StatsOverview {
+  package_count: number
+  file_count: number
+  /** Bytes; 0 while `sizes_ready` is false. */
+  total_storage: number
+  total_storage_human: string
+  /** False while the background refresh is still computing file sizes. */
+  sizes_ready: boolean
+  /** When the cached snapshot was computed (ISO 8601), or null if never. */
+  generated_at: string | null
+}
+
 export interface AdminStats {
   overview: {
     package_count: number
@@ -123,7 +143,12 @@ export interface AdminStats {
     active_keys: number
     total_downloads: number
     total_uploads: number
+    /** False on the cold-cache fallback: counts final, storage still computing. */
+    sizes_ready: boolean
+    generated_at: string | null
   }
+  sizes_ready: boolean
+  generated_at: string | null
   packages: PackageSummary[]
   keys: Array<{
     id: string
@@ -477,12 +502,20 @@ export async function fetchPackages(): Promise<PackageSummary[]> {
   return getJson<PackageSummary[]>('/packages')
 }
 
+export async function fetchStatsOverview(): Promise<StatsOverview> {
+  return getJson<StatsOverview>('/stats/overview')
+}
+
 export async function fetchAdminStats(): Promise<AdminStats> {
   return getJson<AdminStats>('/admin/stats')
 }
 
 export async function refreshAdminStats(): Promise<void> {
-  await postJson('/admin/refresh-stats')
+  // This route recomputes synchronously and the first pass `stat`s every package
+  // file, so it needs the server's own 300 s budget instead of the client's
+  // default 30 s — otherwise the request is abandoned while the server keeps
+  // working and the UI reports a failure that did not happen.
+  await postJson('/admin/refresh-stats', undefined, { timeout: 300_000 })
 }
 
 export async function fetchHealth(): Promise<HealthInfo> {

@@ -1115,7 +1115,8 @@ Add `?format=json` or `Accept: application/vnd.pypi.simple.v1+json` to the
 | Method | Path                              | Purpose                                  |
 | ------ | --------------------------------- | ---------------------------------------- |
 | GET    | `/api/v1/session`                 | Current user, role and permissions (200 even when anonymous) |
-| GET    | `/api/v1/packages`                | Package list with sizes and call counts  |
+| GET    | `/api/v1/packages`                | Package list with sizes and call counts (cache-first) |
+| GET    | `/api/v1/stats/overview`          | Cached package/file/storage totals for the overview page |
 | GET    | `/api/v1/keys`                    | List API keys                            |
 | POST   | `/api/v1/keys`                    | Create an API key (raw key returned once)|
 | DELETE | `/api/v1/keys/<key_id>`           | Revoke a key                             |
