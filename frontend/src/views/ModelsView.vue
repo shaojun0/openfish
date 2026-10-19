@@ -13,6 +13,7 @@ import {
   type ModelRoute,
   type ModelRouteHealth,
   type ModelRoutePayload,
+  type ModelRouteReasoning,
   type ModelRoutes,
 } from '@/api'
 import { apiError } from '@/api/client'
@@ -37,6 +38,13 @@ import { formatDate } from '@/utils/format'
  * protocol's default (`chat`) until the administrator picks one explicitly —
  * a document parser is an OpenAI-format route with `kind: 'ocr'`, not a protocol
  * of its own.
+ *
+ * The **capability metadata** (`contextWindow` / `maxTokens` / modalities /
+ * reasoning dialect + levels) is what a downstream DSH sizes and dispatches a
+ * request with; leaving it empty is honest, not broken — the consumer then keeps
+ * its own default.  The table shows it as compact tags, the editor edits it in
+ * the same inline row, and the DSH snippet below spells out exactly how the
+ * plugin maps it into a pi-ai model profile.
  */
 const { t } = useI18n()
 const session = useSessionStore()
@@ -59,6 +67,38 @@ const providerOptions = computed<string[]>(() => {
 const kindOptions = computed<string[]>(() => {
   const fromServer = routes.value?.kinds ?? []
   return fromServer.length ? fromServer : ['chat', 'completion', 'embedding', 'rerank', 'ocr', 'asr', 'tts']
+})
+
+/** The capability vocabularies, served by the API so the panel cannot drift. */
+const modalityOptions = computed<string[]>(() => {
+  const fromServer = routes.value?.modalities ?? []
+  return fromServer.length ? fromServer : ['text', 'image', 'audio']
+})
+
+const thinkingFormatOptions = computed<string[]>(() => {
+  const fromServer = routes.value?.thinking_formats ?? []
+  return fromServer.length
+    ? fromServer
+    : [
+        'openai',
+        'deepseek',
+        'openrouter',
+        'together',
+        'baseten',
+        'zai',
+        'qwen',
+        'chat-template',
+        'qwen-chat-template',
+        'string-thinking',
+        'ant-ling',
+      ]
+})
+
+const thinkingLevelOptions = computed<string[]>(() => {
+  const fromServer = routes.value?.thinking_levels ?? []
+  return fromServer.length
+    ? fromServer
+    : ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 })
 
 /** Per-kind counts for the summary row — the table's classification at a glance. */
@@ -92,6 +132,13 @@ interface EditorForm {
   clearApiKey: boolean
   description: string
   enabled: boolean
+  // Capability metadata.  `null` / `''` / `[]` mean "undeclared" — the values
+  // are optional, and clearing one must clear it rather than keep a stale value.
+  contextWindow: number | null
+  maxTokens: number | null
+  modalities: string[]
+  reasoningFormat: string
+  reasoningEfforts: string[]
 }
 
 const editorMode = ref<'create' | 'edit' | null>(null)
@@ -117,6 +164,11 @@ const editor = reactive<EditorForm>({
   clearApiKey: false,
   description: '',
   enabled: true,
+  contextWindow: null,
+  maxTokens: null,
+  modalities: [],
+  reasoningFormat: '',
+  reasoningEfforts: [],
 })
 
 function isEditor(row: TableRow): row is EditorRow {
@@ -143,20 +195,55 @@ const pathPlaceholder = computed(
 )
 
 /**
+ * One alias-expanded model entry as the DSH side reads it.  These are the pi-ai
+ * model-profile field names (`contextWindow`, `maxTokens`, `input`,
+ * `reasoningEfforts`, `compat.thinkingFormat`) because that is what the
+ * enterprise-intranet plugin maps them into — the snippet must not invent a
+ * second spelling for the same facts.
+ */
+interface DshSnippetModel {
+  base_url: string
+  model: string
+  path: string
+  contextWindow?: number
+  maxTokens?: number
+  input?: string[]
+  /** `off` maps to `null`: "supported, send no thinking parameter". */
+  reasoningEfforts?: Record<string, string | null>
+  compat?: { thinkingFormat: string }
+}
+
+/**
  * A ready-to-paste mapping for the DSH side, built from enabled **chat /
  * completion** routes.  An embedding or OCR endpoint is not an LLM, so listing
  * it here would hand DSH an alias it cannot chat with.
  */
 const dshSnippet = computed(() => {
-  const models: Record<string, { base_url: string; model: string; path: string }> = {}
+  const models: Record<string, DshSnippetModel> = {}
   for (const route of allRoutes.value) {
     if (!route.enabled || !LLM_KINDS.includes(route.kind)) continue
+    const model: DshSnippetModel = {
+      base_url: route.base_url,
+      model: route.model || route.name,
+      path: route.path,
+    }
+    // Undeclared metadata is omitted rather than emitted as a guess: the
+    // adapter then keeps its own default, which is the honest answer.
+    if (route.context_window != null) model.contextWindow = route.context_window
+    if (route.max_tokens != null) model.maxTokens = route.max_tokens
+    const input = (route.modalities ?? []).filter(
+      (modality) => modality === 'text' || modality === 'image',
+    )
+    if (input.length) model.input = input
+    const efforts = route.reasoning?.efforts ?? []
+    if (efforts.length) {
+      model.reasoningEfforts = Object.fromEntries(
+        efforts.map((level) => [level, level === 'off' ? null : level]),
+      )
+    }
+    if (route.reasoning?.format) model.compat = { thinkingFormat: route.reasoning.format }
     for (const alias of route.aliases.length ? route.aliases : [route.name]) {
-      models[alias] = {
-        base_url: route.base_url,
-        model: route.model || route.name,
-        path: route.path,
-      }
+      models[alias] = { ...model }
     }
   }
   return JSON.stringify({ models }, null, 2)
@@ -215,6 +302,37 @@ function kindLabel(kind: string): string {
   }
 }
 
+function modalityLabel(modality: string): string {
+  switch (modality) {
+    case 'text':
+      return t('models.modalityText')
+    case 'image':
+      return t('models.modalityImage')
+    case 'audio':
+      return t('models.modalityAudio')
+    default:
+      return modality
+  }
+}
+
+/** `1_000_000` → `1M`, `384_000` → `384k`: compact enough for a table tag. */
+function compactTokens(value: number | null): string {
+  if (value == null) return '—'
+  if (value >= 1_000_000) {
+    const millions = value / 1_000_000
+    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`
+  }
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`
+  return String(value)
+}
+
+/** The reasoning declaration as one readable tag, or `''` when undeclared. */
+function reasoningLabel(route: ModelRoute): string {
+  if (!route.reasoning) return ''
+  const dialect = route.reasoning.format ?? t('models.reasoningDefault')
+  return `${dialect} · ${route.reasoning.efforts.join(' / ')}`
+}
+
 /**
  * The kind a protocol implies when the administrator has not chosen one.
  *
@@ -228,6 +346,17 @@ function defaultKindFor(_provider: string): string {
 
 function onProviderChange(provider: string): void {
   if (!kindTouched.value) editor.kind = defaultKindFor(provider)
+  // `thinkingFormat` exists only on the OpenAI-compatible compat type: an
+  // Anthropic route carries native thinking blocks, so a dialect select kept
+  // from the previous protocol would be refused by the server on save.
+  if (provider !== 'openai') editor.reasoningFormat = ''
+}
+
+/** Picking a dialect with no levels yet makes the declaration selectable. */
+function onReasoningFormatChange(format: string): void {
+  if (format && !editor.reasoningEfforts.length) {
+    editor.reasoningEfforts = ['low', 'high']
+  }
 }
 
 /** Picking a kind by hand pins it: a later protocol change will not overwrite it. */
@@ -320,6 +449,11 @@ function resetEditor(): void {
   editor.clearApiKey = false
   editor.description = ''
   editor.enabled = true
+  editor.contextWindow = null
+  editor.maxTokens = null
+  editor.modalities = []
+  editor.reasoningFormat = ''
+  editor.reasoningEfforts = []
   apiKeyTouched.value = false
   kindTouched.value = false
   editorHealth.value = null
@@ -344,6 +478,11 @@ function startEdit(route: ModelRoute): void {
   editor.aliases = route.aliases.join(', ')
   editor.description = route.description ?? ''
   editor.enabled = route.enabled
+  editor.contextWindow = route.context_window
+  editor.maxTokens = route.max_tokens
+  editor.modalities = [...(route.modalities ?? [])]
+  editor.reasoningFormat = route.reasoning?.format ?? ''
+  editor.reasoningEfforts = [...(route.reasoning?.efforts ?? [])]
   // An existing route carries an explicit classification: keep it even if the
   // administrator then switches the protocol.
   kindTouched.value = true
@@ -368,6 +507,25 @@ function validate(): string | null {
   if (!editor.kind.trim()) return t('models.errKind')
   if (!editor.base_url.trim()) return t('models.errUrl')
   if (!/^https?:\/\/\S+$/i.test(editor.base_url.trim())) return t('models.errUrlScheme')
+  // The server enforces these too — this only saves a round trip and points at
+  // the field the administrator is looking at.
+  if (
+    editor.contextWindow != null &&
+    editor.maxTokens != null &&
+    editor.maxTokens > editor.contextWindow
+  ) {
+    return t('models.errMaxTokensOverContext')
+  }
+  const reasoningDeclared = Boolean(editor.reasoningFormat) || editor.reasoningEfforts.length > 0
+  if (reasoningDeclared) {
+    if (!editor.reasoningEfforts.length) return t('models.errReasoningEfforts')
+    if (!editor.reasoningEfforts.some((level) => level !== 'off')) {
+      return t('models.errReasoningOffOnly')
+    }
+    if (editor.reasoningFormat && editor.provider !== 'openai') {
+      return t('models.errReasoningFormatProvider')
+    }
+  }
   return null
 }
 
@@ -381,6 +539,10 @@ function parseAliases(raw: string): string[] {
 }
 
 function buildPayload(): ModelRoutePayload {
+  const reasoning: ModelRouteReasoning | null =
+    editor.reasoningFormat || editor.reasoningEfforts.length
+      ? { format: editor.reasoningFormat || null, efforts: [...editor.reasoningEfforts] }
+      : null
   const payload: ModelRoutePayload = {
     name: editor.name.trim(),
     provider: editor.provider,
@@ -391,6 +553,12 @@ function buildPayload(): ModelRoutePayload {
     aliases: parseAliases(editor.aliases),
     path: editor.path.trim(),
     enabled: editor.enabled,
+    // Sent explicitly (null when cleared) so an edit clears a stored value
+    // instead of leaving the old one behind.
+    context_window: editor.contextWindow ?? null,
+    max_tokens: editor.maxTokens ?? null,
+    modalities: editor.modalities.length ? [...editor.modalities] : null,
+    reasoning,
   }
   if (editorMode.value === 'create') {
     payload.api_key = editor.api_key.trim()
@@ -696,6 +864,113 @@ onMounted(() => load())
           </template>
         </el-table-column>
 
+        <el-table-column :label="t('models.capabilities')" min-width="300">
+          <template #default="{ row }">
+            <div v-if="isEditor(row)" class="editor-cell">
+              <div class="editor-cell--row">
+                <el-input-number
+                  v-model="editor.contextWindow"
+                  size="small"
+                  :min="1"
+                  :step="1024"
+                  :controls="false"
+                  :value-on-clear="null"
+                  :placeholder="t('models.contextWindowPlaceholder')"
+                  class="number-input"
+                />
+                <el-input-number
+                  v-model="editor.maxTokens"
+                  size="small"
+                  :min="1"
+                  :step="1024"
+                  :controls="false"
+                  :value-on-clear="null"
+                  :placeholder="t('models.maxTokensPlaceholder')"
+                  class="number-input"
+                />
+              </div>
+              <el-select
+                v-model="editor.modalities"
+                multiple
+                collapse-tags
+                size="small"
+                :placeholder="t('models.modalitiesPlaceholder')"
+              >
+                <el-option
+                  v-for="modality in modalityOptions"
+                  :key="modality"
+                  :label="modalityLabel(modality)"
+                  :value="modality"
+                />
+              </el-select>
+              <div class="editor-cell--row">
+                <el-select
+                  v-model="editor.reasoningFormat"
+                  size="small"
+                  clearable
+                  class="reasoning-input"
+                  :disabled="editor.provider !== 'openai'"
+                  :placeholder="t('models.reasoningFormatPlaceholder')"
+                  @change="onReasoningFormatChange"
+                >
+                  <el-option
+                    v-for="format in thinkingFormatOptions"
+                    :key="format"
+                    :label="format"
+                    :value="format"
+                  />
+                </el-select>
+                <el-select
+                  v-model="editor.reasoningEfforts"
+                  multiple
+                  collapse-tags
+                  size="small"
+                  class="reasoning-input"
+                  :placeholder="t('models.reasoningEffortsPlaceholder')"
+                >
+                  <el-option
+                    v-for="level in thinkingLevelOptions"
+                    :key="level"
+                    :label="level"
+                    :value="level"
+                  />
+                </el-select>
+              </div>
+            </div>
+            <div v-else class="route__caps">
+              <el-tag v-if="row.context_window != null" size="small" effect="plain">
+                {{ t('models.contextShort') }} {{ compactTokens(row.context_window) }}
+              </el-tag>
+              <el-tag v-if="row.max_tokens != null" size="small" effect="plain">
+                {{ t('models.outputShort') }} {{ compactTokens(row.max_tokens) }}
+              </el-tag>
+              <el-tag
+                v-for="modality in row.modalities ?? []"
+                :key="modality"
+                size="small"
+                type="info"
+                effect="plain"
+              >
+                {{ modalityLabel(modality) }}
+              </el-tag>
+              <el-tag v-if="row.reasoning" size="small" type="warning" effect="plain">
+                {{ reasoningLabel(row) }}
+              </el-tag>
+              <span
+                v-if="
+                  row.context_window == null &&
+                  row.max_tokens == null &&
+                  !row.modalities?.length &&
+                  !row.reasoning
+                "
+                class="muted"
+              >
+                {{ t('models.capabilitiesUndeclared') }}
+              </span>
+            </div>
+          </template>
+        </el-table-column>
+
         <el-table-column :label="t('models.apiKey')" width="180">
           <template #default="{ row }">
             <div v-if="isEditor(row)" class="editor-cell">
@@ -859,6 +1134,20 @@ onMounted(() => load())
   gap: 4px;
   margin-top: 2px;
   flex-wrap: wrap;
+}
+
+.route__caps {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.number-input {
+  width: 112px;
+}
+
+.reasoning-input {
+  width: 128px;
 }
 
 .editor-cell {

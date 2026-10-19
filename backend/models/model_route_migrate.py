@@ -5,7 +5,7 @@ creates missing *tables* but never alters an existing one.  This module is the
 same idea as :mod:`models.agent_hub_migrate`, scoped to the one table that
 module does not own.
 
-Two changes need it:
+Three changes need it:
 
 ``api_key_env`` was **retired** — a route used to be able to name an environment
 variable its key was read from, and that column is ``NOT NULL`` with no server
@@ -33,6 +33,14 @@ them to ``openai`` — keeping their ``base_url``, ``model``, sealed key and
 constraint that admitted the retired spelling.  Only a ``path`` still pointing at
 the retired protocol's own default is cleared, so the OpenAI default applies
 instead of a dead endpoint being probed.
+
+The **model capability metadata** columns (``context_window`` / ``max_tokens`` /
+``modalities`` / ``reasoning``) are newer still.  They are all nullable, so
+:func:`add_metadata_columns` is a plain ``ALTER TABLE … ADD COLUMN`` on both
+dialects — no rewrite, no backfill, and a row that predates them means "not
+declared".  Without it an upgraded deployment's routes would fail to read (the
+ORM selects columns the table does not have), which is why the top-up runs at
+boot rather than as an operator step.
 
 :func:`ensure_schema` also *reports* rows whose ``api_key`` is still plaintext.
 It deliberately does **not** re-seal them: sealing needs the master key and
@@ -75,6 +83,18 @@ RETIRED_PROVIDER_PATH = "/file_parse"
 #: owns it so the name in the log cannot drift from the name that is read.
 MODEL_ROUTE_KEY_ENV = KeysConfig.env_name("model_route_key")
 
+#: Capability-metadata columns added after the table first shipped, with the DDL
+#: an upgraded database needs.  Every one is nullable, so ``ADD COLUMN`` is the
+#: whole migration on SQLite and PostgreSQL alike — an existing row keeps no
+#: value, which is exactly the published meaning ("not declared").  A fresh
+#: database gets them from ``create_all`` and this list finds nothing missing.
+ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("context_window", "context_window INTEGER"),
+    ("max_tokens", "max_tokens INTEGER"),
+    ("modalities", "modalities TEXT"),
+    ("reasoning", "reasoning TEXT"),
+)
+
 
 def provider_check_name() -> str:
     """The name of the CHECK constraint listing the wire formats.
@@ -88,6 +108,28 @@ def provider_check_name() -> str:
         if isinstance(constraint, CheckConstraint) and "provider" in str(constraint.sqltext):
             return str(constraint.name)
     raise RuntimeError(f"{TABLE} declares no provider CHECK constraint")
+
+
+def add_metadata_columns(engine: Engine) -> list[str]:
+    """Add the capability-metadata columns an older database is missing.
+
+    Returns the column names this call added (``[]`` when the schema is current).
+    Idempotent by inspection, so a fresh database — where ``create_all`` already
+    declared them — and every later boot are no-ops.  The DDL is a bare
+    ``ADD COLUMN``: all four are nullable, so neither dialect needs a rewrite or
+    a backfill, and a NULL keeps its published meaning of "not declared".
+    """
+    inspector = inspect(engine)
+    if TABLE not in set(inspector.get_table_names()):
+        return []
+    present = {column["name"] for column in inspector.get_columns(TABLE)}
+    missing = [(name, ddl) for name, ddl in ADDED_COLUMNS if name not in present]
+    if not missing:
+        return []
+    with engine.begin() as conn:
+        for _name, ddl in missing:
+            conn.execute(text(f"ALTER TABLE {TABLE} ADD COLUMN {ddl}"))
+    return [name for name, _ddl in missing]
 
 
 def plaintext_key_count(engine: Engine) -> int:
@@ -223,42 +265,53 @@ def ensure_schema(engine: Engine) -> dict[str, object]:
         {
             "rewritten_routes": ["mineru-ocr"],
             "dropped_columns": ["model_routes.api_key_env"],
+            "added_columns": ["model_routes.context_window"],
             "plaintext_keys": 2,
         }
 
     ``plaintext_keys`` is a standing count, not a change — it is reported on
-    every call so a boot can warn about it.  ``dropped_columns`` is measured
-    rather than taken from the step that did it, because on SQLite the provider
-    rebuild and the column drop are the *same* rebuild: whichever runs second
-    finds its work already done, and the report must still name what changed.
-    Never raises because something is already absent: existence is decided by
-    inspection.
+    every call so a boot can warn about it.  ``dropped_columns`` and
+    ``added_columns`` are measured rather than taken from the step that did it,
+    because on SQLite the provider rebuild and the column changes are the *same*
+    rebuild: whichever runs second finds its work already done, and the report
+    must still name what changed.  Never raises because something is already
+    absent: existence is decided by inspection.
     """
     columns_before = columns_present(engine, TABLE)
     report: dict[str, object] = {
         "rewritten_routes": [],
         "dropped_columns": [],
+        "added_columns": [],
         "plaintext_keys": 0,
     }
     retired = retire_mineru_provider(engine)
     report["rewritten_routes"] = retired["rewritten"]
+    # The step's own return value belongs to it; what the report publishes is
+    # measured below, so the result is deliberately discarded rather than bound.
+    add_metadata_columns(engine)
     # This step's own report belongs to it, not to ours — but the call still has
     # to run, so the result is deliberately discarded rather than bound.
     retire_api_key_env(engine)
+    columns_after = columns_present(engine, TABLE)
     report["dropped_columns"] = [
-        f"{TABLE}.{name}" for name in sorted(columns_before - columns_present(engine, TABLE))
+        f"{TABLE}.{name}" for name in sorted(columns_before - columns_after)
+    ]
+    report["added_columns"] = [
+        f"{TABLE}.{name}" for name in sorted(columns_after - columns_before)
     ]
     report["plaintext_keys"] = plaintext_key_count(engine)
     return report
 
 
 __all__ = [
+    "ADDED_COLUMNS",
     "MODEL_ROUTE_KEY_ENV",
     "PROVIDER_REPLACEMENT",
     "RETIRED_COLUMN",
     "RETIRED_PROVIDER",
     "RETIRED_PROVIDER_PATH",
     "TABLE",
+    "add_metadata_columns",
     "ensure_schema",
     "plaintext_key_count",
     "provider_check_name",

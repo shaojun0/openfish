@@ -195,6 +195,66 @@ _MODEL_ROUTE_SCHEMA = {
         },
         "enabled": {"type": "boolean"},
         "description": {"type": ["string", "null"]},
+        "context_window": {
+            "type": ["integer", "null"],
+            "description": (
+                "Declared context window in tokens; null means undeclared and the "
+                "downstream adapter keeps its own default. Any downstream intranet "
+                "DSH sizes its prompt budget from this, so a 32k gateway must say so."
+            ),
+        },
+        "max_tokens": {
+            "type": ["integer", "null"],
+            "description": (
+                "Declared maximum output in tokens — the model's capability, not a "
+                "cap this registry imposes; null means undeclared."
+            ),
+        },
+        "modalities": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+            "description": (
+                "Request modalities the route accepts: "
+                + " / ".join(model_routes.MODALITIES)
+                + ". Declaring `image` is what makes a VLM's vision capability "
+                "visible downstream; null means undeclared (the adapter assumes "
+                "text only)."
+            ),
+        },
+        "reasoning": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "format": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "Thinking wire dialect (pi-ai `compat.thinkingFormat`): "
+                                + " / ".join(model_routes.THINKING_FORMATS)
+                                + ". Only meaningful on an `openai` route; null keeps "
+                                "the adapter's OpenAI-shaped default."
+                            ),
+                        },
+                        "efforts": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Offered reasoning levels, in escalation order: "
+                                + " / ".join(model_routes.THINKING_LEVELS)
+                                + ". `off` may appear but not alone."
+                            ),
+                        },
+                    },
+                },
+                {"type": "null"},
+            ],
+            "description": (
+                "Reasoning declaration — the dialect plus the levels a client may "
+                "select; null means undeclared. Declaring `deepseek` keeps a "
+                "DeepSeek-family gateway's `reasoning_content` out of the assistant "
+                "text instead of leaking the chain of thought into it."
+            ),
+        },
         "health": {
             "anyOf": [_HEALTH_SCHEMA, {"type": "null"}],
             "description": "The last connectivity probe, when one has run",
@@ -218,6 +278,21 @@ _MODELS_SCHEMA = {
             "type": "array",
             "items": {"type": "string"},
             "description": "The model functions an administrator may choose",
+        },
+        "modalities": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "The request modalities a route may declare",
+        },
+        "thinking_formats": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "The reasoning dialects a route may declare",
+        },
+        "thinking_levels": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "The reasoning levels a route may offer, in escalation order",
         },
         "default_paths": {
             "type": "object",
@@ -487,6 +562,12 @@ def upload_tool(form: ToolUploadForm):
         "`asr` / `tts`). A route that names no `kind` falls back to its "
         "protocol default, so the table classifies correctly even for a row "
         "written before the field existed.\n\n"
+        "Each route may also carry **capability metadata** a downstream DSH "
+        "sizes a request with: `context_window` and `max_tokens` (tokens, null = "
+        "undeclared), `modalities` (`text` / `image` / `audio`, null = "
+        "undeclared), and `reasoning` (`format` — the thinking wire dialect — "
+        "plus `efforts`, the offered levels). They are optional; a null/absent "
+        "value means the consumer keeps its own default.\n\n"
         "The raw API key of a route is **never** returned; `has_api_key` and "
         "`api_key_hint` say whether one is stored, and `api_key_source` says how "
         "it is configured (`plaintext` and `unreadable` are the two states worth "
@@ -517,7 +598,13 @@ def model_routes_index():
         "the route whose aliases include `default` as the agent default model. "
         "The plugin selects by `kind` — only `chat` and `completion` routes "
         "become LLM providers, while `embedding`, `rerank`, `ocr`, `asr` and "
-        "`tts` stay registry entries for other consumers.\n\n"
+        "`tts` stay registry entries for other consumers — and maps the "
+        "capability metadata into the provider's model profile: "
+        "`context_window` → `contextWindow`, `max_tokens` → `maxTokens`, "
+        "`modalities` → `input`, `reasoning.format` → `compat.thinkingFormat`, "
+        "`reasoning.efforts` → `reasoningEfforts`. Omitting all of them is why "
+        "every route would otherwise fall back to the adapter's 262,144-token "
+        "context, 32,768-token output and text-only input.\n\n"
         "Deliberately a separate endpoint from the browsing view: the console "
         "must never round-trip a secret, while a downstream client cannot do "
         "anything with a masked one. Guarded by `model:resolve`, which the "

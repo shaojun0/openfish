@@ -198,6 +198,14 @@ class ModelRouteRequest(BaseModel):
 
     ``api_key`` keeps its three-state meaning — omitted/null keeps the stored
     (sealed) value, ``""`` clears it, anything else is validated and sealed.
+
+    The four capability fields below are the metadata a downstream DSH sizes a
+    request with.  ``context_window``/``max_tokens`` are optional token counts;
+    ``modalities`` is a list (or comma-separated string) drawn from
+    ``text``/``image``/``audio``; ``reasoning`` is
+    ``{"format": <thinking dialect>, "efforts": [<level…>]}``.  All four are
+    nullable and an explicit ``null`` clears a stored value, which is why the
+    service reads them by key *presence* rather than with ``.get(default)``.
     """
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
@@ -243,6 +251,41 @@ class ModelRouteRequest(BaseModel):
     path: str | None = Field(default=None, description="Request path; defaults by protocol")
     enabled: bool | None = Field(default=None, description="Disabled routes stay listed but are not served")
     description: str | None = Field(default=None, description="Required on create; shown in the console")
+    context_window: int | None = Field(
+        default=None,
+        description=(
+            "Context window in tokens. Omitted or null means undeclared, and the "
+            "downstream adapter keeps its own default (currently 262,144)."
+        ),
+    )
+    max_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Maximum output in tokens — the model's capability, not a per-request "
+            "cap this registry imposes. Must not exceed `context_window` when both "
+            "are set. Omitted or null means undeclared."
+        ),
+    )
+    modalities: list[str] | str | None = Field(
+        default=None,
+        description=(
+            "Request modalities — `text` / `image` / `audio`. A comma-separated "
+            "string is accepted too. Declaring `image` is what makes a VLM's "
+            "vision capability visible downstream; omitted or empty means "
+            "undeclared (the adapter assumes text)."
+        ),
+    )
+    reasoning: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Reasoning declaration: `format` is the thinking wire dialect "
+            "(`deepseek`, `openai`, `qwen`, …; OpenAI-compatible routes only) and "
+            "`efforts` is the offered level list (`off` / `minimal` / `low` / "
+            "`medium` / `high` / `xhigh` / `max`). Declaring `deepseek` is what "
+            "keeps a DeepSeek-family gateway's reasoning content out of the "
+            "assistant text. Omitted or null means undeclared."
+        ),
+    )
 
 
 class ModelRouteProbeRequest(BaseModel):
