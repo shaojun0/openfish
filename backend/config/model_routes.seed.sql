@@ -18,7 +18,10 @@
 -- Idempotent: every statement is `ON CONFLICT (name) DO NOTHING` (SQLite ≥3.24
 -- and PostgreSQL ≥9.5 both speak it), so re-running never clobbers a route an
 -- administrator has since edited, and `id` is deliberately left to the
--- database — naming it would desync a PostgreSQL sequence.
+-- database — naming it would desync a PostgreSQL sequence.  That also means an
+-- **existing** database keeps its rows as they are: the capability columns
+-- below are added by the boot-time migration, and an administrator who wants
+-- these seeded values fills them in through the `/models` panel.
 --
 -- No secret appears here, and none *can*: a route's upstream key is sealed with
 -- Fernet under MODEL_ROUTE_KEY before it is stored, so the ciphertext of one
@@ -44,52 +47,81 @@
 -- exactly what it means.  There is no separate protocol for a document parser:
 -- MinerU speaks the OpenAI format, so an OCR route is `provider = 'openai'` with
 -- `kind = 'ocr'`.
+--
+-- Each route also declares the **model capability metadata** a downstream DSH
+-- sizes and dispatches a request with:
+--
+--   context_window  INTEGER  context capacity in tokens
+--   max_tokens      INTEGER  output capability in tokens
+--   modalities      JSON     ["text", "image", "audio"] — declaring "image"
+--                            is what makes a VLM's vision capability visible
+--   reasoning       JSON     {"format": <thinking dialect>,
+--                             "efforts": [<levels…>]} — declaring "deepseek" is
+--                            what keeps reasoning_content out of the answer text
+--
+-- NULL means **undeclared** (the adapter keeps its own default), which is why
+-- the two non-chat examples leave most of them out.  The DeepSeek routes carry
+-- the values pi-ai ships for these model ids — 1M-token context, 384k-token
+-- output, image input on flash — but the numbers describe the *gateway* the
+-- route points at: a vLLM server opened with a smaller `--max-model-len` must
+-- lower `context_window` to match, or DSH will over-fill it.
 
 -- The intranet default model: its `aliases` include `default`, which is what a
 -- downstream DSH adopts as the agent default.
 INSERT INTO model_routes
   (name, provider, kind, base_url, path, model, api_key,
-   aliases, enabled, description, created_at, updated_at)
+   aliases, enabled, description, context_window, max_tokens, modalities,
+   reasoning, created_at, updated_at)
 VALUES
   ('deepseek-flash', 'openai', 'chat', 'https://api.deepseek.com',
    '/v1/chat/completions', 'deepseek-flash', '',
    '["flash", "default"]', true,
    '默认对话模型（DeepSeek 官方 API）。DSH 企业内网模式会把默认模型设为该路由。',
+   1000000, 384000, '["text", "image"]',
+   '{"format": "deepseek", "efforts": ["off", "low", "high", "max"]}',
    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 ON CONFLICT (name) DO NOTHING;
 
 -- Long-context / hard-reasoning workhorse.
 INSERT INTO model_routes
   (name, provider, kind, base_url, path, model, api_key,
-   aliases, enabled, description, created_at, updated_at)
+   aliases, enabled, description, context_window, max_tokens, modalities,
+   reasoning, created_at, updated_at)
 VALUES
   ('deepseek-v4-pro', 'openai', 'chat', 'https://api.deepseek.com',
    '/v1/chat/completions', 'deepseek-v4-pro', '',
    '["pro"]', true,
    '长上下文 / 复杂推理主力模型。',
+   1000000, 384000, '["text"]',
+   '{"format": "deepseek", "efforts": ["off", "high", "max"]}',
    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 ON CONFLICT (name) DO NOTHING;
 
 -- Disabled examples, kept as templates: one non-chat kind (never registered as
--- an LLM provider downstream) and one non-chat wire format.
+-- an LLM provider downstream) and one non-chat wire format.  Neither declares
+-- reasoning — an embedding endpoint has no output tokens to select.
 INSERT INTO model_routes
   (name, provider, kind, base_url, path, model, api_key,
-   aliases, enabled, description, created_at, updated_at)
+   aliases, enabled, description, context_window, max_tokens, modalities,
+   reasoning, created_at, updated_at)
 VALUES
   ('bge-m3-embedding', 'openai', 'embedding', 'http://10.0.0.11:8002',
    '/v1/embeddings', 'bge-m3', '',
    '["embedding"]', false,
    '向量化模型示例，尚未上线（示例：enabled=false，下游 DSH 会跳过）。注意 kind=embedding：它不是对话模型，DSH 不会把它注册成 LLM provider。',
+   8192, NULL, '["text"]', NULL,
    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 ON CONFLICT (name) DO NOTHING;
 
 INSERT INTO model_routes
   (name, provider, kind, base_url, path, model, api_key,
-   aliases, enabled, description, created_at, updated_at)
+   aliases, enabled, description, context_window, max_tokens, modalities,
+   reasoning, created_at, updated_at)
 VALUES
   ('mineru-ocr', 'openai', 'ocr', 'http://10.0.0.12:8000',
    '/v1/chat/completions', 'mineru', '',
    '["ocr"]', false,
    '文档解析 / OCR 示例，尚未上线。MinerU 走 OpenAI 格式，因此 provider=openai、kind=ocr；path 按该服务的 OpenAI 兼容端点填写。',
+   NULL, NULL, '["text", "image"]', NULL,
    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 ON CONFLICT (name) DO NOTHING;

@@ -45,10 +45,20 @@ Two representation choices worth stating, because both are deliberate:
     operator can see the outstanding work, and
     :mod:`models.model_route_migrate` is how it is re-sealed.
 
-``aliases`` / ``health``
+``aliases`` / ``health`` / ``modalities`` / ``reasoning``
     TEXT holding JSON, not SQLAlchemy's ``JSON`` type: the same DDL then works
     on SQLite and PostgreSQL with no dialect branch, which is the same trade
     ``models.agent_hub`` makes for ``RepoIssue.labels`` and ``AgentTask.payload``.
+
+The last four columns are the **model capability metadata** a downstream DSH
+needs to size and dispatch a request: without them its pi-ai adapter falls back
+to 262,144-token context, 32,768-token output and text-only input, which is
+wrong the moment a deployment serves a 32k model or a VLM.  All four are
+nullable and ``NULL`` means **not declared**, not ``text``/``unknown``: the
+registry states only what the operator knows and the consumer keeps its own
+default for the rest.  ``modalities`` / ``reasoning`` hold JSON so one column
+can carry a set of values — a tuple of modalities, or a reasoning dialect beside
+its levels.
 """
 
 from __future__ import annotations
@@ -92,6 +102,45 @@ KINDS: tuple[str, ...] = (
     "ocr",         # 文档解析 / OCR
     "asr",         # 语音转文字
     "tts",         # 文字转语音
+)
+
+#: Request modalities a route may declare.  ``text`` / ``image`` are what the
+#: DSH pi-ai adapter can attach and is why a VLM must declare ``image``;
+#: ``audio`` is registry-only (an ``asr`` / ``tts`` route) — the adapter has no
+#: audio attachment today, so a consumer that cannot speak audio ignores it.
+MODALITIES: tuple[str, ...] = ("text", "image", "audio")
+
+#: Reasoning-dispatch dialects, mirroring the pi-ai ``compat.thinkingFormat``
+#: values a provider profile may name.  ``openai`` is the default an OpenAI-
+#: compatible endpoint gets when nothing is declared, so a DeepSeek-family model
+#: whose gateway does not use that shape has to say ``deepseek`` — otherwise its
+#: ``reasoning_content`` is parsed as ordinary assistant text.
+THINKING_FORMATS: tuple[str, ...] = (
+    "openai",
+    "deepseek",
+    "openrouter",
+    "together",
+    "baseten",
+    "zai",
+    "qwen",
+    "chat-template",
+    "qwen-chat-template",
+    "string-thinking",
+    "ant-ling",
+)
+
+#: Selectable reasoning levels, in pi-ai's escalation order.  ``off`` is a level
+#: like any other: declaring it (with no wire spelling, see
+#: :mod:`services.model_routes`) is what makes a consumer send an explicit
+#: "thinking disabled" request instead of omitting the parameter.
+THINKING_LEVELS: tuple[str, ...] = (
+    "off",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
 )
 
 #: ``name`` / ``description`` ceilings — generous, but bounded so one edit
@@ -147,6 +196,21 @@ class ModelRoute(Base):
     enabled: Mapped[bool] = Column(Boolean, nullable=False, default=True)
     description: Mapped[str] = Column(String(MAX_DESCRIPTION), nullable=False, default="")
 
+    # ── Model capability metadata (what a downstream DSH sizes a request with) ──
+    # Nullable on purpose — ``NULL`` is "not declared" and a consumer keeps its
+    # own default.  A row written by hand-written SQL therefore stays valid; it
+    # just states less.  ``services.model_routes`` validates every write.
+    #: Declared context window, in tokens.
+    context_window: Mapped[int | None] = Column(Integer, nullable=True)
+    #: Declared maximum output, in tokens (the model's capability, not a cap
+    #: this registry imposes on a request).
+    max_tokens: Mapped[int | None] = Column(Integer, nullable=True)
+    #: JSON array of :data:`MODALITIES`; absent means "undeclared".
+    modalities: Mapped[str | None] = Column(Text, nullable=True)
+    #: JSON object ``{"format": str | None, "efforts": [THINKING_LEVELS…]}``;
+    #: absent means "undeclared".
+    reasoning: Mapped[str | None] = Column(Text, nullable=True)
+
     # ── Last connectivity probe ─────────────────────────────────────
     # In this table rather than beside it: a probe belongs to exactly one route,
     # so a row carries its own answer, a rename keeps it and a delete takes it
@@ -175,6 +239,42 @@ class ModelRoute(Base):
         """Store the aliases as a JSON array."""
         self.aliases = json.dumps([str(value) for value in values], ensure_ascii=False)
 
+    def modality_list(self) -> list[str]:
+        """The declared modalities; a corrupt or absent value degrades to ``[]``."""
+        if not self.modalities:
+            return []
+        try:
+            parsed = json.loads(self.modalities)
+        except ValueError:
+            return []
+        return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+    def set_modalities(self, values: list[str] | None) -> None:
+        """Store the modalities as a JSON array; an empty list clears the column."""
+        self.modalities = (
+            json.dumps([str(value) for value in values], ensure_ascii=False)
+            if values
+            else None
+        )
+
+    def reasoning_dict(self) -> dict[str, Any] | None:
+        """The declared reasoning dialect and levels; ``None`` when undeclared."""
+        if not self.reasoning:
+            return None
+        try:
+            parsed = json.loads(self.reasoning)
+        except ValueError:
+            return None
+        return dict(parsed) if isinstance(parsed, dict) else None
+
+    def set_reasoning(self, reasoning: Mapping[str, Any] | None) -> None:
+        """Store the reasoning declaration; ``None`` clears the column."""
+        self.reasoning = (
+            None
+            if reasoning is None
+            else json.dumps(dict(reasoning), ensure_ascii=False)
+        )
+
     def health_dict(self) -> dict[str, Any] | None:
         """The remembered probe result, or ``None`` when one never ran."""
         if not self.health:
@@ -197,6 +297,9 @@ __all__ = [
     "KINDS",
     "MAX_DESCRIPTION",
     "MAX_NAME",
+    "MODALITIES",
     "PROVIDERS",
+    "THINKING_FORMATS",
+    "THINKING_LEVELS",
     "ModelRoute",
 ]

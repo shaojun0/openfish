@@ -255,6 +255,21 @@ export interface ModelRouteHealth {
   checked_at: string | null
 }
 
+/**
+ * A route's reasoning declaration — the thinking wire dialect plus the levels a
+ * client may select.
+ *
+ * `format` names the endpoint's thinking parameter shape (`deepseek`, `openai`,
+ * `qwen`, …) and is only meaningful on an OpenAI-compatible route; `null` keeps
+ * the adapter's default. `efforts` is the offered level list, in escalation
+ * order; `off` may appear but not on its own. A route that declares none of
+ * this has `reasoning: null` and keeps the adapter's own capability.
+ */
+export interface ModelRouteReasoning {
+  format: string | null
+  efforts: string[]
+}
+
 export interface ModelRoute {
   name: string
   /**
@@ -279,6 +294,17 @@ export interface ModelRoute {
   path: string
   enabled: boolean
   description: string | null
+  /**
+   * Capability metadata a downstream DSH sizes a request with. `null` means
+   * undeclared — the consumer keeps its own default (262,144-token context,
+   * 32,768-token output, text-only input).
+   */
+  context_window: number | null
+  max_tokens: number | null
+  /** Request modalities: `text` / `image` / `audio`; null means undeclared. */
+  modalities: string[] | null
+  /** Thinking dialect + selectable levels; null means undeclared. */
+  reasoning: ModelRouteReasoning | null
   /** The last probe, when one has run. */
   health: ModelRouteHealth | null
 }
@@ -292,6 +318,12 @@ export interface ModelRoutes {
   providers: string[]
   /** The model functions an administrator may choose. */
   kinds: string[]
+  /** The request modalities an administrator may choose. */
+  modalities: string[]
+  /** The reasoning dialects an administrator may declare. */
+  thinking_formats: string[]
+  /** The reasoning levels an administrator may offer, in escalation order. */
+  thinking_levels: string[]
   /** Provider -> endpoint path used when a route omits one. */
   default_paths: Record<string, string>
   routes: ModelRoute[]
@@ -311,6 +343,13 @@ export interface ModelRoutePayload {
   aliases?: string[]
   path?: string
   enabled?: boolean
+  /** Token capacities; `null` clears a stored value. */
+  context_window?: number | null
+  max_tokens?: number | null
+  /** Omit to keep the stored set, `null` to clear it. */
+  modalities?: string[] | null
+  /** Omit to keep the stored declaration, `null` to clear it. */
+  reasoning?: ModelRouteReasoning | null
 }
 
 /** One entry of a flat artifact catalog (docker images, .deb packages, …). */

@@ -22,7 +22,8 @@ the codebase.
   pull endpoint, an **apt repository** (flat local index plus a mirror proxy), a
   downloadable **tools** directory (`tools/<category>/`) and a
   **model-routing** table for downstream DSH (the `model_routes` database
-  table, seeded from `backend/config/model_routes.seed.sql`). npm,
+  table, seeded from `backend/config/model_routes.seed.sql`, including each
+  route's context-window / output / modality / reasoning metadata). npm,
   Docker and Debian are read-through proxies: the local directory is the first
   source, an optional upstream mirror is fetched on demand and cached — see
   [Artifact hub](#artifact-hub-tools--npm--docker--debian--model-routing).
@@ -690,6 +691,32 @@ A route also carries a `base_url`, an optional `api_key`, a `path`, an optional
 API key may be empty. The raw key is **never returned by the API** — the SPA
 sees `has_api_key` and a last-four hint, and an edit that leaves the field blank
 keeps the stored key (an empty value clears it).
+
+A route may additionally declare the **capability metadata** a downstream DSH
+sizes and dispatches a request with. All of it is optional, and an unset value
+means **undeclared** — the adapter keeps its own default rather than the panel
+guessing:
+
+* `context_window` / `max_tokens` — the endpoint's real context and output
+  capacities in tokens. Unset, pi-ai assumes 262,144 / 32,768; declare them when
+  the gateway serves a 32k/64k model (or a larger one), otherwise DSH sizes a
+  request the endpoint cannot take, or compresses history it did not have to.
+* `modalities` — `text` / `image` / `audio`. Declaring `image` is what makes a
+  VLM's vision capability visible downstream; unset, DSH treats the route as
+  text-only and never attaches an image to it.
+* `reasoning` — `{"format": "deepseek", "efforts": ["off", "low", "high", "max"]}`:
+  the thinking wire dialect (pi-ai's `compat.thinkingFormat`) plus the levels a
+  client may select. Declaring `deepseek` is what keeps a DeepSeek-family
+  gateway's `reasoning_content` parsed as a thinking block instead of leaking the
+  chain of thought into the assistant's text. The dialect is OpenAI-compatible
+  only; an Anthropic route carries native thinking blocks and declares levels
+  without a format. `off` may appear in `efforts`, but not alone.
+
+The panel edits all of it in the same inline row and shows it as compact tags;
+`GET /api/v1/models/resolved` publishes it for the DSH plugin, which maps it onto
+the pi-ai model profile (`contextWindow`, `maxTokens`, `input`,
+`reasoningEfforts`, `compat.thinkingFormat`). An upgraded database gets the four
+columns added by the boot-time migration, with `NULL` for every existing row.
 
 **The upstream key is sealed at rest, and the table is never trusted with a
 plaintext one.** Before anything is written, the key is encrypted with Fernet

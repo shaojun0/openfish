@@ -79,11 +79,14 @@ from sqlalchemy.orm import Session
 from config import settings
 from config.keys import KeysConfig
 from models.model_route import (
+    API_KEY_PREFIX,
     KINDS,
     MAX_DESCRIPTION,
     MAX_NAME,
+    MODALITIES,
     PROVIDERS,
-    API_KEY_PREFIX,
+    THINKING_FORMATS,
+    THINKING_LEVELS,
     ModelRoute,
 )
 from services.format import utc_now_iso
@@ -114,6 +117,13 @@ DEFAULT_KINDS: dict[str, str] = {
     "openai": "chat",
     "anthropic": "chat",
 }
+
+#: Ceilings on the declared token capacities.  Generous on purpose — a
+#: 1,000,000-token context and a 384,000-token output are real numbers today —
+#: but bounded, so a slipped digit is refused here instead of being published to
+#: every downstream consumer as the size of the model.
+MAX_CONTEXT_WINDOW = 10_000_000
+MAX_OUTPUT_TOKENS = 4_000_000
 
 #: Spellings seen in hand-written input that map onto a canonical provider.
 PROVIDER_ALIASES: dict[str, str] = {
@@ -322,6 +332,150 @@ def normalize_aliases(value: Any) -> list[str]:
     return out
 
 
+# ── Capability metadata (what a downstream DSH sizes a request with) ──
+# Optional by construction: ``None`` means "not declared" and the consumer keeps
+# its own default.  Every value that *is* declared is checked against the closed
+# vocabulary the model declares, so a typo is a 400 here rather than a row no
+# consumer can classify.
+
+def _positive_token_count(value: Any, *, ceiling: int, label: str) -> int | None:
+    """One optional token capacity: blank means undeclared, else 1..*ceiling*.
+
+    Deliberately strict about the shape — a JSON number or a decimal string, not
+    a float, a ``"64k"`` or a boolean.  Accepting a lossy spelling here would
+    publish a capacity the operator did not mean, and every consumer sizes its
+    requests from it.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{label} 必须是正整数")
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, str) and value.strip().isdigit():
+        number = int(value.strip())
+    else:
+        raise ValueError(f"{label} 必须是正整数")
+    if not 1 <= number <= ceiling:
+        raise ValueError(f"{label} 必须在 1..{ceiling} 之间")
+    return number
+
+
+def normalize_context_window(value: Any) -> int | None:
+    """Validate a declared context window, if any."""
+    return _positive_token_count(value, ceiling=MAX_CONTEXT_WINDOW, label="context_window")
+
+
+def normalize_max_tokens(value: Any) -> int | None:
+    """Validate a declared maximum output size, if any."""
+    return _positive_token_count(value, ceiling=MAX_OUTPUT_TOKENS, label="max_tokens")
+
+
+def normalize_modalities(value: Any) -> list[str] | None:
+    """Accept a list or comma-separated string of modalities; canonical order.
+
+    An empty/blank value means "undeclared" (``None``), **not** an empty set: the
+    table should not pretend to know a route accepts nothing.  Unknown spellings
+    are refused here so the published value is always one a consumer can switch
+    on — every element comes from :data:`models.model_route.MODALITIES`.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        items: list[Any] = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        items = list(value)
+    else:
+        raise ValueError("modalities 必须是字符串或字符串数组")
+    seen: set[str] = set()
+    for item in items:
+        text = str(item or "").strip().lower()
+        if not text:
+            continue
+        if text not in MODALITIES:
+            choices = " / ".join(MODALITIES)
+            raise ValueError(f"不支持的模态 {text}，可选：{choices}")
+        seen.add(text)
+    return [modality for modality in MODALITIES if modality in seen] or None
+
+
+def _normalize_thinking_levels(value: Any) -> list[str]:
+    """Accept a list or comma-separated string of levels; canonical order.
+
+    A blank value is an empty list (the caller decides whether that is legal),
+    and an unknown level is refused with the full vocabulary in the message —
+    the same treatment ``normalize_kind`` gives a misspelled function.
+    """
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        items: list[Any] = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        items = list(value)
+    else:
+        raise ValueError("reasoning.efforts 必须是字符串数组")
+    seen: set[str] = set()
+    for item in items:
+        text = str(item or "").strip().lower()
+        if not text:
+            continue
+        if text not in THINKING_LEVELS:
+            choices = " / ".join(THINKING_LEVELS)
+            raise ValueError(f"不支持的思维链档位 {text}，可选：{choices}")
+        seen.add(text)
+    return [level for level in THINKING_LEVELS if level in seen]
+
+
+def normalize_reasoning(value: Any, provider: str) -> dict[str, Any] | None:
+    """Validate ``{"format": dialect, "efforts": [level…]}``; blank clears it.
+
+    ``format`` names the wire dialect a thinking-capable endpoint expects and is
+    what keeps a DeepSeek-family gateway's ``reasoning_content`` parsed as a
+    thinking block instead of leaking into the assistant's text.  It is optional
+    (pi-ai then keeps its OpenAI-shaped default) but only meaningful on an
+    ``openai`` route: the Anthropic protocol carries native thinking blocks and
+    its pi-ai profile has no ``thinkingFormat`` switch, so declaring one here
+    would be silently ignored downstream.
+
+    ``efforts`` is required when the field is declared, because a dialect with no
+    selectable level describes a reasoning model a client cannot turn on — the
+    DSH adapter rejects exactly that.  ``off`` is a valid level and must not be
+    the *only* one: it says "this model can be told not to think", not "this
+    model has nothing to select".
+    """
+    if value is None or value == "" or value == {}:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("reasoning 必须是 JSON 对象")
+    unknown = set(value) - {"format", "efforts"}
+    if unknown:
+        raise ValueError(f"reasoning 含未知字段：{', '.join(sorted(str(key) for key in unknown))}")
+    raw_format = value.get("format")
+    dialect = str(raw_format or "").strip().lower() or None
+    if dialect is not None and dialect not in THINKING_FORMATS:
+        choices = " / ".join(THINKING_FORMATS)
+        raise ValueError(f"不支持的思维链方言 {dialect}，可选：{choices}")
+    if dialect is not None and provider != "openai":
+        raise ValueError("思维链方言只适用于 OpenAI 兼容格式；Anthropic 使用原生 thinking 块")
+    efforts = _normalize_thinking_levels(value.get("efforts"))
+    if not efforts:
+        raise ValueError("reasoning.efforts 不能为空；不声明思维链请留空整个 reasoning 字段")
+    if not any(level != "off" for level in efforts):
+        raise ValueError("reasoning.efforts 至少要有一个 off 以外的档位")
+    return {"format": dialect, "efforts": efforts}
+
+
+def _payload_field(payload: Mapping[str, Any], existing: Mapping[str, Any], key: str) -> Any:
+    """A body field when present (even ``null``), else the stored value.
+
+    The write endpoints bind the body with ``exclude_unset=True``, so an absent
+    key really is absent — while an explicit ``null`` means "clear this optional
+    value".  ``payload.get(key, existing…)`` cannot tell the two apart, and for
+    the capability metadata that difference is the whole edit semantics.
+    """
+    return payload[key] if key in payload else existing.get(key)
+
+
 def normalize_enabled(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -490,6 +644,12 @@ def build_route(
     existing = existing or {}
 
     provider = normalize_provider(payload.get("provider", existing.get("provider")))
+    context_window = normalize_context_window(
+        _payload_field(payload, existing, "context_window")
+    )
+    max_tokens = normalize_max_tokens(_payload_field(payload, existing, "max_tokens"))
+    if context_window is not None and max_tokens is not None and max_tokens > context_window:
+        raise ValueError("max_tokens 不能大于 context_window")
     route: dict[str, Any] = {
         "name": normalize_name(payload["name"] if "name" in payload else existing.get("name")),
         "provider": provider,
@@ -503,8 +663,51 @@ def build_route(
         "description": normalize_description(
             payload.get("description", existing.get("description"))
         ),
+        "context_window": context_window,
+        "max_tokens": max_tokens,
+        "modalities": normalize_modalities(
+            _payload_field(payload, existing, "modalities")
+        ),
+        "reasoning": normalize_reasoning(
+            _payload_field(payload, existing, "reasoning"), provider
+        ),
     }
     return route
+
+
+def capability_fields(item: Mapping[str, Any]) -> dict[str, Any]:
+    """The capability metadata as the API publishes it — never raising.
+
+    This is the read path, so a value that is corrupt, hand-written straight into
+    the database or simply older than the current vocabulary degrades to ``None``
+    ("not declared") instead of failing the whole table: one bad row must not
+    hide every other route.  The write path (:func:`build_route`) is where an
+    invalid declaration is refused, so in practice these values are already
+    canonical — re-deriving them here keeps that a property of the reader, not a
+    promise made by every writer.
+    """
+    provider = canonical_provider(item.get("provider"))
+
+    def published_int(value: Any, ceiling: int) -> int | None:
+        try:
+            return _positive_token_count(value, ceiling=ceiling, label="metadata")
+        except ValueError:
+            return None
+
+    try:
+        modalities = normalize_modalities(item.get("modalities"))
+    except ValueError:
+        modalities = None
+    try:
+        reasoning = normalize_reasoning(item.get("reasoning"), provider)
+    except ValueError:
+        reasoning = None
+    return {
+        "context_window": published_int(item.get("context_window"), MAX_CONTEXT_WINDOW),
+        "max_tokens": published_int(item.get("max_tokens"), MAX_OUTPUT_TOKENS),
+        "modalities": modalities,
+        "reasoning": reasoning,
+    }
 
 
 def public_route(
@@ -535,6 +738,7 @@ def public_route(
         "path": item.get("path") or normalize_path("", canonical_provider(item.get("provider"))),
         "enabled": item.get("enabled", True) is not False,
         "description": item.get("description"),
+        **capability_fields(item),
         "health": dict(health) if health else None,
     }
 
@@ -557,6 +761,10 @@ def _entry(row: ModelRoute) -> dict[str, Any]:
         "path": row.path,
         "enabled": bool(row.enabled),
         "description": row.description,
+        "context_window": row.context_window,
+        "max_tokens": row.max_tokens,
+        "modalities": row.modality_list(),
+        "reasoning": row.reasoning_dict(),
     }
 
 
@@ -572,6 +780,10 @@ def _apply(row: ModelRoute, entry: Mapping[str, Any]) -> None:
     row.set_aliases(entry["aliases"])
     row.enabled = bool(entry["enabled"])
     row.description = str(entry["description"])
+    row.context_window = entry["context_window"]
+    row.max_tokens = entry["max_tokens"]
+    row.set_modalities(entry["modalities"])
+    row.set_reasoning(entry["reasoning"])
 
 
 def _rows(session: Session) -> list[ModelRoute]:
@@ -592,6 +804,9 @@ def _payload(*, routes: list[dict[str, Any]]) -> dict[str, Any]:
         "version": PAYLOAD_VERSION,
         "providers": list(PROVIDERS),
         "kinds": list(KINDS),
+        "modalities": list(MODALITIES),
+        "thinking_formats": list(THINKING_FORMATS),
+        "thinking_levels": list(THINKING_LEVELS),
         "default_paths": dict(DEFAULT_PATHS),
         "routes": routes,
     }
@@ -643,6 +858,7 @@ def resolve(session: Session) -> dict[str, Any]:
         route["has_api_key"] = bool(api_key)
         route["aliases"] = normalize_aliases(entry["aliases"])
         route["path"] = entry["path"] or normalize_path("", route["provider"])
+        route.update(capability_fields(entry))
         route["health"] = row.health_dict()
         try:
             route["endpoint_url"] = endpoint_url(route)
@@ -989,8 +1205,11 @@ __all__ = [
     "DEFAULT_PATHS",
     "KINDS",
     "KEY_SOURCES",
+    "MAX_CONTEXT_WINDOW",
     "MAX_DESCRIPTION",
     "MAX_NAME",
+    "MAX_OUTPUT_TOKENS",
+    "MODALITIES",
     "MODEL_ROUTE_KEY_ENV",
     "MODEL_ROUTE_KEY_HELP",
     "PAYLOAD_VERSION",
@@ -998,12 +1217,15 @@ __all__ = [
     "PROVIDER_ALIASES",
     "RESERVED_NAMES",
     "SOURCE",
+    "THINKING_FORMATS",
+    "THINKING_LEVELS",
     "DuplicateRouteError",
     "ModelRouteError",
     "RouteNotFoundError",
     "api_key_sealer",
     "build_route",
     "canonical_provider",
+    "capability_fields",
     "create",
     "default_kind",
     "delete",
@@ -1017,12 +1239,16 @@ __all__ = [
     "normalize_aliases",
     "normalize_api_key",
     "normalize_base_url",
+    "normalize_context_window",
     "normalize_description",
     "normalize_enabled",
     "normalize_kind",
+    "normalize_max_tokens",
+    "normalize_modalities",
     "normalize_name",
     "normalize_path",
     "normalize_provider",
+    "normalize_reasoning",
     "probe",
     "probe_and_record",
     "probe_client",
