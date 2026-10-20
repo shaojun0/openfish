@@ -136,6 +136,90 @@ function kindOf(route) {
   return KIND_BY_PROVIDER[(route && route.provider) || ''] || 'chat'
 }
 
+/**
+ * 平台路由的**能力元数据** → `llm-pi-ai` 模型条目。
+ *
+ * `GET /api/v1/models/resolved` 为每条路由带上 `context_window` / `max_tokens`
+ * / `modalities` / `reasoning`（声明式，缺省 = null）。这里按 pi-ai 的字段名
+ * 映射：`contextWindow` / `maxTokens` / `input` / `reasoningEfforts` +
+ * `compat.thinkingFormat`。
+ *
+ * 两个方向的约束：
+ *
+ *  * **只写声明过的字段**。null 表示"平台不知道"，不是 0 或 `["text"]`；让
+ *    pi-ai 保留自己的默认值（262144 / 32768 / text）比由插件猜一个数字更安全。
+ *  * 平台响应对本插件是外部输入。一个畸形的 token 数或未知档位不该让
+ *    `assertServiceable` 把整条 provider 判死，所以先做形状检查。
+ */
+const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+/** pi-ai 模型能接受的输入模态；`audio` 只是平台侧的登记信息，这里不放行。 */
+const MODEL_INPUTS = ['text', 'image']
+
+/** 平台声明的 token 数只有当它是正整数时才可信。 */
+function positiveToken(value) {
+  return Number.isInteger(value) && value > 0 ? value : undefined
+}
+
+/** 已声明的输入模态，按 pi-ai 的固定顺序；没有可用项时不返回字段。 */
+function declaredInput(modalities) {
+  if (!Array.isArray(modalities)) return undefined
+  const declared = MODEL_INPUTS.filter((modality) => modalities.includes(modality))
+  return declared.length ? declared : undefined
+}
+
+/**
+ * 平台 `reasoning` → `{ efforts, compat }`；没有可用的档位时返回 null。
+ *
+ * `off` 映射成 `null`：pi-ai 的 `thinkingLevelMap` 里这是"支持关闭，但请求里
+ * 不发送 thinking 参数"的唯一合法写法，其余档位原样作为 wire 值（DeepSeek /
+ * OpenAI 系方言的档位名就是 wire 值）。
+ *
+ * `compat.thinkingFormat` 只写给 `openai-completions`：Anthropic 的 compat 类型
+ * 没有这个字段，它用原生 thinking 块，写了会被 `assertServiceable` 拒绝。
+ */
+function reasoningProfile(reasoning, api) {
+  if (!reasoning || typeof reasoning !== 'object' || Array.isArray(reasoning)) return null
+  const declared = Array.isArray(reasoning.efforts) ? reasoning.efforts : []
+  const efforts = {}
+  for (const level of THINKING_LEVELS) {
+    if (!declared.includes(level)) continue
+    efforts[level] = level === 'off' ? null : level
+  }
+  if (!Object.keys(efforts).some((level) => level !== 'off')) return null
+  const format =
+    api === 'openai-completions' && typeof reasoning.format === 'string' && reasoning.format.trim()
+      ? reasoning.format.trim()
+      : null
+  return { efforts, thinkingFormat: format }
+}
+
+/**
+ * One openfish route as the model entry its `llm-pi-ai` provider lists.
+ * @param {object} route - a route from `GET /api/v1/models/resolved`.
+ * @returns {object} `llm-pi-ai`-shaped model entry (`id`, `name`, and any
+ *   capability metadata the route actually declares).
+ */
+export function modelEntryFor(route) {
+  const modelId = route.model || route.name
+  const entry = {
+    id: modelId,
+    name: route.description ? `${modelId}（${route.description}）` : modelId,
+  }
+  const contextWindow = positiveToken(route.context_window)
+  if (contextWindow !== undefined) entry.contextWindow = contextWindow
+  const maxTokens = positiveToken(route.max_tokens)
+  if (maxTokens !== undefined) entry.maxTokens = maxTokens
+  const input = declaredInput(route.modalities)
+  if (input) entry.input = input
+  const reasoning = reasoningProfile(route.reasoning, API_BY_PROVIDER[route.provider])
+  if (reasoning) {
+    entry.reasoningEfforts = reasoning.efforts
+    if (reasoning.thinkingFormat) entry.compat = { thinkingFormat: reasoning.thinkingFormat }
+  }
+  return entry
+}
+
 const JSON_HEADERS = {
   'Content-Type': 'application/json; charset=utf-8',
   'Cache-Control': 'no-store',
@@ -639,12 +723,13 @@ export function apply(ctx, config) {
       const api = API_BY_PROVIDER[route.provider]
       if (!api) continue // mineru 等非对话协议不注册成 LLM provider
       const routeKey = `${PROVIDER_PREFIX}${slugify(route.name)}`
-      const modelId = route.model || route.name
       const profile = {
         displayName: `企业内网 · ${route.name}`,
         api,
         baseURL: route.base_url,
-        models: [{ id: modelId, name: route.description ? `${modelId}（${route.description}）` : modelId }],
+        // 能力元数据（上下文 / 输出 / 模态 / 思维链）只有平台声明了才写；
+        // 没声明就让 pi-ai 用自己的默认值，见 modelEntryFor。
+        models: [modelEntryFor(route)],
       }
       if (route.api_key) {
         const ref = refForRoute(route.name)

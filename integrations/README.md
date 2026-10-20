@@ -14,8 +14,11 @@ DSH（DeepSeek Harness）的**企业内网模式**插件。它让 DSH：
    收下**，不需要复制粘贴。
 2. **自动接入模型路由的默认模型**：读 `GET /api/v1/models/resolved`，为每条启用
    的**对话 / 补全**路由（`kind` 为 `chat` / `completion`）注册一个 `llm-pi-ai`
-   provider，并把 `agent-default-model` 指向 `aliases` 含 `default` 的那条。其余
-   功能（embedding / rerank / ocr / asr / tts）只在面板里展示。
+   provider，并把 `agent-default-model` 指向 `aliases` 含 `default` 的那条。平台
+   声明的**模型能力元数据**（`context_window` / `max_tokens` / `modalities` /
+   `reasoning`）会映射进 `models[]` 的 `contextWindow` / `maxTokens` / `input` /
+   `reasoningEfforts` + `compat.thinkingFormat`，未声明的字段不写、由 pi-ai 用
+   自己的默认值。其余功能（embedding / rerank / ocr / asr / tts）只在面板里展示。
 3. **切换内网包源**：pip / npm / apt / docker / nvm 的配置一次写好。
 4. **接上工具与文档目录**：面板里列出 `/api/v1/tools`、`/api/v1/docs`。
 5. **可以干净卸载**：面板「完全还原」会注销 provider、还原默认模型、删除平台
