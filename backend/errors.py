@@ -18,7 +18,7 @@ class PackageNotFoundError(PypiError):
 class UploadConflictError(PypiError):
     def __init__(self, filename: str) -> None:
         super().__init__(
-            "Package already exists (set overwrite=1 to allow)",
+            "Package already exists (set STORAGE__ON_DUPLICATE=overwrite to allow)",
             status_code=409,
         )
 
@@ -27,7 +27,7 @@ class PublishConflictError(PypiError):
     """409 for an npm re-publish of an immutable version.
 
     Separate from :class:`UploadConflictError` because that message talks about
-    twine's ``overwrite=1`` form field, which no npm client sends.
+    the PyPI upload policy switch, which no npm client sends.
     """
 
     def __init__(self, name: str, version: str) -> None:

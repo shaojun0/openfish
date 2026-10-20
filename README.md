@@ -281,7 +281,7 @@ Templates are provided at `backend/.env.example` (local development) and
 | `DATABASE_URL`          | *(empty)* = SQLite at `API_KEYS_FILE` | SQLAlchemy URL for users / RBAC / API keys / statistics. Set to `postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host:5432/openfish` (password from the environment, never the file) to run on PostgreSQL. A bare `postgresql://` is upgraded to the bundled psycopg driver; an explicit `+psycopg2`/`+pg8000` is respected |
 | `API_KEYS_FILE`         | `<backend>/data/cpypiserver.db` | SQLite database for API keys and stats — used only while `DATABASE_URL` is empty. The Compose topology overrides it to `/app/data/cpypiserver.db`, i.e. `docker/data/` |
 | `FRONTEND_DIST_DIR`     | *(empty)* = `<backend>/static/dist` | Directory holding the built SPA for Flask to serve. In the split Docker deployment the `frontend` container serves it instead, so this stays empty |
-| `STORAGE__OVERWRITE`    | `false`                | Allow re-uploading an existing filename            |
+| `STORAGE__ON_DUPLICATE` | `conflict`            | What an upload whose filename already exists does, in one of three modes: `conflict` — refuse it (`400` + "already exists" for twine, `409` for every other client); `overwrite` — replace the stored file (the old `STORAGE__OVERWRITE=true`); `skip` — answer `200 Success` without writing, never replacing the file (the old `STORAGE__SKIP_EXISTING=true`, and the server-side replacement for `twine upload --skip-existing`, which twine 6.2.0 removed for indexes other than PyPI/TestPyPI — see [Uploading with twine ≥ 6.2.0](#uploading-with-twine--620)). The deprecated `STORAGE__OVERWRITE` / `STORAGE__SKIP_EXISTING=true` are still folded into the mode |
 | `MAX_CONTENT_LENGTH`    | `104857600` (100 MiB)  | Maximum upload size                                |
 | `TOOLS_DIR`             | `<project>/docker/tools` | Tools catalog root — each sub-directory is a category |
 | `NPM_DIR`               | `<project>/docker/npm` | Local npm catalog (`*.tgz`; its overlay metadata is rows in `catalog_entries`)       |
@@ -545,6 +545,49 @@ start), `GUARDDOG_CACHE_DIR` (`data/guarddog`).
 > skips — the same fail-open behaviour as an unset `CLAMAV_HOST` — while the
 > Docker image and CI (Linux) always have it.
 
+### Uploading with twine ≥ 6.2.0
+
+twine 6.2.0 removed `--skip-existing` for every index that is not PyPI or
+TestPyPI. It rejects the flag **client-side**, before a single request is sent:
+
+```
+UnsupportedConfiguration: The configured repository '…' does not have support
+for the following features: --skip-existing and is an unsupported configuration
+```
+
+The server cannot intercept that check, so the equivalent has to live here.
+Set `STORAGE__ON_DUPLICATE=skip` (Compose: `ON_DUPLICATE=skip` in
+`docker/.env`) and drop the flag from the publish command:
+
+```bash
+# once: ON_DUPLICATE=skip in docker/.env, then docker compose up -d
+twine upload --repository-url https://<server>/ \
+  --username __token__ --password "$CPYPI_API_KEY" dist/*
+```
+
+An upload whose filename is already stored now answers `200 Success` without
+reading or replacing the stored file — the per-file `dist/*` loop therefore
+becomes idempotent, which is what `--skip-existing` was used for. A new
+filename is stored as usual.
+
+`skip` is one of the three values of `STORAGE__ON_DUPLICATE`; the other two are
+`conflict` (the default, and the historical answer when neither old switch was
+on) and `overwrite` (replace the stored file — also the switch the npm / tools /
+docker / debian catalog uploads read). The rule is exactly one mode per
+deployment, so "both switches on" no longer exists as an ambiguous state. A
+duplicate in `skip` mode leaves the historical answers `400 Bad Request` with
+"already exists" for twine (the text twine ≤ 6.1 matched to implement
+`--skip-existing` against a self-hosted index, and what pypi.org returns) and
+`409 Conflict` for every other client — unchanged from before this setting
+existed.
+
+The other twine 6.2.0/7.0.0 removals need nothing from this server: the MD5
+digest form field is gone (the server hashes SHA-256 itself while streaming and
+never required MD5), the "Nexus/Artifactory/GitLab response text" heuristics are
+gone (they were client-side matches against the `400`/`409` above), and a
+Metadata-Version 2.5 wheel is accepted unchanged because only the wheel's own
+`RECORD` is verified, never a metadata-version allow-list.
+
 ## Artifact hub (tools / npm / docker / debian / model routing)
 
 The sidebar is grouped by ecosystem rather than listed flat, so the server can
@@ -634,7 +677,8 @@ flat convention: `@scope/name` loses the scope, exactly as the public registry
 serves it) and the dist-tags are recorded in `NPM_DIR/publish.json`, which is
 what makes `npm publish --tag next` resolve. A version that already exists is
 refused with `409` — published versions are immutable — unless the deployment
-sets `overwrite=true`, the same switch twine uploads read. The permission is
+sets `STORAGE__ON_DUPLICATE=overwrite`, the same mode twine uploads read. The
+permission is
 `npm:publish`, held by `authenticated` (like `package:write`) and revocable from
 `/access` without touching install permissions:
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json as _json
+import logging
 import re
 import tempfile
 from pathlib import Path
@@ -22,8 +23,10 @@ from index.base import store_digest
 from index.packages import normalize_package_name
 from openapi import api_operation, binary, errors, ref
 from schemas import FormatQuery, PyPIUploadForm, SimpleProjectPath
-from services.paths import contained
+from services.paths import contained, safe_name
 from services.validation import validate_file
+
+logger = logging.getLogger("cpypiserver.pypi")
 
 pypi_bp = APIBlueprint("pypi", __name__, doc_ui=False)
 
@@ -174,7 +177,15 @@ def serve_package_from_simple(package_name: str, filename: str):
         "PEP 625 filename), an archive-safety check plus a GuardDog malware scan "
         "of the extracted contents, and an optional ClamAV scan. SHA-256 is "
         "computed while streaming to a temporary file, so the whole body is "
-        "never held in memory."
+        "never held in memory.\n\n"
+        "`twine 6.2.0` removed `--skip-existing` for every index that is not "
+        "PyPI or TestPyPI and now refuses the flag before contacting the server. "
+        "Set `STORAGE__ON_DUPLICATE=skip` for the equivalent: an upload whose "
+        "filename is already stored answers `200 Success` without replacing the "
+        "stored file, so a republished `dist/*` stays idempotent. In the default "
+        "`conflict` mode a duplicate keeps the historical answers, `400` with "
+        "\"already exists\" for twine (the text its `--skip-existing` matched up "
+        "to 6.1) and `409` for other clients; `overwrite` replaces the file."
     ),
     tags=["Upload"],
     # The contract below is the whole twine wire format; `schemas.PyPIUploadForm`
@@ -207,7 +218,10 @@ def serve_package_from_simple(package_name: str, filename: str):
     },
     responses={
         "200": {
-            "description": "The file was stored",
+            "description": (
+                "The file was stored, or skipped because it already exists and "
+                "`STORAGE__ON_DUPLICATE=skip`"
+            ),
             "content": {"text/plain": {"schema": {"type": "string"}, "example": "Success"}},
         },
         **errors("400", "401", "409", "413"),
@@ -231,6 +245,22 @@ def upload(form: PyPIUploadForm):
     # the binding only proves the part exists.
     if not file.filename:
         raise BadRequestError("No file selected")
+    # Decide an already-stored destination *before* validation, not after
+    # streaming.  A skipped upload stores nothing, so it does not need the
+    # archive/malware scan, and a scanner's verdict (or an allow-list edit made
+    # since the first upload) must not turn the no-op into a failure.  `safe_name`
+    # is the primitive `validate_file` applies first, so this is the basename that
+    # would otherwise be stored.
+    try:
+        existing_name = safe_name(file.filename)
+    except ValueError:
+        raise BadRequestError("Invalid filename") from None
+    if (
+        contained(settings.storage.packages_dir, existing_name).exists()
+        and not settings.storage.allows_overwrite
+    ):
+        return _existing_upload_response(existing_name)
+
     is_valid, result = validate_file(file, file.filename)
     if not is_valid:
         raise BadRequestError(result)
@@ -252,18 +282,18 @@ def upload(form: PyPIUploadForm):
             digester.update(chunk)
             tmp.write(chunk)
     try:
-        if dest.exists() and not settings.storage.overwrite:
-            # twine 1.7.0+ expects HTTP 400 to match pypi.org compatibility;
-            # other clients (pip, setuptools) get the standard 409 Conflict.
-            ua = request.headers.get("User-Agent", "")
-            if "twine" in ua:
-                raise BadRequestError("Package already exists (set overwrite=1 to allow)")
-            raise UploadConflictError(safe_filename)
+        # The `overwrite` mode was off when this upload started, but another
+        # request may have stored the filename while the body streamed; `rename`
+        # would replace it silently, so the decision is taken again on the final
+        # path.
+        if dest.exists() and not settings.storage.allows_overwrite:
+            return _existing_upload_response(safe_filename)
         tmp_path.rename(dest)
         store_digest(dest, digester.hexdigest())
-    except Exception:
+    finally:
+        # Also runs on the success path, where the rename has already consumed
+        # the temp file; `missing_ok` makes that the no-op it is.
         tmp_path.unlink(missing_ok=True)
-        raise
     _record_upload(safe_filename)
     return Response("Success", status=200)
 
@@ -317,3 +347,35 @@ def _record_upload(filename: str) -> None:
         mgr = current_app.extensions.get("api_key_manager")
         if mgr: mgr.record_upload(kid, _extract_pkg(filename))
     except Exception: pass
+
+
+def _existing_upload_response(safe_filename: str) -> Response:
+    """Answer an upload whose filename is already stored (``overwrite`` mode off).
+
+    This is the ``conflict`` / ``skip`` half of :attr:`StorageConfig.on_duplicate`
+    — the caller only gets here when the mode is not ``overwrite``.
+
+    ``twine 6.2.0`` removed ``--skip-existing`` for indexes other than PyPI and
+    TestPyPI, and rejects the flag *client-side* before a request is sent, so a
+    server cannot intercept it.  The equivalent lives here instead: in ``skip``
+    mode an existing filename is a successful no-op that leaves the stored file
+    (and its ``.sha256`` sidecar) untouched.  The reply is the same ``200
+    Success`` a fresh upload gets, because that is what a client which can no
+    longer send the flag must see to treat the republish as done.
+
+    In the default ``conflict`` mode the historical contract is kept, and it has
+    to be: ``400`` with "already exists" is what pypi.org returns and what twine
+    up to 6.1 matched (case-insensitively) to implement ``--skip-existing``
+    against a self-hosted index, while every other client gets the standard
+    ``409 Conflict``.
+    """
+    if settings.storage.skips_existing:
+        logger.info("upload: %s already exists, skipped", safe_filename)
+        return Response("Success", status=200)
+    ua = request.headers.get("User-Agent", "")
+    conflict_message = (
+        "Package already exists (set STORAGE__ON_DUPLICATE=overwrite to allow)"
+    )
+    if "twine" in ua:
+        raise BadRequestError(conflict_message)
+    raise UploadConflictError(safe_filename)

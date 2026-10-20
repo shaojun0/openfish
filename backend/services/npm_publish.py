@@ -37,8 +37,9 @@ The dist-tag sidecar exists because the registry's normal read path derives
 resolve — ``next`` would silently become "whatever version sorts last".
 
 An already-published version is refused (:class:`errors.PublishConflictError`,
-``409``) because a published version is immutable; ``overwrite=true`` in the
-deployment config relaxes that to match the twine upload path.
+``409``) because a published version is immutable;
+``STORAGE__ON_DUPLICATE=overwrite`` in the deployment config relaxes that to
+match the twine upload path.
 """
 
 from __future__ import annotations

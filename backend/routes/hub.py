@@ -469,7 +469,7 @@ def tools_catalog():
         "extension. The names the catalog scanner hides as metadata "
         "(`catalog.json`, README/LICENSE/CHANGELOG) are refused too, because a "
         "file it would not list could not be reported back. An existing file "
-        "answers `409` unless `STORAGE__OVERWRITE=true`; a body above "
+        "answers `409` unless `STORAGE__ON_DUPLICATE=overwrite`; a body above "
         "`MAX_CONTENT_LENGTH` answers `413`. The response is the stored entry in "
         "exactly the shape `GET /api/v1/tools` reports.\n\n"
         "Requires `tool:upload`, which by default only the built-in admin role "
@@ -520,9 +520,9 @@ def upload_tool(form: ToolUploadForm):
     # The address is the row's `path`, not the object key (which is a fresh
     # uuid every time), so the "already exists" check has to be here.
     existing = tool_catalog.find(Session, path)
-    if existing is not None and not settings.storage.overwrite:
+    if existing is not None and not settings.storage.allows_overwrite:
         raise PypiError(
-            f"{upload.filename} 已存在；如需覆盖请设置 STORAGE__OVERWRITE=true",
+            f"{upload.filename} 已存在；如需覆盖请设置 STORAGE__ON_DUPLICATE=overwrite",
             status_code=409,
         )
     content_type = (

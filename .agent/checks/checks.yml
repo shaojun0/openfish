@@ -127,3 +127,19 @@ checks:
     command: python .agent/checks/check_session_identity_cache.py
     timeout: 120
     validated: false
+  - id: pypi-skip-existing
+    # twine 6.2.0 removed `--skip-existing` for every index that is not PyPI or
+    # TestPyPI and rejects the flag in the client, so a self-hosted index cannot
+    # intercept it; `STORAGE__ON_DUPLICATE=skip` is the server-side equivalent.
+    # Drives the real upload endpoint with the multipart form twine 6.2.0 sends
+    # (no `md5_digest`): a fresh upload stores the file; the default `conflict`
+    # mode keeps `400` + "already exists" for twine (what twine <= 6.1 matched)
+    # and `409` for other clients; `skip` makes the duplicate a `200` with the
+    # stored file, its `.sha256` sidecar and its inode untouched and no temp file
+    # left behind; `overwrite` replaces the bytes and refreshes the sidecar.
+    # Also checks that the two deprecated booleans fold into the mode and that a
+    # contradictory combination is refused.  Temp dirs and a throwaway SQLite
+    # database only; same interpreter rule as above.
+    command: python .agent/checks/check_pypi_skip_existing.py
+    timeout: 120
+    validated: false

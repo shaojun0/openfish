@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from config.base import EnvSettings
 from config.paths import backend_path, catalog_path
@@ -26,10 +26,6 @@ class StorageConfig(EnvSettings):
     packages_dir: str = Field(
         default=backend_path("packages"),
         description="Path to the packages directory",
-    )
-    overwrite: bool = Field(
-        default=False,
-        description="Allow overwriting already-uploaded packages",
     )
     max_content_length: int = Field(
         default=100 * 1024 * 1024,
@@ -151,3 +147,81 @@ class StorageConfig(EnvSettings):
             "can share one bucket."
         ),
     )
+
+    # ── Duplicate policy (an existing filename) ─────────────────────
+    # One mode replaces the two historical booleans, so there is no "both on"
+    # state to define: `conflict` is the old "both switches off", `overwrite` is
+    # the old `OVERWRITE=true`, `skip` is the old `SKIP_EXISTING=true` (twine's
+    # `--skip-existing` semantics).  Read it through `allows_overwrite` /
+    # `skips_existing`, never by comparing the string at each call site.
+    on_duplicate: Literal["conflict", "overwrite", "skip"] = Field(
+        default="conflict",
+        description=(
+            "What an upload does when the target filename already exists. "
+            "`conflict` (the default) refuses it — `400` + \"already exists\" for "
+            "twine, `409` for every other client; that is the historical answer "
+            "with both old switches off. "
+            "`overwrite` replaces the stored file — the old "
+            "`STORAGE__OVERWRITE=true`, and the switch the npm / tools / docker / "
+            "debian upload endpoints read. "
+            "`skip` treats the upload as a successful no-op that writes nothing — "
+            "the old `STORAGE__SKIP_EXISTING=true`, and the server-side "
+            "equivalent of twine's `--skip-existing`, which twine 6.2.0 removed "
+            "for indexes other than PyPI/TestPyPI. `skip` applies to the PyPI "
+            "upload endpoint; the artifact catalogs have no skip protocol, so a "
+            "duplicate there still answers `409` unless the mode is `overwrite`."
+        ),
+    )
+    # Deprecated input-only aliases: they keep a deployment that already sets
+    # `OVERWRITE` (the compose variable) or `STORAGE__SKIP_EXISTING` working.
+    # Folded into `on_duplicate` below and deliberately excluded from dumps;
+    # new code must use `allows_overwrite` / `skips_existing`.
+    overwrite: bool | None = Field(
+        default=None,
+        exclude=True,
+        description="Deprecated: `true` means `on_duplicate=overwrite`.",
+    )
+    skip_existing: bool | None = Field(
+        default=None,
+        exclude=True,
+        description="Deprecated: `true` means `on_duplicate=skip`.",
+    )
+
+    @model_validator(mode="after")
+    def _fold_deprecated_duplicate_switches(self) -> "StorageConfig":
+        """Translate the two old booleans into the single mode.
+
+        Only an explicit `true` folds; `false` is the old default and stays a
+        no-op.  A legacy switch combined with a non-default `on_duplicate` is
+        contradictory, so it fails at start-up instead of silently picking one.
+        """
+        legacy = (
+            "overwrite" if self.overwrite
+            else "skip" if self.skip_existing
+            else None
+        )
+        if legacy is None:
+            return self
+        # A validated instance is re-validated by the settings tree (the default
+        # `StorageConfig()` is also read by `Settings`), so folding must be
+        # idempotent or the second pass would mistake its own result for a
+        # contradiction.
+        if self.on_duplicate == legacy:
+            return self
+        if self.on_duplicate != "conflict":
+            raise ValueError(
+                "set STORAGE__ON_DUPLICATE or the deprecated "
+                "STORAGE__OVERWRITE / STORAGE__SKIP_EXISTING switches, not both"
+            )
+        self.on_duplicate = legacy
+        return self
+
+    @property
+    def allows_overwrite(self) -> bool:
+        """`overwrite` mode: replace an existing file instead of refusing it."""
+        return self.on_duplicate == "overwrite"
+
+    @property
+    def skips_existing(self) -> bool:
+        """`skip` mode: an existing file is a successful no-op (PyPI upload)."""
+        return self.on_duplicate == "skip"

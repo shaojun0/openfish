@@ -195,19 +195,22 @@ def save(
     """Stream one multipart *upload* onto *key* in *store*; return the bytes written.
 
     An existing object is refused with ``409`` unless
-    :attr:`config.StorageConfig.overwrite` is true (*overwrite* overrides the
-    setting for a caller that knows better).  The read is chunked and capped at
-    :attr:`config.StorageConfig.max_content_length`; the write goes through the
-    store's atomic put, so a reader never sees a half-written artifact.
+    :attr:`config.StorageConfig.on_duplicate` is ``overwrite`` (*overwrite*
+    overrides the setting for a caller that knows better).  The read is chunked
+    and capped at :attr:`config.StorageConfig.max_content_length`; the write goes
+    through the store's atomic put, so a reader never sees a half-written
+    artifact.
     """
     name = key.rsplit("/", 1)[-1]
     existing = store.stat(key)
     if existing is not None and existing.is_dir:
         raise BadRequestError(f"{name} 已是一个目录，无法作为文件写入")
-    allow_overwrite = settings.storage.overwrite if overwrite is None else overwrite
+    allow_overwrite = (
+        settings.storage.allows_overwrite if overwrite is None else overwrite
+    )
     if existing is not None and not allow_overwrite:
         raise PypiError(
-            f"{name} 已存在；如需覆盖请设置 STORAGE__OVERWRITE=true",
+            f"{name} 已存在；如需覆盖请设置 STORAGE__ON_DUPLICATE=overwrite",
             status_code=409,
         )
     return store.put(

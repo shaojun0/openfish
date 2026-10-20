@@ -343,7 +343,7 @@ export default {
     chooseFile: 'Choose file',
     needFile: 'Choose a file to upload first',
     uploadHint:
-      'Scripts, binaries, archives and config files are accepted. The filename must be a single path segment and cannot start with a dot. An existing file is refused unless the server has STORAGE__OVERWRITE enabled.',
+      'Scripts, binaries, archives and config files are accepted. The filename must be a single path segment and cannot start with a dot. An existing file is refused unless the server sets STORAGE__ON_DUPLICATE=overwrite.',
     uploaded: 'Uploaded “{name}”',
     uploadFailed: 'Failed to upload the tool',
   },
@@ -407,7 +407,7 @@ export default {
     chooseFile: 'Choose file',
     needFile: 'Choose a file to upload first',
     uploadHint:
-      'A `docker save` image tarball (.tar/.tar.gz/.tgz), a compose file (.yml/.yaml), or a Dockerfile (Dockerfile, Dockerfile.*, *.dockerfile) is accepted. An existing file is refused unless the server has STORAGE__OVERWRITE enabled.',
+      'A `docker save` image tarball (.tar/.tar.gz/.tgz), a compose file (.yml/.yaml), or a Dockerfile (Dockerfile, Dockerfile.*, *.dockerfile) is accepted. An existing file is refused unless the server sets STORAGE__ON_DUPLICATE=overwrite.',
     uploaded: 'Uploaded “{name}”',
     uploadFailed: 'Failed to upload the Docker artifact',
   },

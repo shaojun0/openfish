@@ -25,6 +25,10 @@ twine upload --repository-url http://<server>/simple/ dist/*
 
 上传需要 `package:write` 权限。
 
+> twine 6.2 起不再支持非 PyPI 索引的 `--skip-existing`（客户端直接报错），
+> 重传时要去掉该参数；需要「已存在就跳过」时，把服务端 `STORAGE__ON_DUPLICATE`
+> 设为 `skip`（默认 `conflict` 对重复文件回 `400 already exists`，`overwrite` 覆盖）。
+
 ## 预编译解释器
 
 `python-build-standalone` 镜像让离线机器也能安装 CPython：

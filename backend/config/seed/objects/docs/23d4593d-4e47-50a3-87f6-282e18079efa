@@ -53,7 +53,7 @@ npm publish --tag next   # 发布到 next 标签，之后 npm install pkg@next �
 
 已存在的版本会被拒绝（`409`，已发布版本不可变）；极少数情况下需要在
 服务端放开覆盖，可把 `backend/.env`（或 compose 的 `.env`）中的
-`OVERWRITE=true` 打开——这与 twine 上传共用同一个开关。
+`ON_DUPLICATE=overwrite` 打开——这与 twine 上传共用同一个模式。
 
 > 该接口是**写**接口，只影响 npm 目录；Docker、Debian、Python 的上传
 > 能力各自独立，权限点也分开，便于按需收口。

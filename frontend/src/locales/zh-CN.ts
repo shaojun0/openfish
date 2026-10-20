@@ -333,7 +333,7 @@ export default {
     chooseFile: '选择文件',
     needFile: '请先选择要上传的文件',
     uploadHint:
-      '支持脚本、二进制、压缩包与配置文件；文件名不能包含路径分隔符，也不能以点开头。已存在的文件会被拒绝，除非服务端开启 STORAGE__OVERWRITE。',
+      '支持脚本、二进制、压缩包与配置文件；文件名不能包含路径分隔符，也不能以点开头。已存在的文件会被拒绝，除非服务端把 STORAGE__ON_DUPLICATE 设为 overwrite。',
     uploaded: '已上传「{name}」',
     uploadFailed: '上传工具失败',
   },
@@ -395,7 +395,7 @@ export default {
     chooseFile: '选择文件',
     needFile: '请先选择要上传的文件',
     uploadHint:
-      '支持 docker save 镜像 tar（.tar/.tar.gz/.tgz）、compose 文件（.yml/.yaml）以及 Dockerfile（Dockerfile、Dockerfile.*、*.dockerfile）。已存在的文件会被拒绝，除非服务端开启 STORAGE__OVERWRITE。',
+      '支持 docker save 镜像 tar（.tar/.tar.gz/.tgz）、compose 文件（.yml/.yaml）以及 Dockerfile（Dockerfile、Dockerfile.*、*.dockerfile）。已存在的文件会被拒绝，除非服务端把 STORAGE__ON_DUPLICATE 设为 overwrite。',
     uploaded: '已上传「{name}」',
     uploadFailed: '上传 Docker 制品失败',
   },

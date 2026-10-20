@@ -479,8 +479,9 @@ def npm_version(package: str, version: str):
         "it), and the dist-tags are recorded so `npm publish --tag next` keeps "
         "resolving.\n\n"
         "A version that already exists is refused with `409` — a published "
-        "version is immutable — unless the deployment sets `overwrite=true`, the "
-        "same switch the twine upload path reads."
+        "version is immutable — unless the deployment sets "
+        "`STORAGE__ON_DUPLICATE=overwrite`, the same mode the twine upload path "
+        "reads."
     ),
     tags=["npm"],
     parameters=[_PACKAGE_PARAM],
@@ -504,7 +505,7 @@ def npm_publish(body: NpmPublishDocument, package: str):
         settings.hub.npm_dir,
         body.model_dump(by_alias=True),
         path_name=package,
-        overwrite=settings.storage.overwrite,
+        overwrite=settings.storage.allows_overwrite,
         publisher=settings.server.server_name,
     )
     return jsonify({
