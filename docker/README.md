@@ -376,6 +376,16 @@ docker compose logs --tail=100 backend forgejo
   兑换请求慢，属于网络/4A 侧，不是本服务或数据库；本版本给这个请求加了
   `timeout=(5, 60)`，避免 4A 挂死时无限占住 worker 线程。
 
+- **登录态失效时只弹出浏览器原生 Basic 输入框，没有跳 4A**：这是 `/api/v1/*` 的
+  401 带了 `WWW-Authenticate: Basic`，浏览器把它当成 HTTP Basic 挑战；Chromium 下
+  这类 XHR 还可能一直不结算，SPA 的 401 拦截器就执行不到 `/auth/login`。SPA 的
+  axios 请求现在统一带 `X-OpenFish-Spa: 1`，后端只对这类请求返回**不带 challenge
+  的 401**，浏览器随后按拦截器跳 `/auth/login` → 4A；pip / npm / docker / twine
+  不带该头，仍保留它们需要的 Basic 挑战。若这个弹窗仍出现，先看 401 的响应体：
+  Flask 返回 `{"error": "Authentication required — …"}`，反代（nginx）返回
+  `<html>401 Authorization Required</html>`——后者要改反代，把 `/auth` `/device`
+  `/api` 从 `auth_basic` 豁免。
+
 ## 6. PostgreSQL：切换与数据迁移
 
 `db` 服务在 `profile: db` 下，**只起容器不会改变后端行为**；真正的开关是 `DATABASE_URL`。

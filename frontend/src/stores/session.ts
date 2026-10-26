@@ -26,6 +26,13 @@ export const useSessionStore = defineStore('session', () => {
   const MAX_RETRIES = 5
   let retries = 0
 
+  // App.vue, the router guard and HomeView all ask for the identity during
+  // boot.  They share one request: a second `/api/v1/session` issued while the
+  // first is still in flight used to return immediately, so a caller could read
+  // an empty permission set (or fire a guarded API) before the identity was
+  // known.  Every caller now awaits the same promise.
+  let inflight: Promise<void> | null = null
+
   const loaded = computed(() => info.value !== null)
   const authenticated = computed(() => info.value?.authenticated ?? false)
   const user = computed(() => info.value?.user ?? null)
@@ -42,29 +49,37 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   async function load(force = false): Promise<void> {
-    if (loading.value) return
+    if (inflight) return inflight
     if (loaded.value && !force) return
-    loading.value = true
-    error.value = null
+    const run = (async () => {
+      loading.value = true
+      error.value = null
+      try {
+        const data = await fetchSession()
+        info.value = data
+        retries = 0
+        setAuthEnabled(data.auth_enabled)
+        // Order matters: `redirectToLogin()` reads the flag set on the line above.
+        if (data.auth_enabled && !data.authenticated) {
+          redirectToLogin()
+        }
+      } catch (e) {
+        error.value = e instanceof Error ? e.message : String(e)
+        if (info.value === null && retries < MAX_RETRIES) {
+          retries += 1
+          setTimeout(() => {
+            void load()
+          }, RETRY_DELAY_MS)
+        }
+      } finally {
+        loading.value = false
+      }
+    })()
+    inflight = run
     try {
-      const data = await fetchSession()
-      info.value = data
-      retries = 0
-      setAuthEnabled(data.auth_enabled)
-      // Order matters: `redirectToLogin()` reads the flag set on the line above.
-      if (data.auth_enabled && !data.authenticated) {
-        redirectToLogin()
-      }
-    } catch (e) {
-      error.value = e instanceof Error ? e.message : String(e)
-      if (info.value === null && retries < MAX_RETRIES) {
-        retries += 1
-        setTimeout(() => {
-          void load()
-        }, RETRY_DELAY_MS)
-      }
+      await run
     } finally {
-      loading.value = false
+      if (inflight === run) inflight = null
     }
   }
 
