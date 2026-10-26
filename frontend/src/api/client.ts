@@ -59,6 +59,14 @@ export const apiClient = axios.create({
   timeout: 30_000,
 })
 
+// Mark every console request so the backend answers a 401 without a
+// `WWW-Authenticate: Basic` challenge.  A challenge here opens the browser's
+// native credential dialog (and can keep the XHR from settling), so the 401
+// interceptor below never sends the browser to /auth/login — the OAuth2 round
+// trip the deployment expects.  Machine clients do not send this header, so
+// pip/npm/docker/twine keep the challenge they need.
+apiClient.defaults.headers.common['X-OpenFish-Spa'] = '1'
+
 /** Shape returned by the Flask error handlers. */
 export interface ApiErrorBody {
   error?: string

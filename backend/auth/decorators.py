@@ -120,15 +120,29 @@ def _authenticate(allowed: list[str]) -> bool:
     return ok
 
 
+#: Header the SPA's axios client puts on every API request.  A 401 meant for
+#: the console must not carry a Basic challenge: Chromium answers one with its
+#: native credential dialog, and while that challenge is outstanding the XHR can
+#: sit without ever firing ``loadend`` — so the SPA's 401 interceptor never runs
+#: ``redirectToLogin()`` and the browser shows the Basic prompt instead of the
+#: configured OAuth2/4A round trip.  Machine clients (pip, npm, docker, twine)
+#: do not send this header and keep the challenge they need to pick a scheme.
+SPA_REQUEST_HEADER = "X-OpenFish-Spa"
+
+
 def _unauthorized(allowed: list[str]) -> UnauthorizedError:
-    # Carry a Basic challenge unconditionally.  Package managers and container
-    # clients only send credentials after a 401 tells them which scheme to use;
-    # npm and docker both answer a bare 401 by giving up.  The browser-facing
-    # redirect for the SPA is chosen by the error handler, which reads this
-    # challenge only when it is not answering a machine client.
+    # Package managers and container clients only send credentials after a 401
+    # tells them which scheme to use; npm and docker both answer a bare 401 by
+    # giving up.  The SPA is the one caller that must *not* see the challenge:
+    # it handles 401 itself by navigating to the login route.
+    challenge = (
+        None
+        if request.headers.get(SPA_REQUEST_HEADER) == "1"
+        else 'Basic realm="cpypiserver"'
+    )
     return UnauthorizedError(
         message=f"Authentication required — allowed: {', '.join(allowed)}",
-        www_authenticate='Basic realm="cpypiserver"',
+        www_authenticate=challenge,
     )
 
 

@@ -99,8 +99,11 @@ const shortcuts = computed(() => [
 ])
 
 async function load(): Promise<void> {
-  // No session gate: the counters need nothing but `package:read`, and waiting
-  // for the identity is what made a cold `/api/v1/session` hold the cards.
+  // Called only after the identity is resolved (see `onMounted`): the counters
+  // need `package:read`, so a guarded request fired while `/api/v1/session` is
+  // still in flight would race the login redirect.  Once the session says
+  // nobody is signed in, the browser is already on its way to `/auth/login` and
+  // there is nothing to load.
   loading.value = !stats.value
   try {
     stats.value = await fetchStatsOverview()
@@ -146,7 +149,15 @@ async function loadAdminCounters(): Promise<void> {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
+  // Wait for the identity before the first guarded request.  On a deployment
+  // with an identity provider (4A/OAuth2), a guarded API called while
+  // `/api/v1/session` is still in flight can 401; that used to race the login
+  // redirect and could leave the browser on the anonymous shell.  If the
+  // session resolves anonymously the store has already started the `/auth/login`
+  // navigation, so there is nothing left to fetch.
+  await session.load()
+  if (session.authEnabled && !session.authenticated && !session.error) return
   void load()
 })
 

@@ -143,3 +143,18 @@ checks:
     command: python .agent/checks/check_pypi_skip_existing.py
     timeout: 120
     validated: false
+  - id: spa-401-challenge
+    # A 401 to the SPA must not carry `WWW-Authenticate: Basic`.  Chromium
+    # answers the challenge with its native credential dialog and can leave the
+    # XHR without `loadend`, so the SPA's 401 interceptor never runs and an
+    # expired session shows the Basic prompt instead of the OAuth2/4A redirect.
+    # `_unauthorized()` used to attach the challenge unconditionally; the SPA
+    # now marks its requests with `X-OpenFish-Spa: 1` and gets a challenge-free
+    # 401, while pip/npm/docker/twine keep the challenge they need.  Drives the
+    # real app with temp dirs (OAuth2 authorize URL and Basic both configured):
+    # machine-client 401s still challenge, SPA 401s do not, `/api/v1/session`
+    # stays 200 anonymous, and `/auth/login` + browser navigations still 302 to
+    # the identity provider.  Also asserts the frontend still sends the marker.
+    command: python .agent/checks/check_spa_401_challenge.py
+    timeout: 120
+    validated: false
